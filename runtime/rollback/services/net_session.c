@@ -360,16 +360,18 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * (online play off, lobby or LAN mode) is a local fight, untouched, like a room fight; the online rollback match comes from
      * a Local Wireless room's match (R3 lwr) or a room code (host / join). SSBU_RB_NET_FIND=1: the lobby search (test). */
     {   const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
-        if (!lwr /* (R3 lwr: a room match) */ && mode != 2 /* NET_MODE_HOST */ && mode != 3 /* NET_MODE_JOIN */ && !(e && e[0] == '1') && !net_arena_turn() /* (arena: this player's turn) */) {
+        if (!lwr /* (R3 lwr: a room match) */ && mode != 2 /* NET_MODE_HOST */ && mode != 3 /* NET_MODE_JOIN */ && !(e && e[0] == '1') && !net_arena_queued() /* (arena / room: in its queue: the match waits for the turn) */) {
             InterlockedExchange(&g_hs_room, 1);
             printf("[rbnet] handshake %ld: no room code: a local fight, played as without rollback\n", (long)round);
             fflush(stdout);
             return 0;
         } }
-    int find = 0, phase = 1;
+    int find = 0, phase = 1, ar_wait = 0;
     {   int nnldn_role(void); const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
-        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && ((e && e[0] == '1') || net_arena_turn());     /* (lobby 1.6: the arena's turn searches by itself) */
-        if (find) { phase = 0; net_match_find_rb(); } }
+        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && ((e && e[0] == '1') || net_arena_queued());     /* (lobby 1.6: the arena's turn searches by itself) */
+        /* (room, 2026-10-30) in the room's queue but not its turn yet: the match waits here, with no time limit, and searches
+         * the moment the turn comes (the loser of the match on goes to the back): the players only press start and wait */
+        if (find) { phase = 0; if (net_arena_queued() && !net_arena_turn()) ar_wait = 1; else net_match_find_rb(); } }
     double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 120000.0;
     if (lwr) limit = getenv("SSBU_RB_NET_ROOM_WAIT") ? atof(getenv("SSBU_RB_NET_ROOM_WAIT")) * 1000.0 : 10000.0;     /* (R3 lwr) both games are at this set-up together */
     uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0;
@@ -389,9 +391,13 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     for (;;) {
         uint64_t now = GetTickCount64();
         if (g_hs_refused) break;
-        if ((double)(now - t0) > limit) { snprintf(g_hs_why, sizeof g_hs_why, phase ? "no answer from the other player after %.0f s" : "no opponent found in %.0f s", limit / 1000.0); break; }
+        if (ar_wait) {                                  /* (room) waiting for the turn */
+            if (!net_arena_queued()) { snprintf(g_hs_why, sizeof g_hs_why, "you are not in the room's queue any more"); break; }
+            if (net_arena_turn()) { ar_wait = 0; t0 = now; net_match_find_rb(); printf("[rbnet] handshake %ld: the room's turn came: asking the lobby for the opponent of the turn\n", (long)round); fflush(stdout); }
+        }
+        if (!ar_wait && (double)(now - t0) > limit) { snprintf(g_hs_why, sizeof g_hs_why, phase ? "no answer from the other player after %.0f s" : "no opponent found in %.0f s", limit / 1000.0); break; }
         if (hs_stop_pressed((double)(now - t0))) { snprintf(g_hs_why, sizeof g_hs_why, "stopped waiting (Esc / B) after %.0f s", (now - t0) / 1000.0); stopped = 1; break; }
-        if (phase == 0) {                               /* (R3 net3) the lobby's opponent search */
+        if (phase == 0 && !ar_wait) {                   /* (R3 net3) the lobby's opponent search */
             net_match_get(&mm);
             if (mm.kind == 2 && (mm.state == MM_MATCHED || mm.state == MM_TOGETHER) && mm.peer) {
                 int want = mm.role == MM_ROLE_JOIN;
@@ -445,12 +451,22 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             last_note = now; notes++;
             char t[400]; double w = (now - t0) / 1000.0;
             char line[200];
-            if (phase == 0) snprintf(line, sizeof line, !net_rb_ready() ? "Online match: connecting to the lobby..." : mm.searching > 0 ? "Online match: finding an opponent (%d of %d players of your version searching)..." : "Online match: finding an opponent...", mm.searching, mm.players);
+            NetArena ra; if (find) net_arena_get(&ra); else memset(&ra, 0, sizeof ra);
+            if (ar_wait) {                               /* (room) what the player sees while it waits for the turn */
+                char now_on[120] = "";
+                if (ra.has_match) snprintf(now_on, sizeof now_on, "\nNow playing: %s vs %s.", ra.match[0].name, ra.match[1].name);
+                snprintf(t, sizeof t, "%s's room: waiting for your turn (place %d in the queue).%s\nKeep this screen: your match starts by itself when it is your turn.\nPress Esc or hold B to stop waiting.",
+                         ra.host[0] ? ra.host : "The", ra.place, now_on);
+                menu_notice(t);
+            } else {
+            if (phase == 0 && ra.known && ra.status != NET_ARENA_OUT) snprintf(line, sizeof line, "Your turn in the room: starting your match against %s...", ra.opponent);
+            else if (phase == 0) snprintf(line, sizeof line, !net_rb_ready() ? "Online match: connecting to the lobby..." : mm.searching > 0 ? "Online match: finding an opponent (%d of %d players of your version searching)..." : "Online match: finding an opponent...", mm.searching, mm.players);
             else if (lwr) snprintf(line, sizeof line, "Room match: agreeing on a rollback match with the other player...");
             else if (find) snprintf(line, sizeof line, g_hs_peer_nonce ? "Online match with %s: agreeing on the match..." : "Online match: opponent found (%s), waiting for their game...", mm.peer_name);
             else snprintf(line, sizeof line, "%s", !net_rb_ready() ? "Not connected to the other player's game yet (lobby / room not joined)." : net_rb_no_destination() && !g_hs_peer_nonce ? "The other player is not in your Local Wireless room: both players must be in the same room." : g_hs_peer_nonce ? "The other player is here: agreeing on the match..." : "Waiting for the other player to choose a fighter and start...");
             snprintf(t, sizeof t, "%s\nWaiting %.0f s (this game gives up after %.0f s and goes back to the character select).\nPress Esc or hold B to stop waiting.", line, w, limit / 1000.0);
             menu_notice(t);
+            }
         }
         {   long long p = nvn_front_presents();
             if (p != presents) { presents = p; presents_at = now; }

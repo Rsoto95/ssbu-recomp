@@ -38,3 +38,7 @@ void net_ladder_result(const NetLadderResult *r) { (void)r; }
 void net_arena_get(NetArena *o) { memset(o, 0, sizeof *o); }            /* (arena: nothing without online play) */
 void net_arena_join(int in) { (void)in; }
 int net_arena_turn(void) { return 0; }
+int net_arena_queued(void) { return 0; }
+void net_arena_create(void) {}
+void net_arena_close(void) {}
+void net_arena_kick(const char *name) { (void)name; }

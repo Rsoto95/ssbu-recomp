@@ -1449,41 +1449,71 @@ static void sec_arena(void) {
     NetStats ns;
     net_stats_get(&ns);
     if (ns.state != NET_CONNECTED) { help("Not connected to a lobby. Online play: F1 > Online (the arena needs a lobby: a lobby server or Same network)."); return; }
-    if (!a.known) { ImGui::TextDisabled("Asking the lobby..."); help("No answer after a few seconds: the lobby server is an older version without the arena (lobby 1.6 or newer)."); return; }
+    if (!a.known && !a.making) { ImGui::TextDisabled("Asking the lobby..."); help("No answer after a few seconds: the lobby is an older version without rooms. Everyone: close the game and open Play SSBU.bat (it updates by itself)."); return; }
     float bw = ImGui::GetFontSize() * 12;
+    const ImVec4 head(1.0f, 0.55f, 0.35f, 1.0f);
+    /* (room, 2026-10-30) the steps, always on top: the players must manage alone (owner) */
+    ImGui::TextColored(head, "How it works (take turns, the winner stays)");
+    ImGui::TextWrapped("1. One player presses Create a room below (the one with the best internet: their PC carries everyone's connection).");
+    ImGui::TextWrapped("2. Everyone else presses Join the queue.");
+    ImGui::TextWrapped("3. Close F1 (press F1), go to Smash, choose your fighter and press start.");
+    ImGui::TextWrapped("4. Wait on that screen: your match starts by itself when it is your turn.");
+    ImGui::TextWrapped("5. Win: you stay and play the next one. Lose: you go to the back. Either way, press start again at the character select.");
+    ImGui::TextWrapped("6. To stop playing: Leave the queue. Only the host can close the room or remove someone.");
+    ImGui::Separator();
+    if (a.making && !a.has_room) {
+        ImGui::SetWindowFontScale(1.3f); ImGui::TextColored(amber, "Making your room..."); ImGui::SetWindowFontScale(1.0f);
+        help("A few seconds: your PC becomes the connection of everyone in the room, and the other players' games move to it.");
+        return;
+    }
+    if (!a.has_room) {
+        ImGui::SetWindowFontScale(1.3f); ImGui::Text("No room is open."); ImGui::SetWindowFontScale(1.0f);
+        if (ImGui::Button("Create a room##arena", ImVec2(bw, 0))) net_arena_create();
+        help("You become its host: your PC carries everyone's connection, the room has your name, and you can close it or remove a player. Only one room at a time.");
+        return;
+    }
     ImGui::SetWindowFontScale(1.3f);
+    ImGui::TextColored(head, "%s's room", a.is_host ? "Your" : a.host);
     switch (a.in ? a.status : NET_ARENA_OUT) {
-    case NET_ARENA_WAITING: ImGui::TextColored(amber, a.place == 1 ? "You are next." : "In the queue: place %d.", a.place); break;
+    case NET_ARENA_WAITING: ImGui::TextColored(amber, a.place == 1 ? "YOU ARE NEXT." : "In the queue: place %d of %d.", a.place, a.room_players); break;
     case NET_ARENA_TURN: ImGui::TextColored(green, "YOUR TURN against %s!", a.opponent); break;
     case NET_ARENA_PLAYING: ImGui::TextColored(green, "Playing against %s.", a.opponent); break;
-    default: ImGui::Text("You are not in the arena."); break;
+    default: ImGui::Text("You are not in the queue."); break;
     }
     ImGui::SetWindowFontScale(1.0f);
-    if (a.in && a.status == NET_ARENA_TURN) help("Go to Smash (versus), choose your fighter and start: the game finds your opponent by itself (a box over the game shows it). Rollback on.");
-    else if (a.in && a.status == NET_ARENA_WAITING) help("Wait for your turn: a message appears over the game when it comes. Do not start a Smash (versus) match before it.");
+    if (a.in && a.status == NET_ARENA_TURN) help("Close F1, go to Smash, choose your fighter and press start (within 2 minutes): the match starts by itself.");
+    else if (a.in && a.status == NET_ARENA_WAITING) help("Close F1, go to Smash, choose your fighter and press start, then wait on that screen: your match starts by itself when your turn comes.");
     if (a.in && a.streak) ImGui::TextColored(gold, "%d win%s in a row", a.streak, a.streak == 1 ? "" : "s");
     if (!a.in) { if (ImGui::Button("Join the queue##arena", ImVec2(bw, 0))) net_arena_join(1); }
-    else if (ImGui::Button("Leave the arena##arena", ImVec2(bw, 0))) net_arena_join(0);
+    else if (ImGui::Button("Leave the queue##arena", ImVec2(bw, 0))) net_arena_join(0);
+    if (a.is_host) { ImGui::SameLine(); if (ImGui::Button("Close the room##arena", ImVec2(bw, 0))) net_arena_close(); }
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "Match");
+    ImGui::TextColored(head, "Match");
     if (a.has_match) {
         ImGui::Text("%s", a.match[0].name);
         if (a.match[0].streak) { ImGui::SameLine(); ImGui::TextColored(gold, "(%d)", a.match[0].streak); }
         ImGui::SameLine(); ImGui::TextDisabled("vs"); ImGui::SameLine(); ImGui::Text("%s", a.match[1].name);
         if (a.match[1].streak) { ImGui::SameLine(); ImGui::TextColored(gold, "(%d)", a.match[1].streak); }
         ImGui::SameLine(); ImGui::TextDisabled(a.match_state == NET_ARENA_PLAYING ? "  playing" : "  starting");
-    } else ImGui::TextDisabled("No match: two players in the queue are needed.");
+        if (a.is_host) for (int k = 0; k < 2; k++) {
+            ImGui::PushID(100 + k);
+            if (ImGui::SmallButton("Remove")) net_arena_kick(a.match[k].name);
+            ImGui::SameLine(); ImGui::TextDisabled("%s", a.match[k].name);
+            ImGui::PopID();
+        }
+    } else ImGui::TextDisabled("No match yet: two players in the queue are needed.");
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "Queue (%d)", a.nqueue);
+    ImGui::TextColored(head, "Queue (%d)", a.nqueue);
     for (int i = 0; i < a.nqueue; i++) {
         ImGui::Text("%2d. %s", i + 1, a.queue[i].name);
         if (a.queue[i].streak) { ImGui::SameLine(); ImGui::TextColored(gold, "(%d)", a.queue[i].streak); }
+        if (a.is_host) { ImGui::SameLine(); ImGui::PushID(i); if (ImGui::SmallButton("Remove")) net_arena_kick(a.queue[i].name); ImGui::PopID(); }
     }
     if (!a.nqueue) ImGui::TextDisabled("Nobody waiting.");
     ImGui::Separator();
     char rule[200];
     if (a.streak_limit) snprintf(rule, sizeof rule, "The winner stays and plays the next in the queue; after %d wins in a row the winner goes to the back of the queue too. The loser goes to the back.", a.streak_limit);
-    else snprintf(rule, sizeof rule, "The winner stays and plays the next in the queue; the loser goes to the back.");
+    else snprintf(rule, sizeof rule, "The winner stays and plays the next in the queue (no limit); the loser goes to the back.");
     help(rule);
 }
 

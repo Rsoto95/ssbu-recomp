@@ -99,10 +99,19 @@ typedef struct {
     NetArenaEntry match[2];
     int nqueue;
     NetArenaEntry queue[16];
+    /* (room, 2026-10-30) a player makes the room and is its host (the lobby in its game in LAN mode); one room at a time */
+    int has_room, is_host, room_players;    /* a room is open, this player is its host, players in it (queue + match) */
+    char host[33];                          /* the host's name */
+    int why;                                /* why this player was last taken out: 0 none, 1 removed by the host, 2 the room closed, 3 turn not started */
+    int making;                             /* this game is making a room (becoming the network's lobby first) */
 } NetArena;
 void net_arena_get(NetArena *out);          /* never blocks; while it is called the state is asked for every second */
 void net_arena_join(int in);                /* 1 = into the queue, 0 = out of the arena */
 int net_arena_turn(void);                   /* 1 = this player's turn (or match) in the arena now */
+int net_arena_queued(void);                 /* 1 = in the room's queue, its turn or its match (a Smash match then waits for the turn) */
+void net_arena_create(void);                /* make a room and be its host (and in its queue) */
+void net_arena_close(void);                 /* the host closes its room */
+void net_arena_kick(const char *name);      /* the host removes a player from its room */
 #ifdef __cplusplus
 }
 #endif

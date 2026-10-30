@@ -1170,6 +1170,16 @@ static NetArena g_ar;                                   /* (g_ar_lock) the lobby
 static volatile LONG g_ar_in, g_ar_leave;               /* in the queue (op 1 every second); leaves left to send */
 static volatile LONG64 g_ar_watch;                      /* when F1 > Arena last asked (op 2 while it is shown) */
 static uint64_t g_ar_tx;                                /* (client thread) */
+/* (room, 2026-10-30) ARENA op 3 make a room, 4 close it, 5 remove a player (+ name[32]): sent a few times (UDP) by the client
+ * thread. Making a room in LAN mode first makes this game the network's lobby, with priority: its beacon carries 'R' and
+ * every other game (and the lobby before it) moves to it, so the host's PC carries everyone's connection. */
+static volatile LONG g_ar_op, g_ar_op_left;             /* the command to send, sends left */
+static char g_ar_kick[NAME_LEN + 1];
+static volatile LONG g_lan_room_want;                   /* make this game the network's lobby for a room (client thread) */
+static volatile LONG g_lan_room_prio;                   /* this game's lobby has (or is getting) a room: its beacon has priority */
+static volatile LONG g_ar_making;                       /* a room being made here (until the lobby says it is open) */
+static volatile LONG64 g_lan_lobby_id;                  /* (below: our own in-game lobby, 0 none) */
+static void ar_command(int op, int sends) { InterlockedExchange(&g_ar_op, op); InterlockedExchange(&g_ar_op_left, sends); g_ar_tx = 0; }
 void net_arena_join(int in) {
     if (!net_online()) return;
     InterlockedExchange(&g_ar_in, in ? 1 : 0);
@@ -1183,6 +1193,7 @@ void net_arena_get(NetArena *o) {
     *o = g_ar;
     ReleaseSRWLockShared(&g_ar_lock);
     o->in = (int)g_ar_in;
+    o->making = (int)g_ar_making;
     if (!g_joined) o->known = 0;
 }
 int net_arena_turn(void) {
@@ -1191,16 +1202,60 @@ int net_arena_turn(void) {
     ReleaseSRWLockShared(&g_ar_lock);
     return t;
 }
+int net_arena_queued(void) {
+    AcquireSRWLockShared(&g_ar_lock);
+    int q = g_ar_in && g_ar.known && g_ar.status != NET_ARENA_OUT;
+    ReleaseSRWLockShared(&g_ar_lock);
+    return q;
+}
+void net_arena_create(void) {
+    if (!net_online()) return;
+    InterlockedExchange(&g_ar_in, 1); InterlockedExchange(&g_ar_leave, 0);
+    InterlockedExchange(&g_ar_making, 1);
+    if (g_mode == NET_MODE_LAN && !g_lan_lobby_id) InterlockedExchange(&g_lan_room_want, 1);   /* (the client thread becomes the lobby first) */
+    else InterlockedExchange(&g_lan_room_prio, 1);
+    ar_command(3, 5);
+    say("arena: making a room");
+    menu_popup("Room", "Making your room...\nYour PC now carries the connection of everyone in it (a few seconds).");
+}
+void net_arena_close(void) { if (net_online()) { ar_command(4, 3); say("arena: closing the room"); } }
+void net_arena_kick(const char *name) {
+    if (!net_online() || !name || !name[0]) return;
+    snprintf(g_ar_kick, sizeof g_ar_kick, "%s", name);
+    ar_command(5, 3);
+    say("arena: removing %s from the room", name);
+}
 static void arena_send(int op) {                        /* (client thread) */
-    uint8_t p[4 + 8 + 1];
+    uint8_t p[4 + 8 + 1 + NAME_LEN];
+    int n = 13;
     hdr(p, T_ARENA);
     s64(p + 4, g_cookie);
     p[12] = (uint8_t)op;
-    tx(p, sizeof p, &g_lobby);
+    if (op == 5) { memset(p + 13, 0, NAME_LEN); memcpy(p + 13, g_ar_kick, strlen(g_ar_kick)); n += NAME_LEN; }
+    tx(p, n, &g_lobby);
 }
 static void arena_tick(uint64_t t) {                    /* (client thread, joined) */
     static int test = -1;                               /* TEST SWITCH SSBU_ARENA_TEST=1 (default off): into the queue by itself */
     if (test < 0) { const char *e = getenv("SSBU_ARENA_TEST"); test = e && e[0] == '1'; if (test) { say("arena: TEST: joining the queue by itself (SSBU_ARENA_TEST=1)"); net_arena_join(1); } }
+    {   static uint64_t made_at;                       /* TEST SWITCH SSBU_ROOM_TEST=<seconds> (default off): make a room that long after joining */
+        static double after = -2; if (after == -2) { const char *e = getenv("SSBU_ROOM_TEST"); after = e && *e ? atof(e) : -1; }
+        if (after >= 0 && !made_at) made_at = t + (uint64_t)(after * 1000);
+        if (after >= 0 && made_at > 1 && t >= made_at) { made_at = 1; say("arena: TEST: making a room (SSBU_ROOM_TEST)"); net_arena_create(); } }
+    {   static int told;                                /* (room) once a session, 3+ players on this network and no room: how to take turns */
+        if (!told && g_mode == NET_MODE_LAN && g_players >= 3 && !g_ar_in && !g_ar_making) {
+            AcquireSRWLockShared(&g_ar_lock); int known = g_ar.known, open = g_ar.has_room; char host[NAME_LEN + 1]; memcpy(host, g_ar.host, sizeof host); ReleaseSRWLockShared(&g_ar_lock);
+            if (!known) InterlockedExchange64(&g_ar_watch, (LONG64)t);       /* (ask the lobby once: is a room open?) */
+            else {
+                char m[300]; told = 1;
+                if (open) snprintf(m, sizeof m, "%s has a room open to take turns (the winner stays).\nTo play: F1 > Arena > Join the queue.", host);
+                else snprintf(m, sizeof m, "3 or more players online: you can take turns (the winner stays).\nOne player opens F1 > Arena > Create a room; the others: F1 > Arena > Join the queue.");
+                menu_popup("Room", m);
+            }
+        } }
+    if (g_ar_op_left > 0 && !g_lan_room_want) {        /* (a command: a few times, 300 ms apart) */
+        if (t - g_ar_tx >= 300) { arena_send((int)g_ar_op); g_ar_tx = t; InterlockedDecrement(&g_ar_op_left); }
+        return;
+    }
     if (g_ar_leave > 0) {
         if (t - g_ar_tx >= 300) { arena_send(0); g_ar_tx = t; InterlockedDecrement(&g_ar_leave); }
         return;
@@ -1232,22 +1287,59 @@ static void arena_state(const uint8_t *p, int n) {      /* (client thread) an AR
         int q = p[o++];
         for (int i = 0; i < q && i < 16 && o + NAME_LEN + 1 <= n; i++, o += NAME_LEN + 1) { arena_name(p + o, a.queue[i].name); a.queue[i].streak = p[o + NAME_LEN]; a.nqueue = i + 1; }
     }
+    if (o + 4 + NAME_LEN <= n && p[o] == 'H') {           /* (room) the host's block (net_minilobby.c ml_arena_send) */
+        a.has_room = p[o + 1] & 1; a.is_host = (p[o + 1] & 2) != 0;
+        arena_name(p + o + 2, a.host);
+        a.room_players = p[o + 2 + NAME_LEN]; a.why = p[o + 3 + NAME_LEN];
+    }
     AcquireSRWLockExclusive(&g_ar_lock);
+    NetArena old = g_ar;
     int was = g_ar.known ? g_ar.status : NET_ARENA_OUT;
     g_ar = a;
     ReleaseSRWLockExclusive(&g_ar_lock);
+    char t[400];
+    /* (room) the instructions the players see, at each change (2026-10-30, owner: "the users should be able to do it without help") */
+    if (a.has_room && a.is_host && g_ar_making) {
+        InterlockedExchange(&g_ar_making, 0);
+        say("arena: our room is open");
+        menu_popup("Your room is open", "Your friends: F1 > Arena > Join the queue.\nYou are in the queue too: close F1, go to Smash, choose your fighter and press start.\nYour game waits for your turn and starts the match by itself.");
+    } else if (a.has_room && !a.is_host && g_ar_making) {                  /* (someone else's room was open already) */
+        InterlockedExchange(&g_ar_making, 0); InterlockedExchange(&g_lan_room_prio, 0);
+        snprintf(t, sizeof t, "%s already has a room open (only one at a time).\nF1 > Arena > Join the queue to play in it.", a.host);
+        menu_popup("Room", t);
+    } else if (a.has_room && !old.has_room && !a.is_host && !g_ar_in) {
+        snprintf(t, sizeof t, "%s opened a room to take turns (winner stays).\nTo play: F1 > Arena > Join the queue.", a.host);
+        menu_popup("Room", t);
+    }
+    if (!a.has_room && old.has_room && old.is_host) InterlockedExchange(&g_lan_room_prio, 0);     /* (our room is closed: a normal lobby again) */
     if (!g_ar_in || a.status == was) return;
-    if (a.status == NET_ARENA_TURN) {
-        char t[256];
-        snprintf(t, sizeof t, "Your turn against %s!\nGo to Smash (versus), choose your fighter and start: the match is found by itself.", a.opponent);
+    if (a.status == NET_ARENA_TURN && was == NET_ARENA_PLAYING) {        /* (won: the winner stays) */
+        snprintf(t, sizeof t, "You won (%d in a row)! You stay.\nNext: against %s. At the character select press start again.", a.streak, a.opponent);
+        say("arena: won, next against %s", a.opponent);
+        menu_popup("Room", t);
+    } else if (a.status == NET_ARENA_TURN) {
+        snprintf(t, sizeof t, "YOUR TURN against %s!\nIf you are not waiting at the start already: go to Smash, choose your fighter and press start (you have 2 minutes).", a.opponent);
         say("arena: our turn against %s", a.opponent);
-        menu_popup("Arena", t);
+        menu_popup("Room", t);
     } else if (a.status == NET_ARENA_PLAYING) say("arena: playing against %s", a.opponent);
-    else if (a.status == NET_ARENA_WAITING) say("arena: in the queue, place %d", a.place);
-    else if (a.status == NET_ARENA_OUT && was != NET_ARENA_OUT) {     /* (taken out by the lobby: a turn not started in time) */
+    else if (a.status == NET_ARENA_WAITING && was == NET_ARENA_PLAYING) {
+        snprintf(t, sizeof t, "You lost: you go to the back of the queue (place %d).\nAt the character select press start again: your game waits for your next turn.", a.place);
+        say("arena: lost, place %d", a.place);
+        menu_popup("Room", t);
+    } else if (a.status == NET_ARENA_WAITING && was == NET_ARENA_OUT) {
+        snprintf(t, sizeof t, "You are in %s's room (place %d in the queue).\nNow close F1, go to Smash, choose your fighter and press start.\nYour game waits for your turn and starts the match by itself.", a.host, a.place);
+        say("arena: in the queue, place %d", a.place);
+        menu_popup("Room", t);
+    } else if (a.status == NET_ARENA_WAITING) say("arena: in the queue, place %d", a.place);
+    else if (a.status == NET_ARENA_OUT && was != NET_ARENA_OUT) {
         InterlockedExchange(&g_ar_in, 0);
-        say("arena: taken out of the arena by the lobby");
-        menu_popup("Arena", "You are out of the arena: your turn was not started in time.\nF1 > Arena to join the queue again.");
+        say("arena: taken out of the room (%d)", a.why);
+        if (a.why == 1) snprintf(t, sizeof t, "The host (%s) removed you from the room.\nF1 > Arena > Join the queue to come back.", old.host);
+        else if (a.why == 2 && old.is_host) snprintf(t, sizeof t, "You closed your room.");
+        else if (a.why == 2) snprintf(t, sizeof t, "%s closed the room.\nAnyone can open a new one: F1 > Arena > Create a room.", old.host[0] ? old.host : "The host");
+        else if (a.why == 3) snprintf(t, sizeof t, "You are out of the room: your turn was not started within 2 minutes.\nF1 > Arena > Join the queue to come back.");
+        else snprintf(t, sizeof t, "The room is gone: %s closed the game (the room lived on that PC).\nAnyone can open a new one: F1 > Arena > Create a room.", old.host[0] ? old.host : "its host");
+        menu_popup("Room", t);
     }
 }
 
@@ -1508,7 +1600,7 @@ static int start_host(void) {                   /* HOST mode: the lobby in this 
 #define BEACON_GROUP "239.255.13.13"
 static volatile LONG64 g_lan_lobby_id;          /* our own in-game lobby (0: none) */
 static uint16_t g_lan_lobby_port;
-static struct { SRWLOCK lock; struct sockaddr_in at; uint64_t id, cur; int pending; } g_switch = {SRWLOCK_INIT};   /* cur: the id of the lobby this game (not a lobby itself) is in or going to */
+static struct { SRWLOCK lock; struct sockaddr_in at; uint64_t id, cur; int pending, prio, cur_prio; } g_switch = {SRWLOCK_INIT};   /* cur: the id of the lobby this game (not a lobby itself) is in or going to */
 static SOCKET g_beacon = INVALID_SOCKET;
 static SOCKET beacon_socket(void) {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -1537,7 +1629,7 @@ static void version_check(const char *theirs) {      /* (beacon thread) the vers
     const char *ssbu_version(void), *mine = ssbu_version();
     static char last[VER_LEN + 1];
     static uint64_t next;
-    if (!theirs[0] || !strcmp(theirs, "dev") || !strcmp(mine, "dev") || !strcmp(theirs, mine)) { last[0] = 0; return; }
+    if (!theirs[0] || !strcmp(theirs, "dev") || !strcmp(mine, "dev") || !strncmp(theirs, mine, VER_LEN)) { last[0] = 0; return; }     /* (the beacon carries VER_LEN characters) */
     uint64_t t = ms_now();
     if (!strcmp(theirs, last) && t < next) return;   /* told again every 30 s while it lasts */
     snprintf(last, sizeof last, "%s", theirs); next = t + 30000;
@@ -1551,8 +1643,10 @@ static void version_check(const char *theirs) {      /* (beacon thread) the vers
     say("version: the lobby's game is %s, this one %s", theirs, mine);
     menu_popup("Different version", text);
 }
-static int beacon_read(const uint8_t *p, int n, uint64_t *id, uint16_t *port, char *ver) {   /* 1: a lobby of our code and build */
-    ver[0] = 0;
+/* (room, 2026-10-30) after the 'V' block: 'R' + u8 1 = this lobby has a player's room (or is getting one): the games of its
+ * build move to it at once, joined or not, and a lobby without a room hands over to it (the host's PC carries the room) */
+static int beacon_read(const uint8_t *p, int n, uint64_t *id, uint16_t *port, char *ver, int *prio) {   /* 1: a lobby of our code and build */
+    ver[0] = 0; *prio = 0;
     if (n < BEACON_BASE || p[0] != 'S' || p[1] != 'U' || p[2] != PROTO || p[3] != T_BEACON) return 0;
     char code[NAME_LEN + 1] = "", build[BUILD_LEN + 1] = "";
     memcpy(code, p + 14, NAME_LEN); memcpy(build, p + 14 + NAME_LEN, BUILD_LEN);
@@ -1564,13 +1658,15 @@ static int beacon_read(const uint8_t *p, int n, uint64_t *id, uint16_t *port, ch
         for (; k < VER_LEN && p[BEACON_BASE + 1 + k]; k++) ver[k] = p[BEACON_BASE + 1 + k] >= 0x21 && p[BEACON_BASE + 1 + k] < 0x7f ? (char)p[BEACON_BASE + 1 + k] : '?';
         ver[k] = 0;
     }
+    if (n >= BEACON_BASE + 1 + VER_LEN + 2 && p[BEACON_BASE + 1 + VER_LEN] == 'R' && !strncmp(build, g_build, BUILD_LEN)) *prio = p[BEACON_BASE + 2 + VER_LEN] == 1;
     *id = g64(p + 4); *port = g16(p + 12);
     return *id != 0 && *port != 0;
 }
 static DWORD WINAPI beacon_thread(LPVOID unused) {    /* sends our lobby's beacon; hears the others' (one lobby per network) */
     (void)unused;
     const char *ssbu_version(void);
-    uint8_t p[BEACON_BASE + 1 + VER_LEN] = {0}, r[256];
+    uint8_t p[BEACON_BASE + 1 + VER_LEN + 2] = {0}, r[256];
+    int prio;
     char ver[VER_LEN + 1];
     struct sockaddr_in grp = {0}, bc = {0};
     grp.sin_family = bc.sin_family = AF_INET;
@@ -1584,26 +1680,32 @@ static DWORD WINAPI beacon_thread(LPVOID unused) {    /* sends our lobby's beaco
             hdr(p, T_BEACON); s64(p + 4, mine); s16(p + 12, g_lan_lobby_port);
             memcpy(p + 14, g_code, strlen(g_code)); memcpy(p + 14 + NAME_LEN, g_build, strlen(g_build));
             p[BEACON_BASE] = 'V'; strncpy((char *)p + BEACON_BASE + 1, ssbu_version(), VER_LEN);
+            p[BEACON_BASE + 1 + VER_LEN] = 'R'; p[BEACON_BASE + 2 + VER_LEN] = (uint8_t)(g_lan_room_prio ? 1 : 0);
             sendto(g_beacon, (const char *)p, sizeof p, 0, (struct sockaddr *)&grp, sizeof grp);
             sendto(g_beacon, (const char *)p, sizeof p, 0, (struct sockaddr *)&bc, sizeof bc);
             last = t;
         }
         struct sockaddr_in from; int fl = sizeof from; uint64_t id; uint16_t port;
         int n = recvfrom(g_beacon, (char *)r, sizeof r, 0, (struct sockaddr *)&from, &fl);
-        if (n <= 0 || !beacon_read(r, n, &id, &port, ver) || id == mine) continue;
+        if (n <= 0 || !beacon_read(r, n, &id, &port, ver, &prio) || id == mine) continue;
         if (!mine && (!g_switch.cur || id == g_switch.cur)) version_check(ver);      /* the lobby this game is in (or going to) */
         /* another lobby on this network: the one with the smaller id stays; ours goes if nobody but us is in it and we are
          * in no Local Wireless room (otherwise both stay: their rooms are listed by each lobby to its own players) */
         int players = 0, rooms = 0;
         if (mine) minilobby_counts(&players, &rooms);
-        if (mine && (id > mine || players > 1 || nnldn_players())) continue;
+        /* (room) a lobby with a player's room wins over one without, whatever the ids and the players: they all move to it */
+        int mine_prio = mine && g_lan_room_prio;
+        if (mine && prio != mine_prio) { if (mine_prio) continue; }
+        else if (mine && (id > mine || players > 1 || nnldn_players())) continue;
         /* (2026-10-29: three players, two lobbies on the network) a game that is not a lobby took every beacon it heard as the
          * lobby to join: with two lobbies it went from one to the other at each beacon and was disconnected each time. Now it
          * stays in the lobby it is in while it is joined; not joined, it goes to a lobby of a smaller id (the one that stays,
          * as above) or, when its lobby has not let it in for GONE_AFTER_MS (a firewall in front of that lobby), to another. */
-        if (!mine && g_switch.cur && id != g_switch.cur && (g_joined || (id > g_switch.cur && ms_now() - g_unjoined_since < GONE_AFTER_MS))) continue;
+        if (!mine && g_switch.cur && id != g_switch.cur && !(prio && !g_switch.cur_prio) && (g_joined || (id > g_switch.cur && ms_now() - g_unjoined_since < GONE_AFTER_MS))) continue;
+        if (!mine && g_switch.cur && id != g_switch.cur && g_switch.cur_prio && !prio) continue;      /* (in a room's lobby: never back to one without) */
         AcquireSRWLockExclusive(&g_switch.lock);
-        if (g_switch.id != id) { g_switch.at = from; g_switch.at.sin_port = htons(port); g_switch.id = id; g_switch.pending = 1; }
+        if (g_switch.id != id) { g_switch.at = from; g_switch.at.sin_port = htons(port); g_switch.id = id; g_switch.prio = prio; g_switch.pending = 1; }
+        else if (id == g_switch.cur) g_switch.cur_prio = prio;      /* (the room of our lobby opened or closed) */
         ReleaseSRWLockExclusive(&g_switch.lock);
     }
 }
@@ -1637,11 +1739,14 @@ static void lan_switch_if_asked(void) {         /* (client thread) another netwo
     int go = g_switch.pending;
     struct sockaddr_in at = g_switch.at;
     g_switch.pending = 0;
-    if (go) g_switch.cur = g_switch.id;
+    if (go) { g_switch.cur = g_switch.id; g_switch.cur_prio = g_switch.prio; }
+    int prio = g_switch.prio;
     ReleaseSRWLockExclusive(&g_switch.lock);
     if (!go || same_at(&at, &g_lobby)) return;
     char a[16];
     if (g_lan_lobby_id) { InterlockedExchange64(&g_lan_lobby_id, 0); minilobby_stop(); }
+    if (g_lan_room_prio) { InterlockedExchange(&g_lan_room_prio, 0); InterlockedExchange(&g_ar_making, 0); }     /* (another room's lobby won: ours is gone) */
+    if (prio) say("lan: a player opened a room: its game is the network's lobby now: moving to it");
     InterlockedExchange(&g_joined, 0);
     g_lobby = at;
     g_unjoined_since = ms_now();
@@ -1712,6 +1817,17 @@ static DWORD WINAPI client_thread(LPVOID unused) {
     uint64_t last_join = 0, last_ping = 0, last_tick = 0, said_blocked = 0;
     for (;;) {
         uint64_t t = ms_now();
+        if (g_lan_room_want && g_mode == NET_MODE_LAN) {   /* (room) this player makes a room: its game becomes the network's lobby, with priority */
+            InterlockedExchange(&g_lan_room_want, 0);
+            if (!g_lan_lobby_id) {
+                InterlockedExchange(&g_lan_room_prio, 1);
+                if (lan_become_lobby()) {
+                    InterlockedExchange(&g_joined, 0); g_unjoined_since = t;
+                    AcquireSRWLockExclusive(&g_switch.lock); g_switch.cur = (uint64_t)g_lan_lobby_id; g_switch.cur_prio = 1; g_switch.pending = 0; ReleaseSRWLockExclusive(&g_switch.lock);
+                    say("lan: this game is the network's lobby now, for its room: the others move to it");
+                } else { InterlockedExchange(&g_lan_room_prio, 0); InterlockedExchange(&g_ar_making, 0); menu_popup("Room", "Your room could not be made (this game could not open its lobby). Try again."); }
+            }
+        }
         lan_switch_if_asked();
         if (!g_joined && g_auto && g_mode == NET_MODE_LOBBY && t - g_unjoined_since > GONE_AFTER_MS) lobby_fallback_to_lan();
         if (!g_joined && g_mode == NET_MODE_JOIN && !said_blocked && t - g_unjoined_since > LOBBY_TIMEOUT_MS) {

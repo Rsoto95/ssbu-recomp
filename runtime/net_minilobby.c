@@ -26,6 +26,14 @@ enum { ML_ROOMS = 17, ML_ROOM_INFO, ML_ROOMS_END };     /* O1 room browser (net_
 enum { ML_MATCH = 20, ML_MATCH_STATE };                 /* O2 matchmaking (net_relay.c head, ssbu_lobby.py on_match) */
 enum { ML_MS_IDLE, ML_MS_SEARCHING, ML_MS_MATCHED, ML_MS_TIMEOUT, ML_MS_PEER_LEFT, ML_MS_TOGETHER, ML_MS_EXPIRED };
 enum { ML_KIND_ROOM = 1, ML_KIND_ROLLBACK = 2 };        /* (R3 net3, lobby 1.4) MATCH op 1 / op 2: a Local Wireless search, a rollback-match search */
+enum { ML_RESULT = 22, ML_RESULT_ACK, ML_ARENA, ML_ARENA_STATE };     /* (1.6 arena) the RESULT of a rollback match, the arena (ssbu_lobby.py docstring) */
+enum { ML_AR_OUT, ML_AR_WAITING, ML_AR_TURN, ML_AR_PLAYING };
+#define ML_ARENA_TURN_FOR 120000                        /* ms: a turn not started in this time (ssbu_lobby.py ARENA_TURN_FOR) */
+#define ML_ARENA_PLAY_FOR 900000                        /* ms: a match without a result */
+#define ML_ARENA_WATCH_FOR 3000                         /* ms: a game that asked to look gets the changes this long */
+#define ML_ARENA_LIST 16                                /* queue entries in ARENA_STATE */
+#define ML_ARENAS 8                                     /* arenas (one per build and lobby code) */
+#define ML_RESULT_LEN 62
 #define ML_SEARCH_FOR 120000                            /* ms; SSBU_LOBBY_SEARCH_SECS / SSBU_LOBBY_MATCH_SECS change them */
 #define ML_MATCH_FOR 180000
 #define ML_MODS_MAX 32
@@ -90,6 +98,9 @@ typedef struct ml_client {
     int kind;                 /* (1.4) what it searches: ML_KIND_ROOM / ML_KIND_ROLLBACK */
     uint32_t rb_peer;         /* (1.4) the player of its last rollback match (RB to it relayed on the public code) */
     int rb_seen;              /* (1.4, rollback match) 1 = this one's RB to its peer was relayed */
+    int arena_streak;         /* (1.6 arena) wins in a row */
+    ULONGLONG arena_seen;     /* (1.6 arena) last ARENA from it (0: never): it looks at the arena, send it the changes */
+    int arena_why;            /* (room) why it was last taken out: 0 none, 1 removed by the host, 2 the room closed, 3 its turn not started in time */
 } ml_client;
 
 struct ml_room {
@@ -271,7 +282,9 @@ static void ml_close_room(ml_room *room, const char *why) {
 }
 
 static void ml_match_end(ml_client *c, int state, int role, const ml_client *peer, const char *why, ULONGLONG now);
+static void ml_arena_drop(ml_client *c, const char *why, ULONGLONG now);
 static void ml_drop(ml_client *c, const char *why) {
+    ml_arena_drop(c, why, GetTickCount64());            /* (1.6: its turn goes to the next, or its place in the queue; a host closes its room) */
     if (c->mpeer) {
         ml_client *o = c->mpeer;
         char w[96];
@@ -424,6 +437,235 @@ static void ml_on_rooms(ml_client *c, const uint8_t *seq, ULONGLONG now) {     /
 static int ml_room_open(const ml_room *r, ULONGLONG now) {
     return r && r->info[ML_NI_POLICY] != 1 && r->info[ML_NI_NODE_COUNT] < r->info[ML_NI_NODE_MAX] && now - r->updated <= ML_LISTED_FOR;
 }
+/* ---- (1.6) the arena: C port of ssbu_lobby.py (class Arena, on_arena .. arena_result), same messages, so a group playing
+ * in LAN mode (this lobby inside the first player's game) can take turns too (2026-10-30: 4-5 friends over Radmin). The
+ * players of one build and lobby code who joined wait in a queue; the first two play a 1-on-1 rollback match (Smash versus:
+ * their MATCH op 2 searches are paired only with each other, the one ahead is player 1); the winner stays (unless
+ * SSBU_ARENA_STREAK wins in a row; default 0: no limit), the loser goes to the back. */
+typedef struct {
+    int used;
+    char build[ML_BUILD_LEN + 1], code[ML_NAME_LEN + 1];
+    ml_client *queue[ML_MAX_CLIENTS]; int nq;           /* waiting, the next first */
+    ml_client *pair[2];                                 /* taking their turn (pair[0] NULL: none) */
+    int playing;                                        /* the pair's games exchange rollback messages */
+    ml_client *host;                                    /* (room) the player who made it: it controls it; the arena exists while it does */
+    ULONGLONG at;                                       /* since when the pair is in its state */
+    uint32_t version;
+    uint64_t last_seed;                                 /* the last match whose result was taken (both games send it) */
+} ml_arena;
+static ml_arena ml_arenas[ML_ARENAS];
+static int ml_arena_streak;
+
+static ml_arena *ml_arena_of(const ml_client *c, int make) {
+    ml_arena *fr = NULL;
+    for (int i = 0; i < ML_ARENAS; i++) {
+        ml_arena *a = &ml_arenas[i];
+        if (a->used && !strcmp(a->build, c->build) && !strcmp(a->code, c->code)) return a;
+        if (!a->used && !fr) fr = a;
+    }
+    if (!make || !fr) return NULL;
+    memset(fr, 0, sizeof *fr);
+    fr->used = 1;
+    snprintf(fr->build, sizeof fr->build, "%s", c->build); snprintf(fr->code, sizeof fr->code, "%s", c->code);
+    return fr;
+}
+static int ml_arena_in_pair(const ml_arena *a, const ml_client *c) { return a && a->pair[0] && (a->pair[0] == c || a->pair[1] == c); }
+static int ml_arena_qpos(const ml_arena *a, const ml_client *c) { for (int i = 0; a && i < a->nq; i++) if (a->queue[i] == c) return i; return -1; }
+static int ml_arena_member(const ml_arena *a, const ml_client *c) { return ml_arena_in_pair(a, c) || ml_arena_qpos(a, c) >= 0; }
+static void ml_arena_qdel(ml_arena *a, int i) { memmove(a->queue + i, a->queue + i + 1, (size_t)(a->nq - i - 1) * sizeof *a->queue); a->nq--; }
+static void ml_arena_qback(ml_arena *a, ml_client *c) { if (a->nq < ML_MAX_CLIENTS) a->queue[a->nq++] = c; }
+static void ml_arena_qfront(ml_arena *a, ml_client *c) {
+    if (a->nq >= ML_MAX_CLIENTS) return;
+    memmove(a->queue + 1, a->queue, (size_t)a->nq * sizeof *a->queue); a->queue[0] = c; a->nq++;
+}
+static ml_client *ml_arena_other(const ml_arena *a, const ml_client *c) { return a->pair[0] == c ? a->pair[1] : a->pair[0]; }
+static int ml_arena_status(const ml_arena *a, const ml_client *c) {
+    if (ml_arena_in_pair(a, c)) return a->playing ? ML_AR_PLAYING : ML_AR_TURN;
+    return ml_arena_qpos(a, c) >= 0 ? ML_AR_WAITING : ML_AR_OUT;
+}
+static uint8_t *ml_arena_name(uint8_t *p, const ml_client *c) { memset(p, 0, ML_NAME_LEN); memcpy(p, c->name, strlen(c->name)); return p + ML_NAME_LEN; }
+/* ARENA_STATE: version u32, status u8, place u8, streak u8, streak limit u8, opponent name[32], seconds u16, match count u8
+ * (+ name[32] x 2, streak u8 x 2, state u8), queue count u8 + count x (name[32], streak u8) */
+static void ml_arena_send(ml_client *c, ULONGLONG now) {
+    uint8_t pkt[4 + 8 + ML_NAME_LEN + 2 + 1 + 2 * ML_NAME_LEN + 3 + 1 + ML_ARENA_LIST * (ML_NAME_LEN + 1) + 4 + ML_NAME_LEN], *p = ml_hdr(pkt, ML_ARENA_STATE);
+    ml_arena *a = ml_arena_of(c, 0);
+    int st = ml_arena_status(a, c), place = 0;
+    ULONGLONG since = now;
+    const ml_client *opp = NULL;
+    if (st == ML_AR_WAITING) place = ml_arena_qpos(a, c) + 1;
+    else if (st == ML_AR_TURN || st == ML_AR_PLAYING) { opp = ml_arena_other(a, c); since = a->at; }
+    p = ml_put32(p, a ? a->version : 0);
+    *p++ = (uint8_t)st; *p++ = (uint8_t)(place > 255 ? 255 : place);
+    *p++ = (uint8_t)(c->arena_streak > 255 ? 255 : c->arena_streak); *p++ = (uint8_t)(ml_arena_streak > 255 ? 255 : ml_arena_streak);
+    memset(p, 0, ML_NAME_LEN); if (opp) memcpy(p, opp->name, strlen(opp->name)); p += ML_NAME_LEN;
+    { ULONGLONG s = (now - since) / 1000; p = ml_put16(p, s > 65535 ? 65535u : (unsigned)s); }
+    if (a && a->pair[0]) {
+        *p++ = 1;
+        p = ml_arena_name(p, a->pair[0]); p = ml_arena_name(p, a->pair[1]);
+        *p++ = (uint8_t)(a->pair[0]->arena_streak > 255 ? 255 : a->pair[0]->arena_streak);
+        *p++ = (uint8_t)(a->pair[1]->arena_streak > 255 ? 255 : a->pair[1]->arena_streak);
+        *p++ = (uint8_t)(a->playing ? ML_AR_PLAYING : ML_AR_TURN);
+    } else *p++ = 0;
+    int n = a ? (a->nq < ML_ARENA_LIST ? a->nq : ML_ARENA_LIST) : 0;
+    *p++ = (uint8_t)n;
+    for (int i = 0; i < n; i++) { p = ml_arena_name(p, a->queue[i]); *p++ = (uint8_t)(a->queue[i]->arena_streak > 255 ? 255 : a->queue[i]->arena_streak); }
+    /* (room) 'H', flags u8 (1 a room exists, 2 this player is its host), the host's name[32], players in the room u8, why this
+     * player was last taken out u8 (0 none, 1 removed by the host, 2 the room closed, 3 its turn not started in time) */
+    *p++ = 'H';
+    *p++ = (uint8_t)((a && a->host ? 1 : 0) | (a && a->host == c ? 2 : 0));
+    if (a && a->host) p = ml_arena_name(p, a->host); else { memset(p, 0, ML_NAME_LEN); p += ML_NAME_LEN; }
+    *p++ = (uint8_t)(a ? a->nq + (a->pair[0] ? 2 : 0) : 0);
+    *p++ = (uint8_t)c->arena_why;
+    ml_send(pkt, (int)(p - pkt), &c->at);
+}
+static void ml_arena_changed(ml_arena *a, ULONGLONG now) {      /* to its players, and whoever looks at it */
+    a->version++;
+    for (int i = 0; i < ML_MAX_CLIENTS; i++) {
+        ml_client *x = &ml_clients[i];
+        if (x->used && ml_arena_of(x, 0) == a && (ml_arena_member(a, x) || (x->arena_seen && now - x->arena_seen <= ML_ARENA_WATCH_FOR))) ml_arena_send(x, now);
+    }
+}
+static void ml_arena_tell_all(const ml_client *c, ULONGLONG now) {     /* (room made / closed) every player of its build and code */
+    for (int i = 0; i < ML_MAX_CLIENTS; i++) if (ml_clients[i].used && ml_same_part(&ml_clients[i], c)) ml_arena_send(&ml_clients[i], now);
+}
+static void ml_arena_next(ml_arena *a, ULONGLONG now) {          /* no match on: the first two of the queue take their turn */
+    if (a->pair[0] || a->nq < 2) return;
+    a->pair[0] = a->queue[0]; a->pair[1] = a->queue[1];
+    ml_arena_qdel(a, 0); ml_arena_qdel(a, 0);
+    a->playing = 0; a->at = now;
+    ml_log("arena: %s's turn against %s (%d waiting)", a->pair[0]->name, a->pair[1]->name, a->nq);
+}
+static void ml_arena_leave(ml_client *c, const char *why, ULONGLONG now) {
+    ml_arena *a = ml_arena_of(c, 0);
+    if (!a || !ml_arena_member(a, c)) return;
+    if (ml_arena_in_pair(a, c)) {
+        ml_client *o = ml_arena_other(a, c);
+        a->pair[0] = a->pair[1] = NULL; a->playing = 0;
+        ml_arena_qfront(a, o);                                   /* (the other player keeps its place at the front, and its streak) */
+        ml_log("arena: %s left its turn (%s): %s is next again", c->name, why, o->name);
+    } else {
+        ml_arena_qdel(a, ml_arena_qpos(a, c));
+        ml_log("arena: %s left the queue (%s)", c->name, why);
+    }
+    c->arena_streak = 0;
+    ml_arena_next(a, now);
+    ml_arena_changed(a, now);
+    if (c->used) ml_arena_send(c, now);
+}
+static void ml_arena_close(ml_arena *a, const char *why, ULONGLONG now) {    /* (room) the host closed it or left: everyone out */
+    ml_client *host = a->host;
+    for (int i = 0; i < ML_MAX_CLIENTS; i++) {
+        ml_client *x = &ml_clients[i];
+        if (x->used && ml_arena_member(a, x)) { x->arena_why = 2; x->arena_streak = 0; }
+    }
+    ml_log("arena: the room of %s is closed (%s)", host ? host->name : "?", why);
+    a->used = 0;                                         /* (nobody is in an arena that is not used: their states say "out") */
+    if (host && host->used) ml_arena_tell_all(host, now);
+    else for (int i = 0; i < ML_MAX_CLIENTS; i++) if (ml_clients[i].used && ml_clients[i].arena_why == 2) ml_arena_send(&ml_clients[i], now);
+}
+static void ml_arena_join(ml_arena *a, ml_client *c, ULONGLONG now) {
+    if (ml_arena_member(a, c)) return;
+    ml_arena_qback(a, c);
+    c->arena_streak = 0; c->arena_why = 0;
+    ml_log("arena: %s joined the queue of %s's room (%d waiting)", c->name, a->host->name, a->nq);
+    ml_arena_next(a, now);
+    ml_arena_changed(a, now);
+}
+/* ARENA: cookie u64, op u8 (0 leave the queue, 1 join (or stay in), 2 only look, 3 make a room (and join), 4 close it (its
+ * host), 5 remove a player (its host; + name[32])) */
+static void ml_on_arena(ml_client *c, const uint8_t *p, int len, ULONGLONG now) {
+    int op = p[12];
+    ml_arena *a = ml_arena_of(c, 0);
+    if (op == 3) {
+        if (!a) {
+            a = ml_arena_of(c, 1);
+            if (a) { a->host = c; ml_log("arena: %s made a room", c->name); ml_arena_join(a, c, now); ml_arena_tell_all(c, now); }
+        } else if (a->host == c) ml_arena_join(a, c, now);
+        else ml_log("arena: %s asked to make a room, but %s's room is open", c->name, a->host ? a->host->name : "?");
+    } else if (op == 1 && a && a->host) ml_arena_join(a, c, now);
+    else if (op == 0) ml_arena_leave(c, "left the queue", now);
+    else if (op == 4 && a && a->host == c) ml_arena_close(a, "closed by its host", now);
+    else if (op == 5 && a && a->host == c && len >= 13 + ML_NAME_LEN) {
+        char nm[ML_NAME_LEN + 1]; ml_text(nm, sizeof nm, p + 13, ML_NAME_LEN);
+        for (int i = 0; i < ML_MAX_CLIENTS; i++) {
+            ml_client *x = &ml_clients[i];
+            if (x->used && x != c && ml_arena_member(a, x) && !strcmp(x->name, nm)) { x->arena_why = 1; ml_arena_leave(x, "removed by the host", now); break; }
+        }
+    }
+    c->arena_seen = now;
+    ml_arena_send(c, now);
+}
+static void ml_arena_drop(ml_client *c, const char *why, ULONGLONG now) {     /* (ml_drop) a player gone from the lobby */
+    ml_arena *a = ml_arena_of(c, 0);
+    if (a && a->host == c) { char w[96]; snprintf(w, sizeof w, "its host left: %s", why); ml_arena_close(a, w, now); }
+    else ml_arena_leave(c, why, now);
+}
+static void ml_arena_playing(ml_client *h, ml_client *g, ULONGLONG now) {     /* the pair's rollback messages went both ways */
+    ml_arena *a = ml_arena_of(h, 0);
+    if (!a || !ml_arena_in_pair(a, h) || !ml_arena_in_pair(a, g) || a->playing) return;
+    a->playing = 1; a->at = now;
+    ml_log("arena: %s and %s are playing", h->name, g->name);
+    ml_arena_changed(a, now);
+}
+static void ml_arena_end(ml_arena *a, ml_client *winner, const char *why, ULONGLONG now) {     /* winner NULL: no winner */
+    ml_client *p1 = a->pair[0], *p2 = a->pair[1];
+    a->pair[0] = a->pair[1] = NULL; a->playing = 0;
+    if (!winner) {
+        p1->arena_streak = p2->arena_streak = 0;
+        ml_arena_qback(a, p1); ml_arena_qback(a, p2);
+        ml_log("arena: %s: %s and %s go to the back of the queue", why, p1->name, p2->name);
+    } else {
+        ml_client *loser = winner == p1 ? p2 : p1;
+        loser->arena_streak = 0;
+        ml_arena_qback(a, loser);
+        winner->arena_streak++;
+        if (ml_arena_streak && winner->arena_streak >= ml_arena_streak) {
+            ml_log("arena: %s beat %s: %d wins in a row, the limit: both to the back", winner->name, loser->name, winner->arena_streak);
+            winner->arena_streak = 0;
+            ml_arena_qback(a, winner);
+        } else {
+            ml_log("arena: %s beat %s (%d in a row) and stays", winner->name, loser->name, winner->arena_streak);
+            ml_arena_qfront(a, winner);
+        }
+    }
+    ml_arena_next(a, now);
+    ml_arena_changed(a, now);
+}
+/* RESULT (from net_relay.c net_ladder_result): cookie u64 at 4, seed u64 at 12, the other player's address u32 at 20, slot u8
+ * at 24, rule u8, stocks of the rule u8, flags u8 at 27 (2 disconnected), stage u32, chara u64 x 2, stocks left u8 x 2 at 48,
+ * damage u16 x 2 at 50 (tenths of a percent), frames, desyncs. Both games send it: the first one of a seed counts. */
+static void ml_arena_result(ml_client *c, const uint8_t *p, ULONGLONG now) {
+    ml_arena *a = ml_arena_of(c, 0);
+    if (!ml_arena_in_pair(a, c)) return;
+    uint64_t seed = ml_get64(p + 12);
+    uint32_t peer = ml_get32(p + 20);
+    int slot = p[24], flags = p[27], s0 = p[48], s1 = p[49];
+    unsigned d0 = ml_get16(p + 50), d1 = ml_get16(p + 52);
+    ml_client *other = ml_arena_other(a, c);
+    if (seed == a->last_seed || peer != other->ip || slot > 1) return;
+    a->last_seed = seed;
+    int win = s0 > s1 ? 0 : s1 > s0 ? 1 : d0 < d1 ? 0 : d1 < d0 ? 1 : -1;
+    if ((flags & 2) || win < 0) { ml_arena_end(a, NULL, flags & 2 ? "no winner (disconnected)" : "no winner (a draw)", now); return; }
+    ml_arena_end(a, win == slot ? c : other, "result", now);
+}
+static void ml_arena_sweep(ULONGLONG now) {
+    for (int i = 0; i < ML_ARENAS; i++) {
+        ml_arena *a = &ml_arenas[i];
+        if (!a->used || !a->pair[0]) continue;
+        if (!a->playing && now - a->at > ML_ARENA_TURN_FOR) {
+            /* (a turn not started in time: whoever did not even search is away and leaves the arena; the other keeps its place) */
+            ml_client *away[2]; int na = 0;
+            for (int k = 0; k < 2; k++) if (!a->pair[k]->searching && !a->pair[k]->mpeer) away[na++] = a->pair[k];
+            char w[96]; snprintf(w, sizeof w, "did not start its turn in %d s", ML_ARENA_TURN_FOR / 1000);
+            if (na) { for (int k = 0; k < na; k++) { away[k]->arena_why = 3; ml_arena_leave(away[k], w, now); } }     /* (two away: the next pair forms by itself; ssbu_lobby.py then ended that new pair too) */
+            else { char e[160]; snprintf(e, sizeof e, "the turn of %s and %s was not started in %d s", a->pair[0]->name, a->pair[1]->name, ML_ARENA_TURN_FOR / 1000); ml_arena_end(a, NULL, e, now); }
+        } else if (a->playing && now - a->at > ML_ARENA_PLAY_FOR) {
+            char e[160]; snprintf(e, sizeof e, "no result of the match of %s and %s in %d s", a->pair[0]->name, a->pair[1]->name, ML_ARENA_PLAY_FOR / 1000);
+            ml_arena_end(a, NULL, e, now);
+        }
+    }
+}
+
 /* MATCH_STATE: search id u32, state u8, role u8, flags u8 (1 the host's room is open), peer u32, peer name[32],
  * searching u16, players u16 (of c's build and code), seconds waited u16 */
 static void ml_match_send(ml_client *c, ULONGLONG now) {
@@ -500,14 +742,20 @@ static void ml_on_match(ml_client *c, int op, uint32_t sid, ULONGLONG now) {
     }
     c->has_search = 1; c->search_id = sid; c->searching = 1; c->search_since = now; c->has_final = 0; c->kind = op;
     ml_log("match: %s searches an opponent%s (build %s)", c->name, op == ML_KIND_ROLLBACK ? " for a rollback match" : "", c->build);
+    ml_arena *ar = op == ML_KIND_ROLLBACK ? ml_arena_of(c, 0) : NULL;
+    int c_turn = ml_arena_in_pair(ar, c);
+    if (ar && !c_turn && ml_arena_member(ar, c)) { ml_match_send(c, now); return; }      /* (1.6 arena: in the queue, its turn has not come) */
     ml_client *o = NULL;
     for (int i = 0; i < ML_MAX_CLIENTS; i++) {
         ml_client *x = &ml_clients[i];
-        if (x->used && x != c && x->searching && !x->mpeer && x->kind == op && ml_same_part(x, c) && (!o || x->search_since < o->search_since)) o = x;
+        if (!(x->used && x != c && x->searching && !x->mpeer && x->kind == op && ml_same_part(x, c))) continue;
+        if (c_turn ? x != ml_arena_other(ar, c) : ar && ml_arena_member(ar, x)) continue;   /* (a turn meets only its opponent; outsiders never take an arena player) */
+        if (!o || x->search_since < o->search_since) o = x;
     }
     if (!o) { ml_match_send(c, now); return; }
     int c_open = op == ML_KIND_ROOM && ml_room_open(c->room, now), o_open = op == ML_KIND_ROOM && ml_room_open(o->room, now);
     ml_client *host = c_open && !o_open ? c : o, *guest = host == c ? o : c;     /* an open room hosts, else the one that waited longer */
+    if (c_turn) { host = ar->pair[0]; guest = ar->pair[1]; }                     /* (the arena: the one ahead in the queue, or the winner who stays, is player 1) */
     host->mpeer = guest; guest->mpeer = host;
     host->mrole = 1; guest->mrole = 2;
     host->match_at = guest->match_at = now;
@@ -673,6 +921,10 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
         ml_on_rooms(c, p + 12, now);
     } else if (kind == ML_MATCH && len >= 17 && cookie_ok) {
         ml_on_match(c, p[12], ml_get32(p + 13), now);
+    } else if (kind == ML_ARENA && len >= 13 && cookie_ok) {        /* (1.6) */
+        ml_on_arena(c, p, len, now);
+    } else if (kind == ML_RESULT && len >= ML_RESULT_LEN && cookie_ok) {
+        ml_arena_result(c, p, now);
     } else if (kind == 16 && len > 16 && len <= 1500 && cookie_ok) {      /* R3: a rollback message (net_relay.c T_RB) to the other players of its lobby code */
         uint32_t dst = ml_get32(p + 12);
         static uint8_t out[1600];   /* (only used under ml_lock) */
@@ -691,6 +943,7 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
             c->rb_seen = 1;
             if (c->mpeer->rb_seen) {
                 char wa[96], wb[96]; ml_client *h = c->mrole == 1 ? c : c->mpeer;
+                ml_arena_playing(h, h->mpeer, now);               /* (1.6) */
                 snprintf(wa, sizeof wa, "playing a rollback match with %s", h->mpeer->name);
                 snprintf(wb, sizeof wb, "playing a rollback match with %s", h->name);
                 ml_match_end_pair(h, ML_MS_TOGETHER, wa, wb, now);
@@ -731,6 +984,7 @@ static void ml_sweep(ULONGLONG now) {
             ml_match_end_pair(c, ML_MS_EXPIRED, w, wb, now);
         }
     }
+    ml_arena_sweep(now);                                /* (1.6) */
 }
 
 static DWORD WINAPI ml_thread_main(LPVOID arg) {
@@ -788,6 +1042,8 @@ static uint16_t minilobby_start(uint32_t bind_ip_host_order, uint16_t port, int 
     memset(ml_clients, 0, sizeof ml_clients);
     memset(ml_rooms, 0, sizeof ml_rooms);
     memset(ml_open, 0, sizeof ml_open);
+    memset(ml_arenas, 0, sizeof ml_arenas);
+    {   const char *e = getenv("SSBU_ARENA_STREAK"); ml_arena_streak = e ? atoi(e) : 0; if (ml_arena_streak < 0) ml_arena_streak = 0; }   /* (1.6: 0 = the winner stays without a limit) */
     ml_next_ip = ML_SUBNET + 2;
     ml_relayed = ml_ldn_msgs = ml_dropped = 0;
     ml_no_peers = no_peers;
