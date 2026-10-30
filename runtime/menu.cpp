@@ -117,6 +117,18 @@ extern "C" void menu_popup(const char *title, const char *text) {
     ReleaseSRWLockExclusive(&g_popup_lock);
 }
 static int popup_on(void) { return (ULONGLONG)g_popup_until > GetTickCount64(); }
+/* A short note at the bottom of the picture that goes by itself after ms (the screenshot key, nvn_vk_draw.c), any thread;
+ * its own slot, so it never replaces the online notice or popup above. Takes no input. */
+static SRWLOCK g_toast_lock = SRWLOCK_INIT;
+static char g_toast[256];
+static volatile LONG64 g_toast_until;
+extern "C" void menu_toast(const char *text, int ms) {
+    AcquireSRWLockExclusive(&g_toast_lock);
+    snprintf(g_toast, sizeof g_toast, "%s", text ? text : "");
+    InterlockedExchange64(&g_toast_until, (LONG64)GetTickCount64() + (ms > 0 ? ms : 3000));
+    ReleaseSRWLockExclusive(&g_toast_lock);
+}
+static int toast_on(void) { return (ULONGLONG)g_toast_until > GetTickCount64(); }
 /* net_stats.h: the default answer until the online code defines net_stats_get itself */
 extern "C" void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLINE; o->ping_ms = -1; }
 #ifdef _WIN32
@@ -345,7 +357,7 @@ static void utf8_cut(char *s, int max_bytes) {        /* at most max_bytes bytes
 
 /* ------------------------------------------------------------------ the settings */
 static const char *const k_window[] = {"windowed", "borderless", "fullscreen"};
-static const char *const k_vsync[] = {"clock", "on", "off", "mailbox", "display", "auto"};      /* GfxOptions.present */
+static const char *const k_vsync[] = {"clock", "on", "off", "mailbox", "display", "auto", "vrr"};      /* GfxOptions.present */
 static const char *const k_latency[] = {"normal", "low", "lowest"};
 static const char *const k_renderer[] = {"vulkan", "opengl"};
 static const int k_aniso_v[] = {0, 2, 4, 8, 16};
@@ -353,7 +365,7 @@ static const char *const k_aniso[] = {"game", "2", "4", "8", "16"};
 static const char *const k_profile[] = {"custom", "low"};
 static const char *const k_wait[] = {"hold", "skip"};
 static const char *const k_prepare[] = {"first_run", "background", "off"};
-static const char *const k_load[] = {"start", "loading"};
+static const char *const k_load[] = {"start", "loading", "background"};      /* GfxOptions.shader_load 0, 1, 2 */
 static const char *const k_console[] = {"docked", "handheld"};
 static const char *const k_onoff[] = {"off", "on"};
 static const char *const k_lang[] = {"auto", "ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl", "ru"};
@@ -1822,7 +1834,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -1895,6 +1907,16 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
         if (!InterlockedExchange(&g_popup_drawn, 1)) { printf("menu: online popup drawn (presented frame %lld): %s: %s\n", g_frame, title, text); fflush(stdout); }
+    }
+    if (toast_on()) {                                    /* the short note (menu_toast), bottom centre */
+        char text[256];
+        AcquireSRWLockShared(&g_toast_lock); snprintf(text, sizeof text, "%s", g_toast); ReleaseSRWLockShared(&g_toast_lock);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.94f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.75f);
+        ImGui::Begin("##toast", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextUnformatted(text);
+        ImGui::End();
     }
     if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();

@@ -469,6 +469,10 @@ int nvn_vk_init(void *hwnd) {
     static const char *const k_mode[4] = {"immediate", "mailbox", "fifo", "fifo_relaxed"};
     const char *want = getenv("SSBU_VK_PRESENT");
     V.mode = have[VK_PRESENT_MODE_MAILBOX_KHR] ? VK_PRESENT_MODE_MAILBOX_KHR : have[VK_PRESENT_MODE_IMMEDIATE_KHR] ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
+    if (!want && gfx_options()->present == 6) {      /* vsync = vrr: immediate, so a variable-refresh monitor refreshes when the frame arrives */
+        want = "immediate";
+        printf("nvn_vk: graphics.ini vsync = vrr: present mode immediate asked for (variable refresh: the monitor follows the 60 Hz clock)\n");
+    }
     if (!want && gfx_options()->present && gfx_options()->present < 4) {      /* 4 display, 5 auto: mailbox, the tick comes from display.c (session 14) */       /* track O: vsync = on | off | mailbox in graphics.ini (the environment switch wins) */
         static const char *const k_opt[4] = {NULL, "fifo", "immediate", "mailbox"};
         want = k_opt[gfx_options()->present & 3];
