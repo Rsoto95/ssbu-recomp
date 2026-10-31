@@ -563,7 +563,7 @@ static void err_dialog(unsigned category, unsigned number) {
     char text[160];
     if ((off && off[0] == '0') || getenv("SSBU_SEQ") || getenv("SSBU_PLAY") || getenv("SSBU_PRESS") || getenv("SSBU_SCRIPT")) return;
     snprintf(text, sizeof text, "Error Code: %04u-%04u\n\nAn error has occurred.", category, number);
-    MessageBoxA(NULL, text, "Error", MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TASKMODAL);
+    MessageBoxA(NULL, text, "Error", MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TASKMODAL | MB_TOPMOST);      /* (testers 2026-10-31: "se puso en negro") over the full-screen window: without it the box was hidden behind it and the game looked black and frozen */
 }
 static void err_ShowErrorResult(Ctx *c) {                 /* (Result): the console shows the error applet */
     uint32_t r = (uint32_t)A0;
