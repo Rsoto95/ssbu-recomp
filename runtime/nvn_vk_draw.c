@@ -3409,6 +3409,20 @@ static void vk_sync_drop(void *arg) { SyncObj *o = arg; o->s = NULL; }
 static void vk_reset_status(void *arg) { *(int *)arg = 0; }       /* NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR: a lost device ends the process with its own message */
 static void vk_no_grid(void *arg) { nvn_vk_missing("nvnMultisampleStateGetSampleLocationsGrid"); ((int *)arg)[0] = ((int *)arg)[1] = 1; }
 
+/* The window texture's pixels at the game's size, 4 bytes each, row 0 = the top row (BGRA or RGBA as the texture's format;
+ * free() them); NULL when the format is not an 8-bit RGBA one or the read failed. */
+static uint8_t *window_pixels(VTex *vt, int *pw, int *ph) {
+    int w = vt->w, h = vt->h;
+    if (vt->rs) { w = vt->t->b.width; h = vt->t->b.height; }      /* track O: read_region takes the game's rectangle */
+    if (vt->bpb != 4 || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { printf("nvn_vk: screenshot: the window texture's format %d is not an 8-bit RGBA one; not saved\n", (int)vt->fmt); return NULL; }
+    /* session 5: through read_region, the path of ReadTexels / CopyTextureToBuffer (so every screenshot exercises it) */
+    int rr[6] = {0, 0, 0, w, h, 1};
+    uint8_t *px = malloc((size_t)w * h * 4);
+    if (!px || !read_region(vt->t, NULL, rr, px, 0, 0)) { free(px); return NULL; }
+    *pw = w; *ph = h;
+    return px;
+}
+
 /* The window texture as a 24-bit BMP, the file save_bmp of the OpenGL path writes (row 0 of the texture is the top row). */
 static void save_bmp_vk(const char *path, VTex *vt) {
     VMem mem;
@@ -3445,13 +3459,9 @@ static void save_bmp_vk(const char *path, VTex *vt) {
         vkDestroyBuffer(V.device, buf, NULL); vmem_free(m2);
         return;
     }
-    if (vt->rs) { w = vt->t->b.width; h = vt->t->b.height; }      /* track O: read_region takes the game's rectangle */
-    if (vt->bpb != 4 || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { printf("nvn_vk: screenshot: the window texture's format %d is not an 8-bit RGBA one; not saved\n", (int)vt->fmt); return; }
-    /* session 5: through read_region, the path of ReadTexels / CopyTextureToBuffer (so every screenshot exercises it) */
-    int rr[6] = {0, 0, 0, w, h, 1};
-    uint8_t *px = malloc((size_t)w * h * 4);
     (void)mem;
-    if (!px || !read_region(vt->t, NULL, rr, px, 0, 0)) { free(px); return; }
+    uint8_t *px = window_pixels(vt, &w, &h);
+    if (!px) return;
     uint8_t head[54] = {'B', 'M'}, *rowb;
     uint32_t row = ((uint32_t)w * 3 + 3) & ~3u, size = 54 + row * (uint32_t)h, v;
     FILE *f = fopen(path, "wb");
@@ -3469,6 +3479,84 @@ static void save_bmp_vk(const char *path, VTex *vt) {
     }
     free(px);
 }
+
+/* The player's screenshot key (graphics.ini screenshot_key, default F12): one press while the game window has the focus saves
+ * the picture on screen at the game's size as a PNG in <exe folder>\..\screenshots (Windows' own encoder, WIC; a BMP when
+ * that fails). Read on the present job, as the capture key below; never on a frame a rollback re-runs (none is presented). */
+#ifdef _WIN32
+#include <wincodec.h>
+#include <shlobj.h>                                  /* SHCreateDirectoryExW (shell32, linked) */
+void menu_toast(const char *text, int ms);           /* menu.cpp (menu_stub.c without the menu): a short note that goes by itself */
+static const GUID k_clsid_wic = {0xcacaf262, 0x9370, 0x4615, {0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a}};      /* CLSID_WICImagingFactory */
+static const GUID k_iid_wic = {0xec5ec8a9, 0xc395, 0x4314, {0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70}};        /* IID_IWICImagingFactory */
+static const GUID k_png = {0x1b7cfaf4, 0x713f, 0x473c, {0xbb, 0xcd, 0x61, 0x37, 0x42, 0x5f, 0xae, 0xaf}};            /* GUID_ContainerFormatPng */
+static const GUID k_bgr24 = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0c}};          /* GUID_WICPixelFormat24bppBGR */
+static int save_png(const wchar_t *path, const uint8_t *px, int w, int h, int bgr) {
+    IWICImagingFactory *fac = NULL; IWICStream *st = NULL; IWICBitmapEncoder *enc = NULL; IWICBitmapFrameEncode *fr = NULL;
+    uint32_t row = (uint32_t)w * 3;
+    uint8_t *rgb = malloc((size_t)row * h);
+    int ok = 0;
+    HRESULT ci = CoInitializeEx(NULL, COINIT_MULTITHREADED);      /* S_FALSE / RPC_E_CHANGED_MODE: COM is there already */
+    if (rgb) for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        const uint8_t *s = px + ((size_t)y * w + x) * 4; uint8_t *d = rgb + (size_t)y * row + x * 3;
+        d[0] = s[bgr ? 0 : 2]; d[1] = s[1]; d[2] = s[bgr ? 2 : 0];
+    }
+    if (rgb && SUCCEEDED(CoCreateInstance(&k_clsid_wic, NULL, CLSCTX_INPROC_SERVER, &k_iid_wic, (void **)&fac))
+        && SUCCEEDED(fac->lpVtbl->CreateStream(fac, &st)) && SUCCEEDED(st->lpVtbl->InitializeFromFilename(st, path, GENERIC_WRITE))
+        && SUCCEEDED(fac->lpVtbl->CreateEncoder(fac, &k_png, NULL, &enc)) && SUCCEEDED(enc->lpVtbl->Initialize(enc, (IStream *)st, WICBitmapEncoderNoCache))
+        && SUCCEEDED(enc->lpVtbl->CreateNewFrame(enc, &fr, NULL)) && SUCCEEDED(fr->lpVtbl->Initialize(fr, NULL))
+        && SUCCEEDED(fr->lpVtbl->SetSize(fr, (UINT)w, (UINT)h))) {
+        WICPixelFormatGUID f = k_bgr24;
+        ok = SUCCEEDED(fr->lpVtbl->SetPixelFormat(fr, &f)) && IsEqualGUID(&f, &k_bgr24)
+             && SUCCEEDED(fr->lpVtbl->WritePixels(fr, (UINT)h, row, row * (UINT)h, rgb))
+             && SUCCEEDED(fr->lpVtbl->Commit(fr)) && SUCCEEDED(enc->lpVtbl->Commit(enc));
+    }
+    if (fr) fr->lpVtbl->Release(fr);
+    if (enc) enc->lpVtbl->Release(enc);
+    if (st) st->lpVtbl->Release(st);
+    if (fac) fac->lpVtbl->Release(fac);
+    if (SUCCEEDED(ci)) CoUninitialize();
+    free(rgb);
+    if (!ok) DeleteFileW(path);
+    return ok;
+}
+static void player_screenshot(VTex *vt) {
+    int w, h, bgr = vt->fmt == VK_FORMAT_B8G8R8A8_UNORM || vt->fmt == VK_FORMAT_B8G8R8A8_SRGB;
+    wchar_t dir[MAX_PATH], path[MAX_PATH + 64];
+    SYSTEMTIME t;
+    const char *own = gfx_screenshot_dir();                    /* graphics.ini screenshot_dir (UTF-8), else <exe folder>\..\screenshots */
+    if (own[0] && MultiByteToWideChar(CP_UTF8, 0, own, -1, dir, MAX_PATH) > 1) {
+        size_t l = wcslen(dir);
+        while (l > 3 && (dir[l - 1] == L'\\' || dir[l - 1] == L'/')) dir[--l] = 0;
+        SHCreateDirectoryExW(NULL, dir, NULL);                 /* with any missing parent folders */
+    } else {
+        DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
+        while (n && dir[n - 1] != L'\\') n--;                  /* <exe folder>\ */
+        if (!n) return;
+        wcscpy(dir + n, L"..\\screenshots");
+        CreateDirectoryW(dir, NULL);
+    }
+    GetLocalTime(&t);
+    int len = swprintf(path, MAX_PATH + 64, L"%ls\\ssbu_%04u-%02u-%02u_%02u-%02u-%02u_%03u", dir, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    uint8_t *px = window_pixels(vt, &w, &h);
+    if (!px || len <= 0) { free(px); return; }
+    wcscpy(path + len, L".png");
+    int ok = save_png(path, px, w, h, bgr);
+    free(px);
+    if (!ok) {                                                 /* the BMP writer above, same picture */
+        char p8[MAX_PATH + 64];
+        wcscpy(path + len, L".bmp");
+        WideCharToMultiByte(CP_UTF8, 0, path, -1, p8, sizeof p8, NULL, NULL);
+        save_bmp_vk(p8, vt);
+    }
+    printf("screenshot: %ls (%dx%d)%s\n", path, w, h, ok ? "" : " (PNG failed: saved as BMP)");
+    char note[256], name[96], folder[96] = "Screenshots";
+    WideCharToMultiByte(CP_UTF8, 0, wcsrchr(path, L'\\') + 1, -1, name, sizeof name, NULL, NULL);
+    if (own[0]) { const wchar_t *f = wcsrchr(dir, L'\\'); WideCharToMultiByte(CP_UTF8, 0, f && f[1] ? f + 1 : dir, -1, folder, sizeof folder, NULL, NULL); }
+    snprintf(note, sizeof note, "Screenshot saved: %s (%s folder)", name, folder);
+    menu_toast(note, 3000);
+}
+#endif
 static VkSemaphore g_sem[8][2];
 static VkSemaphore g_sem_img[16];                  /* session 11: the "rendering finished" semaphore, one per swapchain image */
 static int g_isem;
@@ -3566,6 +3654,110 @@ static void osk_draw(uint32_t index) {
     vkCmdBlitImage(R.cmd, g_osk.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
 }
 static void menu_vk_draw(uint32_t index);          /* U1: the settings menu (nvn_vk_menu.c, included below) */
+/* graphics.ini sharpening = 1..100 (0 = off, the default): the picture is sharpened on its way to the window. The present
+ * blit goes into image A (window-sized, the same blit and filter as without it, so colours and sRGB handling are unchanged),
+ * a compute pass writes B = A plus its difference to the average of the 4 neighbours, times the strength, held inside the
+ * minimum and maximum of its 3 x 3 neighbourhood (no halos), and B is copied 1:1 into the swapchain image. Only presented frames
+ * (never one a rollback re-runs), no game memory read or written, the game's images untouched. Turned off for the run if
+ * anything of it cannot be made. */
+static struct { int failed; uint32_t w, h; VkImage a, b; VMem ma, mb; VkImageView va, vb; VkPipeline pipe; VkPipelineLayout layout; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set; } g_shp;
+static const char *const k_sharpen_glsl =
+    "#version 460\n"
+    "layout(local_size_x = 8, local_size_y = 8) in;\n"
+    "layout(binding = 0, rgba8) uniform readonly image2D src;\n"
+    "layout(binding = 1, rgba8) uniform writeonly image2D dst;\n"
+    "layout(push_constant) uniform P { float amount; } p;\n"
+    "vec3 at(ivec2 q, ivec2 s) { return imageLoad(src, clamp(q, ivec2(0), s - 1)).rgb; }\n"
+    "void main() {\n"
+    "    ivec2 q = ivec2(gl_GlobalInvocationID.xy), s = imageSize(src);\n"
+    "    if (q.x >= s.x || q.y >= s.y) return;\n"
+    "    vec3 c = at(q, s), n = at(q + ivec2(0, -1), s), so = at(q + ivec2(0, 1), s), w = at(q + ivec2(-1, 0), s), e = at(q + ivec2(1, 0), s);\n"
+    "    vec3 lo = min(c, min(min(n, so), min(w, e))), hi = max(c, max(max(n, so), max(w, e)));\n"
+    "    for (int i = 0; i < 4; i++) { vec3 d = at(q + ivec2(i < 2 ? -1 : 1, (i & 1) == 0 ? -1 : 1), s); lo = min(lo, d); hi = max(hi, d); }\n"
+    "    vec3 m = (hi - lo) * (0.075 * p.amount);\n"      /* a little room past the neighbours, growing with the strength */
+    "    imageStore(dst, q, vec4(clamp(c + (c - (n + so + w + e) * 0.25) * p.amount, max(lo - m, 0.0), min(hi + m, 1.0)), 1.0));\n"
+    "}\n";
+static int sharpen_setup(void) {
+    if (g_shp.pipe) return 1;
+    VkDescriptorSetLayoutBinding bd[2] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}, {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo dl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dl.bindingCount = 2; dl.pBindings = bd;
+    VKC(vkCreateDescriptorSetLayout(V.device, &dl, NULL, &g_shp.dsl));
+    VkPushConstantRange pc = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+    VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    li.setLayoutCount = 1; li.pSetLayouts = &g_shp.dsl; li.pushConstantRangeCount = 1; li.pPushConstantRanges = &pc;
+    VKC(vkCreatePipelineLayout(V.device, &li, NULL, &g_shp.layout));
+    VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
+    VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pi.maxSets = 1; pi.poolSizeCount = 1; pi.pPoolSizes = &ps;
+    VKC(vkCreateDescriptorPool(V.device, &pi, NULL, &g_shp.pool));
+    VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = g_shp.pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &g_shp.dsl;
+    VKC(vkAllocateDescriptorSets(V.device, &ai, &g_shp.set));
+    uint64_t unused;
+    VkShaderModule m = module_from_glsl(5, k_sharpen_glsl, "sharpening", &unused);
+    if (!m) return 0;
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = m; ci.stage.pName = "main";
+    ci.layout = g_shp.layout;
+    VkResult r = vkCreateComputePipelines(V.device, NULL, 1, &ci, NULL, &g_shp.pipe);
+    vkDestroyShaderModule(V.device, m, NULL);
+    return r == VK_SUCCESS;
+}
+static void sharpen_image(uint32_t w, uint32_t h, VkImageUsageFlags usage, VkImage *img, VMem *mem, VkImageView *view) {
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    VkMemoryRequirements rq;
+    ci.imageType = VK_IMAGE_TYPE_2D; ci.format = VK_FORMAT_R8G8B8A8_UNORM; ci.extent.width = w; ci.extent.height = h; ci.extent.depth = 1; ci.mipLevels = 1; ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = usage | VK_IMAGE_USAGE_STORAGE_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VKC(vkCreateImage(V.device, &ci, NULL, img));
+    vkGetImageMemoryRequirements(V.device, *img, &rq);
+    *mem = vmem_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    VKC(vkBindImageMemory(V.device, *img, mem->mem, mem->off));
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = *img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = ci.format; vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; vi.subresourceRange.levelCount = 1; vi.subresourceRange.layerCount = 1;
+    VKC(vkCreateImageView(V.device, &vi, NULL, view));
+}
+/* Instead of the present blit b from src into the swapchain image (TRANSFER_DST): 1 = done, 0 = not (blit as before). */
+static int sharpen_present(VkImage src, const VkImageBlit *b, VkImage dst) {
+    static int amount = -1;
+    if (amount < 0) { amount = gfx_sharpening(); if (amount) printf("nvn_vk: sharpening %d %% on the picture sent to the window\n", amount); }
+    if (!amount || g_shp.failed) return 0;
+    if (!sharpen_setup()) { g_shp.failed = 1; printf("nvn_vk: sharpening could not be set up: off for this run\n"); return 0; }
+    uint32_t w = (uint32_t)(b->dstOffsets[1].x - b->dstOffsets[0].x), h = (uint32_t)(b->dstOffsets[1].y - b->dstOffsets[0].y);
+    if (!w || !h) return 0;
+    if (w != g_shp.w || h != g_shp.h) {                    /* the window's picture changed size: rare */
+        if (g_shp.a) {
+            vkDeviceWaitIdle(V.device);
+            vkDestroyImageView(V.device, g_shp.va, NULL); vkDestroyImage(V.device, g_shp.a, NULL); vmem_free(g_shp.ma);
+            vkDestroyImageView(V.device, g_shp.vb, NULL); vkDestroyImage(V.device, g_shp.b, NULL); vmem_free(g_shp.mb);
+        }
+        sharpen_image(w, h, VK_IMAGE_USAGE_TRANSFER_DST_BIT, &g_shp.a, &g_shp.ma, &g_shp.va);
+        sharpen_image(w, h, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &g_shp.b, &g_shp.mb, &g_shp.vb);
+        VkDescriptorImageInfo ii[2] = {{NULL, g_shp.va, VK_IMAGE_LAYOUT_GENERAL}, {NULL, g_shp.vb, VK_IMAGE_LAYOUT_GENERAL}};
+        VkWriteDescriptorSet wr[2];
+        memset(wr, 0, sizeof wr);
+        for (int i = 0; i < 2; i++) { wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = g_shp.set; wr[i].dstBinding = (uint32_t)i; wr[i].descriptorCount = 1; wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; wr[i].pImageInfo = &ii[i]; }
+        vkUpdateDescriptorSets(V.device, 2, wr, 0, NULL);
+        g_shp.w = w; g_shp.h = h;
+    }
+    VkImageBlit in = *b, out = *b;
+    in.dstOffsets[0].x = in.dstOffsets[0].y = 0; in.dstOffsets[1].x = (int32_t)w; in.dstOffsets[1].y = (int32_t)h;
+    out.srcOffsets[0] = in.dstOffsets[0]; out.srcOffsets[1] = in.dstOffsets[1];
+    image_barrier(g_shp.a, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdBlitImage(R.cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_shp.a, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &in, VK_FILTER_LINEAR);
+    image_barrier(g_shp.a, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    image_barrier(g_shp.b, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    float k = (float)amount / 100.0f * 4.0f;               /* 100 % = 4 x the difference; the clamp keeps it inside the 3 x 3 neighbours (60 %: +1..4 % edge contrast with 2 x and the 4 neighbours only, too little) */
+    vkCmdBindPipeline(R.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_shp.pipe);
+    vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_shp.layout, 0, 1, &g_shp.set, 0, NULL);
+    vkCmdPushConstants(R.cmd, g_shp.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &k);
+    vkCmdDispatch(R.cmd, (w + 7) / 8, (h + 7) / 8, 1);
+    image_barrier(g_shp.b, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkCmdBlitImage(R.cmd, g_shp.b, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &out, VK_FILTER_NEAREST);
+    return 1;
+}
+
 static void overlay_draw(uint32_t index) {
     osk_draw(index);
     menu_vk_draw(index);                           /* U1: over the keyboard; returns at once unless SSBU_MENU / graphics.ini menu = on */
@@ -3660,6 +3852,11 @@ static void prep_first_hold(LONG64 frame) {
      * says "LOADING SHADERS": the game's first present waits until every container is in memory (the work began at the
      * device's creation, during the white screen of the game's own boot; this shows what is left) */
     int loadall = g_prep_marked && g_prep_loadall;
+    if (loadall && gfx_options()->shader_load == 2 && !getenv("SSBU_VK_LOAD_AT_START")) {      /* shader_load = background: the same loading, no hold */
+        done = 1; printf("nvn_vk_prep: shader_load = background: the game starts at once; every container is made into memory meanwhile (%lld of %lld stage jobs done so far)\n",
+                         (long long)g_jq_done, (long long)g_jq_queued);
+        fflush(stdout); return;
+    }
     if ((mode && !loadall) || !g_prep_thread || (g_prep_marked && !loadall) || g_prep_limited || !g_ovl.bar_arg) { done = 1; if (frame < 3) printf("nvn_vk_prep: first-run screen not shown: %s\n", mode == 1 ? "shader_prepare = background" : mode == 2 ? "shader_prepare = off" : !g_prep_thread ? "no preparation on this device (no stage libraries)" : g_prep_marked ? "the marker of an earlier run is there: everything was prepared for this GPU, driver and version; straight to the game (shader_load = loading)" : "test limit"); return; }
     if (g_prep_state == 2 || g_prep_state == 3) { done = 1; if (loadall) printf("nvn_vk_prep: SHADERS LOADED AT START: everything was in memory before the game's first frame (%lld): no wait\n", (long long)frame); return; }
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
@@ -3772,6 +3969,19 @@ static void vk_present2(void *arg, int progress) {
             if (vt && ffn >= bfrom && ffn % bper < blen) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sburst_%06lld_%lld.bmp", dir ? dir : "", dir ? "/" : "", (long long)ffn, (long long)frame); save_bmp_vk(path, vt); }
         }
     }
+#ifdef _WIN32
+    {   /* the player's screenshot key (save_png above): one GetAsyncKeyState per frame; only while the game's window has the focus */
+        static int was;
+        int key = gfx_screenshot_key();
+        if (key && vt) {
+            int down = (GetAsyncKeyState(key) & 0x8000) != 0;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+            if (down && !was && pid == GetCurrentProcessId()) player_screenshot(vt);
+            was = down;
+        }
+    }
+#endif
     {   /* round 18: SSBU_VK_CAPKEY=1 (F9) or =<virtual key code>: when the key goes down the next 12 presented frames are
          * saved as cap_<press>_<presented frame>.bmp in SSBU_SHOT_DIR, and with SSBU_DRAWTAG=1 the draws of those frames are
          * printed (DT / DTV lines, tag = the presented frame modulo 100000 + 100000). For the player who SEES a picture fault
@@ -3881,7 +4091,8 @@ swap: ;
             b.dstOffsets[0].x = d4[0]; b.dstOffsets[0].y = d4[1]; b.dstOffsets[1].x = d4[0] + d4[2]; b.dstOffsets[1].y = d4[1] + d4[3]; b.dstOffsets[1].z = 1;
             if (g_pt_on > 0) pt_mark((int)V.extent.width, (int)V.extent.height, 0, 0, 0, 1, 2);
             CKPT_OP("present blit (swapchain image, index, w)", V.images[index], index, vt->w, 0);
-            vkCmdBlitImage(R.cmd, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);      /* PR #8: src = vt, or the last reduction step */
+            if (!sharpen_present(src->img, &b, V.images[index]))      /* graphics.ini sharpening: the same blit into its own image, sharpened, copied in */
+                vkCmdBlitImage(R.cmd, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);      /* PR #8: src = vt, or the last reduction step */
         } else { VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f; vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr); }
         fl_capture(vt, fl_s4, frame, fl_layout);      /* session 13: 16x9 copy of what is presented, for the flash detector */
         overlay_draw(index);

@@ -30,6 +30,12 @@ int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
 static volatile int g_gfx_input_delay = 3;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
 int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
 void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
+static int g_gfx_sharpening;                         /* sharpening = 0 .. 100 */
+int gfx_sharpening(void) { gfx_options(); return g_gfx_sharpening; }
+static char g_gfx_shot_dir[400];                     /* screenshot_dir = a folder (UTF-8) | empty: <install>\screenshots */
+const char *gfx_screenshot_dir(void) { gfx_options(); return g_gfx_shot_dir; }
+static int g_gfx_shot_key = 0x7b;                    /* screenshot_key = F12 (VK_F12) by default; F1..F24, off = 0 */
+int gfx_screenshot_key(void) { gfx_options(); return g_gfx_shot_key; }
 
 static const char *const k_default_ini =
 "; graphics.ini: display and rendering options of the native build (read once at start by gfx_options.c).\r\n"
@@ -50,7 +56,11 @@ static const char *const k_default_ini =
 "width = 1280\r\n"
 "height = 720\r\n"
 "\r\n"
-"; vsync = auto | display | clock | off | on | mailbox      (Vulkan)\r\n"
+"; vsync = auto | display | clock | off | on | mailbox | vrr      (Vulkan)\r\n"
+";   vrr:     for a G-Sync / FreeSync (variable refresh rate) monitor: the program's own 60.000 Hz clock and immediate\r\n"
+";            presentation, so the monitor refreshes when each frame arrives: every frame on screen equally long at any\r\n"
+";            maximum refresh rate (100, 144, 165 Hz ...). Turn variable refresh on in the GPU's control panel; most\r\n"
+";            drivers apply it only to a fullscreen or borderless window. Without it: as 'off'.\r\n"
 ";   auto:    the refresh rate of the monitor is measured at start. 60, 120, 240 Hz (within 1.1 %: 59.94, 119.88 too):\r\n"
 ";            as 'display'. Any other rate (75, 100, 144, 165 Hz): as 'clock'. The log says which ('display:' lines).\r\n"
 ";   display: the game's frame clock IS the display's refresh (every refresh at 60 Hz, every second one at 120 Hz):\r\n"
@@ -117,9 +127,11 @@ static const char *const k_default_ini =
 ";   off:        nothing is prepared ahead; shaders are built when the game first needs them.\r\n"
 "shader_prepare = first_run\r\n"
 "\r\n"
-"; shader_load = start | loading      (Vulkan, on a PC where the preparation above is done)\r\n"
+"; shader_load = start | background | loading      (Vulkan, on a PC where the preparation above is done)\r\n"
 ";   start:   every shader of the game is loaded into memory at the start, behind a 'LOADING SHADERS NN %' screen (a few\r\n"
 ";            seconds, more on a CPU with few cores): the loading screens before a fight do no shader work. Uses more memory.\r\n"
+";   background: the same loading, but the game starts at once: intro, title and menus run while it finishes (the\r\n"
+";            menus may be a little less smooth meanwhile; a fight's loading screen waits for what is left).\r\n"
 ";   loading: as before: the shaders of a fighter or stage are loaded at its loading screen (less memory).\r\n"
 "shader_load = start\r\n"
 "\r\n"
@@ -164,7 +176,21 @@ static const char *const k_default_ini =
 "; input_delay = 1 .. 8 | auto\r\n"
 ";   The input delay of online rollback fights, in frames (F1 > Gameplay). Both games of a match use the larger of the\r\n"
 ";   two players' values. auto: from the measured round trip. SSBU_RB_NET_DELAY=<n> wins.\r\n"
-"input_delay = 3\r\n";
+"input_delay = 3\r\n"
+"\r\n"
+"; sharpening = 0 .. 100      (Vulkan)\r\n"
+";   0 = off. Sharpens the picture on its way to the window, without halos (kept inside each pixel's neighbours).\r\n"
+";   Try 30 to 50. Costs one small GPU pass per frame. Read at start.\r\n"
+"sharpening = 0\r\n"
+"\r\n"
+"; screenshot_key = F12 | F1 .. F24 | off\r\n"
+";   One press while the game window has the focus saves the picture as a PNG in the screenshots folder next to saves.\r\n"
+";   Avoid F1 (menu), F2 (stats) and F11 (fullscreen). Read at start.\r\n"
+"screenshot_key = F12\r\n"
+"\r\n"
+"; screenshot_dir = <a folder> | empty\r\n"
+";   Where the screenshot key saves its pictures. Empty: the screenshots folder next to saves. Made when missing.\r\n"
+"screenshot_dir =\r\n";
 
 #define GFX_LOW_SCALE 0.5f
 #define GFX_LOW_SCALE_TEXT "0.50"
@@ -221,7 +247,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "window")) o->window_mode = !_stricmp(val, "borderless") ? 1 : !_stricmp(val, "fullscreen") ? 2 : 0;
         else if (!_stricmp(key, "width")) { int v = atoi(val); if (v >= 320 && v <= 16384) o->width = v; }
         else if (!_stricmp(key, "height")) { int v = atoi(val); if (v >= 180 && v <= 16384) o->height = v; }
-        else if (!_stricmp(key, "vsync")) o->present = !_stricmp(val, "on") ? 1 : !_stricmp(val, "off") ? 2 : !_stricmp(val, "mailbox") ? 3 : !_stricmp(val, "display") ? 4 : !_stricmp(val, "auto") ? 5 : 0;
+        else if (!_stricmp(key, "vsync")) o->present = !_stricmp(val, "on") ? 1 : !_stricmp(val, "off") ? 2 : !_stricmp(val, "mailbox") ? 3 : !_stricmp(val, "display") ? 4 : !_stricmp(val, "auto") ? 5 : !_stricmp(val, "vrr") ? 6 : 0;
         else if (!_stricmp(key, "gpu")) { if (_stricmp(val, "auto")) snprintf(o->gpu, sizeof o->gpu, "%s", val); }
         else if (!_stricmp(key, "console_mode")) o->handheld = !_stricmp(val, "handheld");
         else if (!_stricmp(key, "resolution_scale")) { float v = (float)atof(val); if (v > 0) o->scale = v; }
@@ -232,13 +258,16 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "runahead")) g_gfx_runahead = !_stricmp(val, "on") || !_stricmp(val, "1");      /* track R1 round 5 (r1_state.c) */
         else if (!_stricmp(key, "latency")) g_gfx_latency = !_stricmp(val, "lowest") ? 2 : !_stricmp(val, "low") ? 1 : 0;      /* track L1 (display.c latency_mode) */
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
-        else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
+        else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading") ? 1 : !_stricmp(val, "background") ? 2 : 0;
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */
         else if (!_stricmp(key, "volume")) { g_gfx_volume = -1; if (_stricmp(val, "auto")) { int v = atoi(val); g_gfx_volume = v < 0 ? 0 : v > 100 ? 100 : v; } }
         else if (!_stricmp(key, "language")) { g_gfx_language[0] = 0; if (_stricmp(val, "auto")) snprintf(g_gfx_language, sizeof g_gfx_language, "%s", val); }
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
         else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
+        else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
+        else if (!_stricmp(key, "screenshot_dir")) snprintf(g_gfx_shot_dir, sizeof g_gfx_shot_dir, "%s", val);      /* nvn_vk_draw.c */
+        else if (!_stricmp(key, "screenshot_key")) { int n = (val[0] == 'F' || val[0] == 'f') ? atoi(val + 1) : 0; g_gfx_shot_key = n >= 1 && n <= 24 ? 0x70 + n - 1 : 0; }      /* VK_F1 = 0x70 */
         else unknown++;
     }
     if (f) fclose(f);
@@ -247,7 +276,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     }
     printf("graphics profile: %s\n", o->profile == 1 ? "low (weak or integrated GPU): resolution_scale=" GFX_LOW_SCALE_TEXT ", anisotropic_filtering=game, vsync=clock; these three keys of the file are not used"
                                                      : "custom (every key of graphics.ini as written; 'profile = low' is the set for a weak or integrated GPU)");
-    static const char *const k_win[3] = {"windowed", "borderless", "fullscreen"}, *const k_vs[6] = {"clock", "on", "off", "mailbox", "display", "auto"};
+    static const char *const k_win[3] = {"windowed", "borderless", "fullscreen"}, *const k_vs[7] = {"clock", "on", "off", "mailbox", "display", "auto", "vrr"};
     printf("graphics options: %s (%s): renderer=%s window=%s %dx%d vsync=%s gpu=%s console_mode=%s resolution_scale=%.2f anisotropic_filtering=%d frame_time_overlay=%s%s\n", o->path,
            written ? "written with the defaults" : f ? "read" : "NOT readable, defaults used", o->renderer ? "opengl" : "vulkan", k_win[o->window_mode], o->width, o->height, k_vs[o->present],
            o->gpu[0] ? o->gpu : "auto", o->handheld ? "handheld" : "docked", o->scale, o->aniso, o->overlay ? "on" : "off", unknown ? " (lines with an unknown key were ignored)" : "");

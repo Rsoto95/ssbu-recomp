@@ -19,6 +19,7 @@ void menu_notice(const char *text);
 /* O1 (net_relay.c): a small box at the top of the picture for 7 s, over the game, taking no input ("Cannot join this
  * room" + the cause). Any thread; a new one replaces the old. */
 void menu_popup(const char *title, const char *text);
+void menu_toast(const char *text, int ms);      /* a short note at the bottom that goes by itself after ms (default 3000) */
 
 /* display.c, window thread: 1 = the message was taken by the menu (the window procedure returns 0) */
 int  menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l);

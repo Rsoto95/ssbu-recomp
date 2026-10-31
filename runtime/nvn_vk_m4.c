@@ -2497,7 +2497,7 @@ static DWORD WINAPI prep_main(void *arg) {
     printf("nvn_vk_prep: into the cache only: %lld stage variants (%lld read from a record of an earlier run, the others translated now), %lld stage libraries compiled and released, %lld met again in a later variation, %lld left to the game's own path (already handed over); worker time: %.0f s stages, %.0f s libraries; at most %d workers at a time (%d in a fight)\n",
            (long long)g_prep_stages, (long long)g_prep_fromrec, (long long)g_prep_libs, (long long)g_prep_dup, (long long)g_prep_had, (double)g_prep_tr_tk / (double)fq.QuadPart, (double)g_prep_lib_tk / (double)fq.QuadPart, g_prep_cap, g_prep_fight_cap);
     if (g_prep_loadall) g_prep_urgent = 0;
-    if (whole && g_prep_marked) { g_prep_state = 2; prep_line(g_prep_loadall ? "FINISHED: every container of the game's data is in memory (shader_load = start)" : "FINISHED (the containers kept in memory; the rest was prepared by an earlier run)"); }
+    if (whole && g_prep_marked) { g_prep_state = 2; prep_line(g_prep_loadall ? (gfx_options()->shader_load == 2 ? "FINISHED: every container of the game's data is in memory (shader_load = background)" : "FINISHED: every container of the game's data is in memory (shader_load = start)") :"FINISHED (the containers kept in memory; the rest was prepared by an earlier run)"); }
     else if (whole) {
         g_prep_state = 2;
         prep_line("FINISHED: every stage of every container of the game's data is made");
@@ -2573,7 +2573,7 @@ static void prep_start(void) {
          * pipeline-cache hits), all of them marked announced, so a pool laid at a loading screen queues nothing; the game's
          * first present waits for the end behind the "LOADING SHADERS" screen (prep_first_hold). */
         const char *la = getenv("SSBU_VK_LOAD_AT_START");
-        g_prep_loadall = la ? atoi(la) != 0 : gfx_options()->shader_load == 0;
+        g_prep_loadall = la ? atoi(la) != 0 : gfx_options()->shader_load != 1;      /* start and background load everything; only start holds the first frame (prep_first_hold) */
         if (g_prep_loadall && !getenv("SSBU_VK_PREP_KEEP")) g_prep_keep = 1024; else g_prep_loadall = 0;
         printf("nvn_vk_prep: every container of the game's data was prepared for this GPU and driver by an earlier run (%s): %s (SSBU_VK_PREP=2 does everything again)\n", g_prep_marker,
                g_prep_loadall ? "shader_load = start: ALL of them are made into memory now, from their records, before the game's first frame" : g_prep_keep > 0 ? "only the container(s) kept in memory (SSBU_VK_PREP_KEEP) are made again, from their records" : "shader_load = loading: each is made at its loading screen");
