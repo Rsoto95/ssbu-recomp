@@ -364,7 +364,7 @@ static const char *const k_size_name[] = {"1280 x 720", "1600 x 900", "1920 x 10
 #define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 struct Settings {
-    int window, size, vsync, latency, renderer, aniso, profile, wait, prepare, load, console, overlay, volume, runahead, lang, kb_player, stats;
+    int window, size, vsync, latency, renderer, aniso, profile, wait, prepare, load, console, overlay, volume, runahead, lang, kb_player, stats, unlock;
     float scale;
     char gpu[64];
 };
@@ -386,13 +386,14 @@ static void settings_init(int cw, int ch) {
     S.size = -1; for (int i = 0; i < N(k_sizes); i++) if (k_sizes[i][0] == o->width && k_sizes[i][1] == o->height) S.size = i;
     S.kb_player = nnpad_kb_player_cfg();
     S.stats = gfx_stats_overlay();
+    S.unlock = gfx_unlock_all();
     S0 = S;
     (void)cw; (void)ch;
 }
 static void ini(const char *key, const char *value) { gfx_ini_set(key, value); }
 static int restart_pending(void) {
     return S.vsync != S0.vsync || S.latency != S0.latency || S.renderer != S0.renderer || S.aniso != S0.aniso || S.profile != S0.profile || S.wait != S0.wait ||
-           S.prepare != S0.prepare || S.load != S0.load || S.console != S0.console || S.runahead != S0.runahead || S.lang != S0.lang ||
+           S.prepare != S0.prepare || S.load != S0.load || S.console != S0.console || S.runahead != S0.runahead || S.lang != S0.lang || S.unlock != S0.unlock ||
            fabsf(S.scale - S0.scale) > 0.001f || strcmp(S.gpu, S0.gpu);
 }
 static void apply_stats(int on) {            /* live: the stats box (F2) */
@@ -477,8 +478,8 @@ static uint64_t g_pad_prev;
 static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
-enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_ARENA, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Online", "Arena", "Add-on content", "Language", "Log", "About"};
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_GAMEPLAY, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_ARENA, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Gameplay", "Experimental", "Online", "Arena", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -1174,6 +1175,44 @@ static int online_differs(void) {
 }
 
 
+/* Gameplay: the input delay of online fights (graphics.ini input_delay; net_session.c reads it at each match's handshake, both
+ * games take the larger of the two players' values) and every fighter and stage unlocked (unlock_all, unlock_all.c; read at start) */
+static void sec_gameplay(void) {
+    static int dl = -1;
+    if (dl < 0) dl = gfx_input_delay();
+    ImGui::Text("Input delay of online fights (frames)");
+    ImGui::SetWindowFontScale(1.2f);
+    for (int d = 1; d <= 7; d++) {
+        int v = d == 7 ? 0 : d;                     /* (the last one: auto) */
+        char l[16];
+        if (v) snprintf(l, sizeof l, "%d##dl%d", d, d); else snprintf(l, sizeof l, "Auto##dl%d", d);
+        if (d > 1) ImGui::SameLine();
+        if (ImGui::RadioButton(l, dl == v)) {
+            char t[8]; dl = v; gfx_set_input_delay(v); snprintf(t, sizeof t, "%d", v); ini("input_delay", v ? t : "auto");
+            printf("menu: input delay of online fights: %s\n", v ? t : "auto"); fflush(stdout);
+        }
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    tag(0, 0);
+    help("The time between pressing a button and your fighter moving, in online fights. 3 is the usual. Lower: quicker to respond, "
+         "but with a slow connection fighters jump around more. Higher: smoother, but slower to respond. "
+         "You and the other player do not need the same number: each match uses the larger of the two. Used from your next match.");
+    if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, e.g. \"Play SSBU (delay 4).bat\"): it wins over this setting. Start the game with \"Play SSBU.bat\" to use it.", getenv("SSBU_RB_NET_DELAY"));
+    ImGui::Separator();
+    if (onoff("unlock", S.unlock != 0, true)) { S.unlock = !S.unlock; ini("unlock_all", k_onoff[S.unlock]); printf("menu: unlock all fighters and stages: %s (at the next start)\n", k_onoff[S.unlock]); fflush(stdout); }
+    ImGui::SameLine(); ImGui::Text("Unlock all fighters and stages");
+    tag(1, S.unlock != S0.unlock);
+    help("ON: every fighter of the base game and every stage can be picked at once, and no \"Challenger approaching\" fights. "
+         "Your save is not changed: turn it OFF again and the game is as before. Downloadable (DLC) fighters appear when their files are installed (Add-on content). "
+         "Spirits, music and other rewards stay as in the game.");
+    if (getenv("SSBU_UNLOCK_ALL")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "SSBU_UNLOCK_ALL=%s is set for this run: it wins over this setting.", getenv("SSBU_UNLOCK_ALL"));
+    if (S.unlock != S0.unlock) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. Restart the game to apply it.");
+        if (ImGui::Button("Restart the game now##unlock")) restart_game();
+        ImGui::SameLine(); ImGui::TextDisabled("(progress not saved by the game is lost)");
+    }
+}
+
 static void sec_dlc(void) {
     const int *own = NULL;
     int n = nnaoc_owned(&own);
@@ -1648,6 +1687,7 @@ static void draw_menu(int cw, int ch) {
     case SEC_GRAPHICS: sec_graphics(); break;
     case SEC_AUDIO: sec_audio(); break;
     case SEC_CONTROLS: sec_controls(); break;
+    case SEC_GAMEPLAY: sec_gameplay(); break;
     case SEC_EXPERIMENTAL: sec_experimental(); break;
     case SEC_ROOMS: sec_rooms(); break;
     case SEC_ARENA: sec_arena(); break;

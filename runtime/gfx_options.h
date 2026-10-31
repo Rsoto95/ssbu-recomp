@@ -26,6 +26,8 @@ int gfx_menu(void);                       /* menu = off 0 | on 1 (the in-game se
 int gfx_volume(void);                     /* volume = auto -1 | 0..100 (the copies a person plays; nnaudio.c) */
 const char *gfx_language(void);           /* language = auto "" | a language code of the game (nnmisc.c) */
 int gfx_unlock_all(void);                 /* unlock_all = off 0 | on 1 (unlock_all.c) */
+int gfx_input_delay(void);                /* input_delay = auto 0 | 1..8 frames of online rollback fights (net_session.c), default 3 */
+void gfx_set_input_delay(int d);          /* (the F1 menu: used from the next match) */
 void gfx_set_overlay(int on);             /* frame_time_overlay, changed while running */
 int gfx_ini_set(const char *key, const char *value);      /* writes `key = value` into graphics.ini (the line replaced, comments kept; appended when missing); 1 = written */
 #endif

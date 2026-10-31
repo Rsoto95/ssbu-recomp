@@ -27,6 +27,7 @@
 #endif
 #include "../rollback.h"                                         /* rb_input.c, rb_wire.c, rb_timesync.c are units of their own (build.py); rb.h is their API */
 #include "net_stats.h"                                  /* (R3 net3) NetMatch, MM_*: the lobby's opponent search (net_relay.c) */
+#include "gfx_options.h"                                /* gfx_input_delay: graphics.ini input_delay (F1 > Gameplay) */
 
 int net_rb_send(const void *p, int n);                 /* net_relay.c: 1 = sent (or queued by the latency simulation) */
 int net_rb_ready(void);                                /* net_relay.c: joined a lobby (the host's game or a server) */
@@ -126,6 +127,11 @@ static RbhMsg g_hs_peer;  static int g_hs_have_peer;    /* host: the joiner's ne
 static RbhMsg g_hs_prop;  static int g_hs_have_prop;    /* host: the proposal sent; joiner: the proposal accepted (this wait) */
 static volatile LONG g_hs_accepted, g_hs_refused; static char g_hs_why[160];
 static uint64_t g_hs_seed; static uint32_t g_match_id;  /* the agreed match: its seed, and its id (tag of the pad and block messages) */
+/* (2026-10-30) the input delay: each game's own (SSBU_RB_NET_DELAY, else graphics.ini input_delay = F1 > Gameplay, default 3;
+ * 0 = auto) travels in RbhMatch.pad0 (the joiner's CHOICE); the host's proposal carries the larger of the two and both games
+ * play the match with it (a different delay on each side would desync: each takes the other's first frames as empty) */
+static int g_hs_delay;
+static int my_delay(void) { int d = g_delay_cfg >= 0 ? g_delay_cfg : gfx_input_delay(); return d < 0 ? 0 : d > 12 ? 12 : d; }
 static volatile LONG g_hs_cancelled;                    /* this match: 1 = no agreement: played locally and left at once; 2 = (pub2) set up
                                                            * inside a Local Wireless room: the game's own netcode plays it, no rollback, nothing changed */
 static int g_match_n;                                   /* (hs12) online matches of this session so far (1 = the first; rbn_start) */
@@ -379,7 +385,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     int ok = 0, stopped = 0;
     AcquireSRWLockExclusive(&g_hs_lock);
     do g_hs_nonce = (uint32_t)hs_rand(); while (!g_hs_nonce);
-    g_hs_peer_nonce = 0; g_hs_have_peer = g_hs_have_prop = 0; g_hs_accepted = g_hs_refused = 0; g_hs_why[0] = 0; g_hs_cancelled = 0;
+    g_hs_peer_nonce = 0; g_hs_have_peer = g_hs_have_prop = 0; g_hs_accepted = g_hs_refused = 0; g_hs_why[0] = 0; g_hs_cancelled = 0; g_hs_delay = 0;
     g_hs_waiting = 1;
     ReleaseSRWLockExclusive(&g_hs_lock);
     if (find) printf("[rbnet] handshake %ld: no room code and no Local Wireless room: asking the lobby for an opponent who starts a rollback match too; own choice ui_chara %016llx colour %d (at most %.0f s; nonce %08x)\n", (long)round,
@@ -423,6 +429,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
                     g_hs_refused = 1; hs_refuse(g_hs_peer.nonce, g_hs_why);
                 } else {
                     RbhMatch m = *mine; m.seed = hs_new_seed();
+                    m.pad0 = (uint8_t)(g_hs_peer.m.pad0 > my_delay() ? g_hs_peer.m.pad0 : my_delay());
                     hs_head(&g_hs_prop, RBH_PROPOSE); g_hs_prop.echo = g_hs_peer.nonce; g_hs_prop.m = m; g_hs_have_prop = 1;
                 }
             }
@@ -433,6 +440,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
                 m.has_layout[1] = g_hs_peer.m.has_layout[0]; memcpy(m.layout[1], g_hs_peer.m.layout[0], sizeof m.layout[1]);
                 if (m.chara[1] == m.chara[0] && m.colour[1] == m.colour[0]) m.colour[1] = (uint8_t)((m.colour[0] + 1) & 7);   /* same fighter, same colour: the joiner takes the next one */
                 m.seed = hs_new_seed();
+                m.pad0 = (uint8_t)(g_hs_peer.m.pad0 > my_delay() ? g_hs_peer.m.pad0 : my_delay());
                 hs_stage_rule(&m, &g_hs_peer.m);
                 hs_head(&g_hs_prop, RBH_PROPOSE); g_hs_prop.echo = g_hs_peer.nonce; g_hs_prop.m = m; g_hs_have_prop = 1;
             }
@@ -442,7 +450,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             if (g_hs_have_prop) {
                 if (g_hs_prop.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_prop.exe_stamp);
                 *out = g_hs_prop.m; ok = 1;
-            } else if (now - last_tx >= 100 && net_rb_ready()) { last_tx = now; RbhMsg c; hs_head(&c, RBH_CHOICE); c.m = *mine; hs_send(&c, sizeof c); }
+            } else if (now - last_tx >= 100 && net_rb_ready()) { last_tx = now; RbhMsg c; hs_head(&c, RBH_CHOICE); c.m = *mine; c.m.pad0 = (uint8_t)my_delay(); hs_send(&c, sizeof c); }
         }
         if (ok) g_hs_waiting = 0;
         ReleaseSRWLockExclusive(&g_hs_lock);
@@ -496,6 +504,9 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     menu_notice(NULL);
     g_hs_lwr = lwr;
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
+    g_hs_delay = out->pad0;
+    printf("[rbnet] handshake %ld: input delay %d frames for this match (%s; here %d, 0 = auto)\n", (long)round, g_hs_delay,
+           g_hs_delay ? "the larger of the two players' settings" : "both on auto: from the round trip", my_delay());
     host_fixed_random_reseed(g_hs_seed);
     printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld; match id %08x; notice updates %llu, frames shown again %llu)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx, g_match_id,
            (unsigned long long)notes, (unsigned long long)redraws);
@@ -641,6 +652,7 @@ static int lock_delay(void) {                           /* the delay that covers
 }
 static int peer_lockstep(void) { return g_peer_mode >= 0 && (g_peer_mode & 0x80) && g_peerdelay; }
 static int auto_delay(void) {
+    if (g_hs_delay > 0) return g_hs_delay;              /* the delay both games agreed on in the handshake */
     if (g_delay_cfg >= 0) return g_delay_cfg;
     if (g_lockstep && (!g_peerdelay || g_loop)) return lock_delay();     /* (the old way; the loop test) */
     if (g_lockstep || peer_lockstep()) {                /* (hs14) either game has no ring: both take the larger of the two announced delays */

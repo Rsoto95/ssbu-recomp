@@ -27,6 +27,9 @@ int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
 const char *gfx_language(void) { gfx_options(); return g_gfx_language; }
 static int g_gfx_unlock_all;                         /* unlock_all = off | on (unlock_all.c) */
 int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
+static volatile int g_gfx_input_delay = 3;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
+int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
+void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
 
 static const char *const k_default_ini =
 "; graphics.ini: display and rendering options of the native build (read once at start by gfx_options.c).\r\n"
@@ -156,7 +159,12 @@ static const char *const k_default_ini =
 ";   play, and no challenger fights interrupt. Nothing is written into the save; off again = as before. Downloadable\r\n"
 ";   fighters are not touched (owning them unlocks them). Spirits, music and other rewards stay as in the game.\r\n"
 ";   13.0.4 and 13.0.5. SSBU_UNLOCK_ALL=1 / 0 wins. Read at start.\r\n"
-"unlock_all = off\r\n";
+"unlock_all = off\r\n"
+"\r\n"
+"; input_delay = 1 .. 8 | auto\r\n"
+";   The input delay of online rollback fights, in frames (F1 > Gameplay). Both games of a match use the larger of the\r\n"
+";   two players' values. auto: from the measured round trip. SSBU_RB_NET_DELAY=<n> wins.\r\n"
+"input_delay = 3\r\n";
 
 #define GFX_LOW_SCALE 0.5f
 #define GFX_LOW_SCALE_TEXT "0.50"
@@ -230,6 +238,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "volume")) { g_gfx_volume = -1; if (_stricmp(val, "auto")) { int v = atoi(val); g_gfx_volume = v < 0 ? 0 : v > 100 ? 100 : v; } }
         else if (!_stricmp(key, "language")) { g_gfx_language[0] = 0; if (_stricmp(val, "auto")) snprintf(g_gfx_language, sizeof g_gfx_language, "%s", val); }
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
+        else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
         else unknown++;
     }
     if (f) fclose(f);

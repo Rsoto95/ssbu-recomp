@@ -65,7 +65,7 @@ def ini_get(path, key):
 # connects as F1 > Online says; an --env given to run.py wins over all of them.
 PLAY_LOBBY = 'lan'
 PLAY_DEFAULTS = {
-    'SSBU_RB_NET_DELAY': '3',        # input delay in frames, the same on every PC
+    # (the input delay: graphics.ini input_delay, F1 > Gameplay, default 3; each match uses the larger of the two players')
     'SSBU_LATENCY': 'low',
     'SSBU_LS_X_WW': '1',             # the ring tracks the writes to the big extras ranges with GetWriteWatch
     'SSBU_RB_AUDIO_OFF': '1',        # the audio threads held in a fight (the main thread empties their queue: SSBU_RB_AUDIO_PUMP)
@@ -380,7 +380,8 @@ def main():
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)
         print('Online: %s (play in Local Wireless rooms: 1-on-1 rooms use rollback), rollback on, input delay %s' % (
-            'same network (Radmin): the first game started is the lobby' if env.get('SSBU_ONLINE') == 'lan' else 'lobby %s' % env.get('SSBU_ONLINE', 'from graphics.ini'), env['SSBU_RB_NET_DELAY']))
+            'same network (Radmin): the first game started is the lobby' if env.get('SSBU_ONLINE') == 'lan' else 'lobby %s' % env.get('SSBU_ONLINE', 'from graphics.ini'),
+            env.get('SSBU_RB_NET_DELAY') or '%s (F1 > Gameplay)' % (ini_get(gini, 'input_delay') or '3')))
     if a.mac and not (env.get('VK_DRIVER_FILES') or env.get('VK_ICD_FILENAMES')):
         # MoltenVK (the Vulkan driver on Metal) named for Homebrew's Vulkan loader, as play_mac.sh does: run.py started by hand
         icd = next((p for p in ('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json', '/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json',
