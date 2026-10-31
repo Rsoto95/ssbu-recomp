@@ -669,7 +669,7 @@ static void ml_arena_sweep(ULONGLONG now) {
 /* MATCH_STATE: search id u32, state u8, role u8, flags u8 (1 the host's room is open), peer u32, peer name[32],
  * searching u16, players u16 (of c's build and code), seconds waited u16 */
 static void ml_match_send(ml_client *c, ULONGLONG now) {
-    uint8_t pkt[4 + 49], *p = ml_hdr(pkt, ML_MATCH_STATE);
+    uint8_t pkt[4 + 49 + 7], *p = ml_hdr(pkt, ML_MATCH_STATE);
     uint32_t sid = c->search_id, peer = 0;
     int state, role = 0, flags = 0, searching = 0, players = 0;
     const char *name = "";
@@ -689,6 +689,15 @@ static void ml_match_send(ml_client *c, ULONGLONG now) {
     p = ml_put32(p, peer);
     memset(p, 0, ML_NAME_LEN); memcpy(p, name, strlen(name)); p += ML_NAME_LEN;
     p = ml_put16(p, (unsigned)searching); p = ml_put16(p, (unsigned)players); p = ml_put16(p, waited > 65535 ? 65535u : (unsigned)waited);
+    /* (2026-10-30, rooms: the match goes player to player, the host only runs the room) a rollback match: 'A' + the address
+     * this lobby sees the opponent at (u32, u16); 0.0.0.0 = the opponent is the game of this lobby's PC (its own loopback):
+     * the player reaches it at the address it reaches the lobby at. net_relay.c then sends the match's messages straight there. */
+    if (c->mpeer && c->kind == ML_KIND_ROLLBACK) {
+        uint32_t a = ntohl(c->mpeer->at.sin_addr.s_addr);
+        *p++ = 'A';
+        p = ml_put32(p, (a >> 24) == 127 ? 0 : a);
+        p = ml_put16(p, ntohs(c->mpeer->at.sin_port));
+    }
     ml_send(pkt, (int)(p - pkt), &c->at);
 }
 static void ml_match_end(ml_client *c, int state, int role, const ml_client *peer, const char *why, ULONGLONG now) {

@@ -607,6 +607,42 @@ static volatile uint32_t g_rb_match_peer;              /* (R3 net3) the opponent
 static volatile LONG64 g_rb_rx_other;                  /* (R3 net3) rollback messages from another player than that opponent: dropped */
 static volatile LONG g_rb_nodst; static volatile uint32_t g_rb_dst_said;
 int net_rb_no_destination(void) { return g_rb_nodst; }
+/* (2026-10-30, rooms: "the connection should be p2p, the host will be just for the room") the messages of a rollback match the
+ * lobby paired (MATCH_STATE 'A': the opponent's address) go STRAIGHT to the opponent: 26 RB_DIRECT = hdr, sender's lobby
+ * address u32, the message. Until a direct message has come back they also go through the lobby (as before), and again
+ * whenever none came for RBD_STALE_MS (a firewall, Radmin down): never worse than relayed. The lobby only carries the room. */
+#define T_RB_DIRECT 26
+#define RBD_STALE_MS 1500
+static SRWLOCK g_rbd_lock = SRWLOCK_INIT;
+static struct sockaddr_in g_rbd_at;                     /* (g_rbd_lock) the opponent's address; sin_port 0 = none */
+static uint32_t g_rbd_peer;                             /* (g_rbd_lock) its lobby address (10.13.x.x) */
+static volatile LONG64 g_rbd_last_rx;                   /* when a direct message of it last came */
+static volatile LONG64 g_rbd_tx, g_rbd_rx;
+static volatile LONG g_rbd_said;
+static void rbd_set(uint32_t peer, uint32_t ip, uint16_t port) {   /* (client thread) MATCH_STATE 'A' */
+    AcquireSRWLockExclusive(&g_rbd_lock);
+    int same = g_rbd_peer == peer && g_rbd_at.sin_port == htons(port);
+    memset(&g_rbd_at, 0, sizeof g_rbd_at);
+    g_rbd_at.sin_family = AF_INET;
+    g_rbd_at.sin_addr.s_addr = ip ? htonl(ip) : g_lobby.sin_addr.s_addr;      /* (0: the game on the lobby's PC) */
+    g_rbd_at.sin_port = htons(port);
+    g_rbd_peer = peer;
+    ReleaseSRWLockExclusive(&g_rbd_lock);
+    if (!same) { char a[16]; InterlockedExchange64(&g_rbd_last_rx, 0); InterlockedExchange(&g_rbd_said, 0);
+        say("match: the opponent's address for a direct connection: %s:%u", ip_text(ntohl(g_rbd_at.sin_addr.s_addr), a), port); }
+}
+static void rbd_rx(const uint8_t *b, int n, const struct sockaddr_in *from) {      /* (client thread) RB_DIRECT */
+    if (n <= 8 || !g_joined) return;
+    AcquireSRWLockShared(&g_rbd_lock);
+    int ok = g_rbd_at.sin_port && from->sin_addr.s_addr == g_rbd_at.sin_addr.s_addr && g32(b + 4) == g_rbd_peer && g_rbd_peer == g_rb_match_peer;
+    ReleaseSRWLockShared(&g_rbd_lock);
+    if (!ok) return;
+    InterlockedExchange64(&g_rbd_last_rx, (LONG64)ms_now()); InterlockedIncrement64(&g_rbd_rx);
+    if (!g_rbd_said) { InterlockedExchange(&g_rbd_said, 1); char a[16]; say("match: DIRECT connection with the opponent (%s): the match no longer goes through the lobby", ip_text(ntohl(from->sin_addr.s_addr), a)); }
+    g_rb_peer = g32(b + 4);
+    rbn_rx(b + 8, n - 8);
+}
+int net_rb_direct(void) { return g_rbd_last_rx && ms_now() - (uint64_t)g_rbd_last_rx < RBD_STALE_MS; }    /* 1 = the match goes player to player now */
 int net_rb_send(const void *p, int n) {
     if (!net_rb_ready() || n <= 0 || n > 1400) return 0;
     uint32_t dst = nnldn_other_ip(), room = dst;
@@ -615,6 +651,16 @@ int net_rb_send(const void *p, int n) {
     if (!dst && g_mode == NET_MODE_LOBBY && !_stricmp(g_code, "public")) { InterlockedIncrement(&g_rb_nodst); return 0; }
     if (dst && dst != g_rb_dst_said) { char a[16]; g_rb_dst_said = dst; printf("[rbnet] rollback messages go to %s (%s)\n", ip_text(dst, a), room ? "the other player of this Local Wireless room" : dst == g_rb_match_peer ? "the opponent the lobby found" : "the game that wrote to this one"); fflush(stdout); }
     uint8_t b[1500];
+    if (dst && !room && dst == g_rb_match_peer) {       /* (direct) straight to the opponent */
+        struct sockaddr_in at; uint32_t peer;
+        AcquireSRWLockShared(&g_rbd_lock); at = g_rbd_at; peer = g_rbd_peer; ReleaseSRWLockShared(&g_rbd_lock);
+        if (at.sin_port && peer == dst) {
+            hdr(b, T_RB_DIRECT); s32(b + 4, g_ip); memcpy(b + 8, p, (size_t)n);
+            tx(b, 8 + n, &at); InterlockedIncrement64(&g_rbd_tx);
+            static unsigned keep;                       /* (the other way works too: the lobby is not needed; 1 in 30 still goes through it, so the */
+            if (net_rb_direct() && ++keep % 30) return 1;   /* room sees the match being played: net_minilobby.c rb_seen / ml_arena_playing) */
+        }
+    }
     hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
     memcpy(b + 16, p, (size_t)n);
     tx(b, 16 + n, &g_lobby);
@@ -1343,7 +1389,7 @@ static void arena_state(const uint8_t *p, int n) {      /* (client thread) an AR
     }
 }
 
-static void mm_state(const uint8_t *p, uint64_t t) {    /* (client thread) a MATCH_STATE body */
+static void mm_state(const uint8_t *p, int n, uint64_t t) {    /* (client thread) a MATCH_STATE body (n bytes) */
     uint32_t id = g32(p);
     int st = p[4], role = p[5], flags = p[6];
     if (id != g_mm_id || st > MM_EXPIRED) return;
@@ -1371,7 +1417,9 @@ static void mm_state(const uint8_t *p, uint64_t t) {    /* (client thread) a MAT
     if (room_new) g_mm_room_said = 1;
     int rbk = g_mm.kind == 2;
     if (rbk && (st == MM_MATCHED || st == MM_TOGETHER) && g_mm.peer) g_rb_match_peer = g_mm.peer;
+    int direct_at = rbk && st == MM_MATCHED && g_mm.peer && n >= 49 + 7 && p[49] == 'A';
     ReleaseSRWLockExclusive(&g_mm_lock);
+    if (direct_at) rbd_set(g32(p + 7), g32(p + 50), g16(p + 54));     /* (the opponent's address: the match goes player to player) */
     if (st >= MM_TIMEOUT) InterlockedExchange(&g_mm_want, 0);
     (void)t;
     if (rbk) {                                          /* (R3 net3) a rollback-match search: rb_net.c's box shows every step; log lines + a mark only */
@@ -1867,7 +1915,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         int flen = sizeof from;
         int n = recvfrom(g_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
         if (n < 4 || buf[0] != 'S' || buf[1] != 'U' || buf[2] != PROTO) continue;
-        if (!same_at(&from, &g_lobby)) { if (g_joined && g_direct) from_player(buf, n, &from); continue; }
+        if (!same_at(&from, &g_lobby)) { if (buf[3] == T_RB_DIRECT) rbd_rx(buf, n, &from); else if (g_joined && g_direct) from_player(buf, n, &from); continue; }
         switch (buf[3]) {
         case T_DATA:
             if (n >= 16 && g_joined) {
@@ -1907,7 +1955,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             }
             break;
         case T_MATCH_STATE:
-            if (n >= 4 + 49 && g_joined) mm_state(buf + 4, ms_now());
+            if (n >= 4 + 49 && g_joined) mm_state(buf + 4, n - 4, ms_now());
             break;
         case T_ARENA_STATE:
             if (g_joined) arena_state(buf + 4, n - 4);

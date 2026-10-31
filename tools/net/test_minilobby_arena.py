@@ -72,6 +72,8 @@ class Player:
             elif k == MATCH_STATE:
                 sid, st, role = struct.unpack_from(">IBB", b, 4)
                 self.match = (st, role)
+                if len(b) >= 4 + 49 + 7 and b[4 + 49] == ord("A"):      # the opponent's address (the match goes player to player)
+                    self.peer_at = struct.unpack_from(">IH", b, 4 + 50)
 
     def ping(self):
         self.send(hdr(PING) + struct.pack(">Q", self.cookie) + b"\0" * 9)
@@ -172,6 +174,8 @@ def main():
         settle(everyone)
         check(a.match and b.match and a.match[0] == 2 and b.match[0] == 2 and a.match[1] == 1, "Ana and Beto paired, Ana is player 1")
         check(not c.match or c.match[0] != 2, "Caro (waiting) is not paired")
+        check(getattr(a, "peer_at", None) == (0, b.s.getsockname()[1]) and getattr(b, "peer_at", None) == (0, a.s.getsockname()[1]),
+              "each gets the other's address for a direct connection (0.0.0.0 = the lobby's PC, here loopback)")
 
         a.rb_to(b); b.rb_to(a)
         look(everyone)
