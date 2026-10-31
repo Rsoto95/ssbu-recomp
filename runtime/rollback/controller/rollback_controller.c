@@ -479,9 +479,17 @@ static int rbg_after(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) { 
 }
 /* (owner 2026-10-31: "mi control abre el otro P3 en la selección de personaje") the A's were still given 95 s after the match,
  * on the character select, where port 2's A opens a panel of a player who is not there (P3 on a Local Wireless room's
- * screen, the room's other player being P2). debug_mode.c: the select screen opening ends them. */
+ * screen, the room's other player being P2). debug_mode.c: the select screen opening ends them.
+ * (owner 2026-10-31: "ahora no puedo pasar de la pantalla de win") the same panel copy also runs right after the match,
+ * results screen still up: the A's ended there after 0 given and port 2's card never closed. The select screen cannot
+ * open before port 2's card is closed, so a call before the first A given is not it. */
 void rbg_after_stop(void) {
     if (g_rbg_after_t0 <= 0) return;
+    if (g_rbg_after_n == 0) {
+        static int said;
+        if (!said++) LOG("r1: RB NET: results screen: a select-screen panel before any A was given: not the character select, the A's go on\n");
+        return;
+    }
     LOG("r1: RB NET: results screen: player 2's A given %d times (port 2 read %d times with A down), done: the character select opened\n", g_rbg_after_n, g_rbg_after_polls);
     g_rbg_after_t0 = 0;
 }
