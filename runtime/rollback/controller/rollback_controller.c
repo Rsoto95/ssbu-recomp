@@ -477,6 +477,14 @@ static int rbg_after(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) { 
     if (g_rbg_after_hold > 0) { *b = 1; g_rbg_after_hold--; g_rbg_after_polls++; }
     return 1;
 }
+/* (owner 2026-10-31: "mi control abre el otro P3 en la selección de personaje") the A's were still given 95 s after the match,
+ * on the character select, where port 2's A opens a panel of a player who is not there (P3 on a Local Wireless room's
+ * screen, the room's other player being P2). debug_mode.c: the select screen opening ends them. */
+void rbg_after_stop(void) {
+    if (g_rbg_after_t0 <= 0) return;
+    LOG("r1: RB NET: results screen: player 2's A given %d times (port 2 read %d times with A down), done: the character select opened\n", g_rbg_after_n, g_rbg_after_polls);
+    g_rbg_after_t0 = 0;
+}
 /* nnhid.c (through r1_pad / r1_pad_id): the pad of port id (0 / 1) in the pass now running */
 void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
     if (!g_rbg_in_match && g_rbg_after_t0 > 0 && (id == 0 || id == 1) && rbg_after(id, b, lx, ly, rx, ry)) return;

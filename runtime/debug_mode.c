@@ -778,6 +778,7 @@ static void panel_copy_hook(Ctx *c, void *user) {
     (void)user;
     uint64_t base = c->x[0]; uint32_t idx = (uint32_t)c->x[1];
     g_orig_panel_copy(c);
+    { void rbg_after_stop(void); if (idx == 0) rbg_after_stop(); }     /* the select screen opens: player 1's A is no longer given to port 2 (rollback_controller.c) */
     if (idx != 1) return;
     uint64_t e = base + 0x10 + 0x1c8ull;
     if (g_p2none > 0 && rd32(e + 0x30) != 3) {
