@@ -451,6 +451,15 @@ def step_inputs(cx):
             pick = (near or ups or [None])[0]
             if pick:
                 upd, why_u = pick['path'], 'game %s, the newest found%s' % (pick['build'], ' next to the base game' if near else '')
+        # the update (or a DLC) given as the base game, or the base as the update: unpacked, it only ends in an
+        # "incomplete data.arc" error much later (a tester, 2026-10-31)
+        for slot, v, want in (('Base game', base, 'base'), ('Update', upd, 'update')):
+            it = find_inputs.classify_game_file(v) if v and os.path.isfile(v) else None
+            if it and it['kind'] != want:
+                raise Stop('the %s file is %s, not the %s: %s' % (slot, {'base': 'the base game', 'update': 'the update',
+                           'dlc': 'a DLC'}[it['kind']], 'base game' if want == 'base' else 'update', v),
+                           'Base game: the file with [01006A800016E000] (about 14-17 GB). Update: the one with '
+                           '[01006A800016E800] (13.0.4 or 13.0.5, about 3.7 GB). Choose them again and start again.')
         keys = a.keys or best.get('prod_keys')
         for what, v in (('the base game (.xci / .nsp / .nsz)', base), ('the update 13.0.4 or 13.0.5', upd), ('prod.keys', keys)):
             if not v:
