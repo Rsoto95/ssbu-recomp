@@ -137,8 +137,14 @@ static volatile LONG g_hs_cancelled;                    /* this match: 1 = no ag
 static int g_match_n;                                   /* (hs12) online matches of this session so far (1 = the first; rbn_start) */
 /* (hs12) the tag byte at the end of every PADS message: the agreed match id and the match number of the session. Run tw7:
  * the other game's last pads of match 1 arrived after this game's match-1 reset and were taken at the start of match 2
- * (their acknowledgement 1081 made each game send no pads any more: both waited for ever at frame 7). */
-static uint8_t pads_tag(void) { return (uint8_t)(g_match_id ^ ((uint32_t)g_match_n * 0x3bu)); }
+ * (their acknowledgement 1081 made each game send no pads any more: both waited for ever at frame 7).
+ * (owner 2026-10-31: "si vos cerras y volves a entrar a mi sala sin que yo cierre mi juego explota") the match number is
+ * each game's own count: the other player closed the game and came back, here it was match 2, there match 1, every pad
+ * was dropped as of another match and both waited for ever at frame 0. The tag is now of the agreed id only (as match 1
+ * had it), and the host, who draws the seed, never draws one whose tag is that of its own last match (hs_new_seed). */
+static int match_tag(uint64_t seed) { return (uint8_t)((((uint32_t)(seed ^ (seed >> 32))) | 1u) ^ 0x3bu); }
+static int g_last_tag = -1;                             /* the tag of this game's last match (rbn_start), -1 before the first */
+static uint8_t pads_tag(void) { return (uint8_t)(g_match_id ^ 0x3bu); }
 static long long g_hs_tx, g_hs_rx;
 #define RBH_BLK 0xa48                                   /* match block + 0 .. + 0x580 + 2 * 0x260 + 8 */
 static uint8_t g_hs_mine_blk[RBH_BLK], g_hs_peer_blk[RBH_BLK]; static int g_hs_mine_ok, g_hs_peer_got, g_hs_blk_done; static uint8_t g_hs_peer_have[RBH_BLK / 768 + 1];
@@ -268,7 +274,9 @@ static uint64_t hs_rand(void) {
 static uint64_t hs_new_seed(void) {
     const char *e = getenv("SSBU_RB_NET_SEED");
     uint64_t s = e && *e ? strtoull(e, NULL, 0) : hs_rand();
-    return s ? s : 1;
+    if (!s) s = 1;
+    while (match_tag(s) == g_last_tag) s += 2;            /* (pads_tag) +2 always changes the tag byte */
+    return s;
 }
 static void hs_print(const char *what, const RbhMatch *m) {
     printf("[rbnet] handshake: %s: player 1 ui_chara %016llx colour %d controls %s, player 2 ui_chara %016llx colour %d controls %s; stage entry %016llx form %u flags %x second %016llx; hazards %d, items %u, rule kind %d, stocks %d; seed %016llx\n", what,
@@ -667,7 +675,7 @@ static int auto_delay(void) {
     return d < 1 ? 1 : d > 4 ? 4 : d;
 }
 void rbn_start(long long f0) {
-    g_f0 = f0; g_started = 1; g_match_n++;
+    g_f0 = f0; g_started = 1; g_match_n++; g_last_tag = pads_tag();
     if (g_hlog) { fprintf(g_hlog, "m %d id %08x\n", g_match_n, g_match_id); fflush(g_hlog); }      /* (rbn_cmp.py: frames are per match) */
     g_remote = 1 - g_local;
     if (g_peerdelay < 0) { const char *e = getenv("SSBU_RB_NET_PEERDELAY"); g_peerdelay = !(e && e[0] == '0'); }
