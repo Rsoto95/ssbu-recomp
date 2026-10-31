@@ -543,6 +543,9 @@ static int player_connected(uint32_t id) {
     { int r1_net_on(void); if (id == 1 && r1_net_on()) return 1; }      /* R3 online rollback (SSBU_RB_NET): port 2 is the other game's player */
     if ((int)id == g_keyboard_player) return 1;
     if (id == 0 && sdl_on() && net_merge()) { for (int p = 1; p < 8; p++) if (nnpad_present(p)) return 1; }   /* online: every pad of this PC plays port 1 (fill_pad) */
+    /* (2026-10-30) online, ports 3..8 are no players of their own either: their pads already play port 1. A 4-port GameCube
+     * adapter (4 devices, one per port) opened players 3 and 4 on the select screen at every A */
+    if (id >= 2 && sdl_on() && net_merge()) return 0;
     if (sdl_on()) return nnpad_present((int)id);
     return x_present(g_source[id]);
 }
@@ -614,7 +617,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     int slot = g_source[id];
     if (sdl_on()) {
         NnPadState ps;
-        if (!(id == 1 && net_merge()) && nnpad_get((int)id, &ps)) {      /* (online the pad of player 2 plays port 1: not twice) */
+        if (!(id >= 1 && net_merge()) && nnpad_get((int)id, &ps)) {      /* (online the pads of players 2..8 play port 1: not twice) */
             wired = ps.wired;
             if (devices_live() && !menu_input_blocked()) {      /* U1: not while the settings menu is open (menu.cpp) */
                 buttons |= ps.buttons;
