@@ -415,11 +415,48 @@ static void audio_StartAudioOut(Ctx *c) {             /* (AudioOut *) -> Result 
     RET(0);
 }
 
+/* (2026-11-01) Rollback fights with sound (F1 > Gameplay > Sound in online fights): the snapshot ring takes the state of the
+ * frame only with every guest thread at a wait, and "nus3::audio update" mixes 3-6 ms of every 16.7 ms frame: a capture found
+ * it mixing at a third of the frames and waited for it (a friend's log: 1434 captures waited, 7.8 s in a fight; 48 fps instead
+ * of 57). While the gate is on, the thread gets a buffer only against a credit, which the ring gives right after each capture
+ * of a real pass (rollback_audio_grant): it mixes right after the capture and is back at its wait (TimedWaitSystemEvent, the
+ * only wait of its loop) long before the next one. Between buffers it holds none, so a load that puts it back at that wait
+ * leaves it consistent with this side (the buffers it handed over are played; the ones released wait here). Off (-1) = as before. */
+static volatile LONG g_credit = -1;
+#define CREDIT_MAX 3
+#define CREDIT_STALE_MS 100                               /* no capture gave credit for this long (the ring went off, a long stall): the mixer runs freely */
+static long long g_gate_refused, g_gate_given, g_gate_stale;
+static LONGLONG g_grant_at;
+void nnaudio_gate(int on) {
+    EnterCriticalSection(&g_lock);
+    LONG was = g_credit;
+    if ((was >= 0) == (on != 0)) { LeaveCriticalSection(&g_lock); return; }
+    g_credit = on ? 0 : -1;
+    g_grant_at = now_ticks();
+    uint64_t ev = g_event;
+    LeaveCriticalSection(&g_lock);
+    printf("nn::audio: rollback sound gate %s\n", on ? "ON (the mixer runs right after each capture)" : "off");
+    if (!on) printf("nn::audio: rollback sound gate: %lld buffers given, %lld asks refused (no credit), %lld given with no capture for %d ms, in the fight\n", g_gate_given, g_gate_refused, g_gate_stale, CREDIT_STALE_MS);
+    g_gate_given = g_gate_refused = g_gate_stale = 0;
+    fflush(stdout);
+    if (!on && ev) os_signal_event(ev);                   /* the mixer goes on at once */
+}
+void nnaudio_grant(int n) {                               /* snapshot_ring.c, after a capture of a real pass */
+    EnterCriticalSection(&g_lock);
+    int wake = g_credit >= 0;
+    if (wake) { g_credit += n; if (g_credit > CREDIT_MAX) g_credit = CREDIT_MAX; g_grant_at = now_ticks(); }
+    uint64_t ev = g_event;
+    LeaveCriticalSection(&g_lock);
+    if (wake && ev) os_signal_event(ev);                  /* wakes the mixer from its TimedWaitSystemEvent */
+}
+
 static void audio_GetReleasedAudioOutBuffer(Ctx *c) { /* (AudioOut *) -> AudioOutBuffer * or null */
     uint64_t r = 0;
     EnterCriticalSection(&g_lock);
     if (g_open) collect_finished(0);
-    if (g_rel_head != g_rel_tail) r = g_released[g_rel_head++ % SLOTS];
+    int stale = g_credit == 0 && (now_ticks() - g_grant_at) * 1000 > (LONGLONG)CREDIT_STALE_MS * g_freq.QuadPart;
+    if (g_credit == 0 && !stale) { if (g_rel_head != g_rel_tail) g_gate_refused++; }      /* gate on, no credit: "none released" (it waits) */
+    else if (g_rel_head != g_rel_tail) { r = g_released[g_rel_head++ % SLOTS]; if (g_credit > 0) { g_credit--; g_gate_given++; } else if (stale) g_gate_stale++; }
     g_sec_polls++;
     if (!r) g_sec_empty++;
     LeaveCriticalSection(&g_lock);
