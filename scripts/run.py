@@ -125,6 +125,54 @@ def auto_update(gini):
     return True
 
 
+def update_watch_wanted(gini):
+    """(fork, 2026-11-01) the same conditions as auto_update, minus the restart guard: a player's installed copy, not a git checkout."""
+    return not os.path.exists(os.path.join(REPO, '.git')) and ini_get(gini, 'auto_update') not in ('off', '0', 'no', 'false')
+
+
+def update_watch(flag):
+    """(fork, 2026-11-01) While the game runs: GitHub's main branch is asked every 10 minutes (one API call); a commit newer
+    than the installed one (build\\update_manifest.json) writes `flag` (its first 7 characters). The game reads that file
+    (menu.cpp update_check): a message, and F1 > "Update and restart", which starts this launcher again in a new window
+    (SSBU_UPDATE_CMD) and closes the game; auto_update then installs it before the game opens again."""
+    import threading
+    import update
+
+    def watch():
+        have = (update.read_manifest() or {}).get('commit')
+        while True:
+            time.sleep(600)
+            try:
+                want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.DEFAULT_BRANCH),
+                                   'application/vnd.github.sha', timeout=8).decode().strip()
+            except Exception:                         # no internet, GitHub down or its rate limit: next time
+                continue
+            if re.fullmatch(r'[0-9a-f]{40}', want) and want != have:
+                try:
+                    with open(flag, 'w') as f:
+                        f.write(want[:7])
+                    print('A new version of the game is on GitHub (%s): F1 > "Update and restart" installs it.' % want[:7], flush=True)
+                except OSError:
+                    pass
+                return
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def wait_for_old_game():
+    """(fork, 2026-11-01) started by the game's "Update and restart" (SSBU_UPDATE_WAIT_PID): the old game is let close before
+    the update replaces its files (at most 60 s)."""
+    pid = os.environ.pop('SSBU_UPDATE_WAIT_PID', '')
+    if os.name != 'nt' or not pid.isdigit():
+        return
+    import ctypes
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(0x00100000, False, int(pid))   # SYNCHRONIZE
+    if h:
+        print('Waiting for the game to close...', flush=True)
+        k.WaitForSingleObject(h, 60000)
+        k.CloseHandle(h)
+
+
 def runtime_only_update(work):
     """(fork, 2026-10-30) The installer stopped (a tester's copy had no extracted dump left and the game files had moved: its
     "Find your game files" step cannot pass), but a new prebuilt runtime changes only the exe and its DLLs, which need no
@@ -251,6 +299,7 @@ def main():
     ap.add_argument('--mac', action='store_true', help='the native macOS build (default build folder build-macos, exe ssbu_native, '
                                                       'saves in ~/Library/Application Support/ssbu-recomp/userdata unless --userdata)')
     a = ap.parse_args()
+    wait_for_old_game()
     if a.play and os.name == 'nt' and not (a.linux or a.mac or a.build) and \
             auto_update(os.path.join(os.path.abspath(build_location.get()), 'config', 'graphics.ini')):
         # the new run.py (and the rest) runs from here on; the launcher's own arguments again
@@ -389,6 +438,16 @@ def main():
                     if os.path.isfile(p)), None)
         if icd:
             env['VK_DRIVER_FILES'] = icd
+    if a.play and os.name == 'nt' and not (a.linux or a.mac) and a.exe == main_exe and update_watch_wanted(gini):
+        flag = os.path.join(a.build, 'update_ready.txt')    # (fork) a newer version found while playing (update_watch)
+        try:
+            os.remove(flag)
+        except OSError:
+            pass
+        env['SSBU_UPDATE_FLAG'] = flag
+        env['SSBU_UPDATE_CMD'] = subprocess.list2cmdline([sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+        env['SSBU_UPDATE_DIR'] = REPO                  # (where "Play SSBU.bat" runs it)
+        update_watch(flag)
     for kv in a.env:
         k, _, v = kv.partition('=')
         env[k] = v

@@ -1687,6 +1687,68 @@ static void exit_game(void) {                              /* F1 -> Exit game: t
     CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(4000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
 }
+#ifdef _WIN32
+/* (fork, 2026-11-01) a newer version found while playing: "Play SSBU.bat" (run.py update_watch) asks GitHub every 10 minutes
+ * and writes SSBU_UPDATE_FLAG (the new commit's first 7 characters). Here: a message (again every 20 minutes) and, at the top
+ * of F1, "Update and restart": the launcher (SSBU_UPDATE_CMD) starts in a new window, waits for this game to close
+ * (SSBU_UPDATE_WAIT_PID), installs the update (auto_update) and opens the game again. Nothing without the variables (a git
+ * checkout, auto_update = off, a test run). */
+static char g_upd[16];
+static void update_check(void) {                           /* render thread, every frame: the file is read every 10 s */
+    static int on = -1; static ULONGLONG next_read, next_say;
+    if (on < 0) on = getenv("SSBU_UPDATE_FLAG") && getenv("SSBU_UPDATE_CMD");
+    if (!on) return;
+    ULONGLONG t = GetTickCount64();
+    if (!g_upd[0] && t >= next_read) {
+        next_read = t + 10000;
+        FILE *f = fopen(getenv("SSBU_UPDATE_FLAG"), "r");
+        if (f) {
+            char b[16] = "";
+            if (fgets(b, sizeof b, f)) b[strcspn(b, "\r\n")] = 0;
+            fclose(f);
+            snprintf(g_upd, sizeof g_upd, "%s", b[0] ? b : "new");
+            printf("menu: a new version of the game is ready (%s): F1 > Update and restart\n", g_upd); fflush(stdout);
+        }
+    }
+    if (g_upd[0] && t >= next_say) {
+        next_say = t + 20 * 60000;
+        menu_popup("New version", "A new version of the game is ready.\nPress F1 (or Home on the controller) and choose \"Update and restart\".\n"
+                   "The game closes, installs it (about a minute) and opens again by itself.");
+    }
+}
+static void update_and_restart(void) {
+    wchar_t pid[16], *cmd = _wcsdup(_wgetenv(L"SSBU_UPDATE_CMD") ? _wgetenv(L"SSBU_UPDATE_CMD") : L"");
+    const wchar_t *dir = _wgetenv(L"SSBU_UPDATE_DIR");
+    swprintf(pid, 16, L"%lu", GetCurrentProcessId());
+    SetEnvironmentVariableW(L"SSBU_UPDATE_WAIT_PID", pid);  /* (the new launcher waits for this game to close) */
+    STARTUPINFOW si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si); si.cb = sizeof si;
+    printf("menu: update and restart: %ls\n", cmd); fflush(stdout);
+    if (cmd[0] && CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, dir, &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        exit_game();
+    } else { printf("menu: update and restart FAILED (error %lu): close the game and open Play SSBU.bat\n", GetLastError()); fflush(stdout); }
+    free(cmd);
+}
+static void update_banner(void) {                          /* the top of every F1 section */
+    if (!g_upd[0]) return;
+    ImGui::TextColored(ImVec4(0.45f, 1.0f, 0.55f, 1.0f), "A new version of the game is ready.");
+    ImGui::SameLine();
+    if (ImGui::Button("Update and restart")) ImGui::OpenPopup("Update the game?");
+    if (ImGui::BeginPopupModal("Update the game?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("The game closes now. A window installs the new version (about a minute: do not close it),\n"
+                    "then the game opens again by itself. Finish your match first: it is not saved.");
+        if (ImGui::Button("Yes, update now")) { update_and_restart(); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Not now") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::Separator();
+}
+#else
+static void update_check(void) {}
+static void update_banner(void) {}
+#endif
 static void draw_menu(int cw, int ch) {
     if (ImGui::BeginMainMenuBar()) {
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "SSBU native");
@@ -1703,6 +1765,7 @@ static void draw_menu(int cw, int ch) {
     if (g_section_req >= 0) ImGui::SetNextWindowFocus();
     ImGui::Begin(title, NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
     g_section_req = -1;
+    update_banner();
     ImGui::BeginChild("body", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * (restart_pending() ? 2.2f : 1.2f)), ImGuiChildFlags_NavFlattened);
     ImGui::PushItemWidth(ImGui::GetFontSize() * 14);
     switch (g_section) {
@@ -1912,6 +1975,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
+    update_check();
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
