@@ -526,8 +526,16 @@ static int id_supported(uint32_t id) {
 }
 /* R3 online rollback: only port 1's pad is this game's player in a match (rollback_controller.c rbg_pad), so a pad that
  * Windows handed out as player 2 or later (connected late, a second device on slot 1) would work in the menus and do nothing
- * in the fight. While online every pad of this PC is merged into port 1. */
-static int net_merge(void) { int r1_net_on(void); return !g_x_synth && !scripted_run() && r1_net_on(); }
+ * in the fight. While online every pad of this PC is merged into port 1.
+ * (tester 2026-10-31: "los dos controles los detecta como el player 1") only where an online match can come from: a Local
+ * Wireless room, a room code (host / join), the arena queue, or a match already running. With rollback on but none of
+ * these (Smash on one PC, two friends on the couch) each pad is its own player again (net_session.c: such a fight is local). */
+static int net_merge(void) {
+    int r1_net_on(void), nnldn_role(void), net_online(void), net_mode(void), net_arena_queued(void), rbn_started(void);
+    if (g_x_synth || scripted_run() || !r1_net_on()) return 0;
+    int mode = net_online() > 0 ? net_mode() : -1;
+    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started();
+}
 
 /* Is a controller connected as this npad id? Player 1 always exists in scripted runs (the script is its pad). */
 static int player_connected(uint32_t id) {
