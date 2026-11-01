@@ -30,6 +30,9 @@ int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
 static volatile int g_gfx_input_delay = 3;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
 int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
 void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
+static volatile int g_gfx_fight_sound;                /* fight_sound = off | on (snapshot_ring.c); the F1 menu changes it while running */
+int gfx_fight_sound(void) { gfx_options(); return g_gfx_fight_sound; }
+void gfx_set_fight_sound(int on) { gfx_options(); g_gfx_fight_sound = on; }
 static int g_gfx_sharpening;                         /* sharpening = 0 .. 100 */
 int gfx_sharpening(void) { gfx_options(); return g_gfx_sharpening; }
 static char g_gfx_shot_dir[400];                     /* screenshot_dir = a folder (UTF-8) | empty: <install>\screenshots */
@@ -178,6 +181,12 @@ static const char *const k_default_ini =
 ";   two players' values. auto: from the measured round trip. SSBU_RB_NET_DELAY=<n> wins.\r\n"
 "input_delay = 3\r\n"
 "\r\n"
+"; fight_sound = off | on\r\n"
+";   Music and sound effects in online rollback fights (F1 > Gameplay). off: silent fights, the smoothest (the game's\r\n"
+";   audio threads are held for the fight). on: the sound plays, but the game may stutter and, rarely, crash. Only this\r\n"
+";   game. Used from the next match.\r\n"
+"fight_sound = off\r\n"
+"\r\n"
 "; sharpening = 0 .. 100      (Vulkan)\r\n"
 ";   0 = off. Sharpens the picture on its way to the window, without halos (kept inside each pixel's neighbours).\r\n"
 ";   Try 30 to 50. Costs one small GPU pass per frame. Read at start.\r\n"
@@ -265,6 +274,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "language")) { g_gfx_language[0] = 0; if (_stricmp(val, "auto")) snprintf(g_gfx_language, sizeof g_gfx_language, "%s", val); }
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
         else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
+        else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
         else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
         else if (!_stricmp(key, "screenshot_dir")) snprintf(g_gfx_shot_dir, sizeof g_gfx_shot_dir, "%s", val);      /* nvn_vk_draw.c */
         else if (!_stricmp(key, "screenshot_key")) { int n = (val[0] == 'F' || val[0] == 'f') ? atoi(val + 1) : 0; g_gfx_shot_key = n >= 1 && n <= 24 ? 0x70 + n - 1 : 0; }      /* VK_F1 = 0x70 */

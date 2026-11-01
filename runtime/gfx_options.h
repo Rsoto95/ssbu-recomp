@@ -28,6 +28,8 @@ const char *gfx_language(void);           /* language = auto "" | a language cod
 int gfx_unlock_all(void);                 /* unlock_all = off 0 | on 1 (unlock_all.c) */
 int gfx_input_delay(void);                /* input_delay = auto 0 | 1..8 frames of online rollback fights (net_session.c), default 3 */
 void gfx_set_input_delay(int d);          /* (the F1 menu: used from the next match) */
+int gfx_fight_sound(void);                /* fight_sound = off 0 | on 1: music and effects in online rollback fights (snapshot_ring.c) */
+void gfx_set_fight_sound(int on);         /* (the F1 menu: used from the next match) */
 int gfx_sharpening(void);                 /* sharpening = 0 (off, default) .. 100 (nvn_vk_draw.c sharpen_present) */
 int gfx_screenshot_key(void);             /* screenshot_key = F1..F24 (a virtual key code) | off 0; default F12 (nvn_vk_draw.c) */
 const char *gfx_screenshot_dir(void);     /* screenshot_dir = a folder (UTF-8) | "" = <exe>\..\screenshots (nvn_vk_draw.c) */

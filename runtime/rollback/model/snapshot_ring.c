@@ -487,6 +487,16 @@ void rg_meta_prof_report(void) {
     LOG("r1: META PROF captures %lld: fibers %.4f (fiber pool %.0f KB), command buffers %.4f (%.0f KB), threads %.4f, let go %.4f ms; loads %lld: thread registers %.4f, fibers %.4f, catch table %.4f, command buffers %.4f, let go %.4f ms\n",
         g_mp_n[0], g_mp[0] / a, g_mp_b[0] / a / 1024, g_mp[1] / a, g_mp_b[1] / a / 1024, g_mp[2] / a, g_mp[3] / a, g_mp_n[1], g_mp[4] / b, g_mp[5] / b, g_mp[6] / b, g_mp[7] / b, g_mp[8] / b);
 }
+/* (2026-11-01) SSBU_RB_AUDIO_OFF (Play SSBU.bat sets it) holds the audio threads for the fight, unless the player turned the
+ * sound of online fights on (graphics.ini fight_sound, F1 > Gameplay): read at each fight's base, so the switch is used from
+ * the next match. With the sound on the audio threads run beside the ring (the stutter of 2026-10-30). */
+int gfx_fight_sound(void);                                  /* gfx_options.c */
+static int audio_off_wanted(void) {
+    const char *e = getenv("SSBU_RB_AUDIO_OFF");
+    if (!(e && e[0] && e[0] != '0')) return 0;
+    if (gfx_fight_sound()) { LOG("r1: RING: fight sound ON (F1 > Gameplay): the audio threads keep running in this fight\n"); return 0; }
+    return 1;
+}
 int r1_ring_capture(long long frame, Ctx *c) {
     R1_CTR("capture (frame)", frame, 0);
     double t0 = now_ms(); int seg_was = g_rgp_seg; g_rgp_seg = 4;
@@ -502,8 +512,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
         if (g_mark <= 0) { g_ra_off = 1; LOG("r1: RING: no marks (the game DLL with marks is not loaded): OFF\n"); return 0; }
         if (!rg_init()) { g_rg_nomem = 2; if (!rbg_on()) g_ra_off = 1; LOG("r1: RING: its own allocations FAILED (out of memory): no rollback ring for the rest of this session\n"); return 0; }
         g_rg_ready = 1;
-        {   const char *e = getenv("SSBU_RB_AUDIO_OFF");              /* the audio threads stop for the rest of the fight (hostrt.c rb_audio_off_gate) */
-            if (e && e[0] && e[0] != '0') { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); } }
+        if (audio_off_wanted()) { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); }   /* (hostrt.c rb_audio_off_gate) */
         RgSlot *s = &g_rg[0]; g_rg_head = 0; g_rg_count = 1;
         s->frame = frame; s->nent = 0;
         rg_meta_capture(s, &g_ctx_save);
@@ -672,8 +681,7 @@ int r1_ring_rebase(long long frame, Ctx *c) {
          * every fight's end (ring_simulation.c), so from the second match of a session on the audio threads ran beside the
          * ring (the sound came back; main thread 9 -> 12.5 ms a frame, every hold and load waited for them): the second match
          * and the later ones stuttered, the first did not (testers, 2026-10-30) */
-        const char *e = getenv("SSBU_RB_AUDIO_OFF");
-        if (e && e[0] && e[0] != '0' && !g_rb_audio_off) { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING rebase: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); } }
+        if (audio_off_wanted() && !g_rb_audio_off) { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING rebase: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); } }
     unpark();
     g_rg_caps++;
     LOG("r1: RING rebase: base state (frame %lld) made again in %.1f ms (hold %.1f, copy %.1f): %zu window pages copied into the shadow (%.1f MB), %zu pool buffers freed, %zu shadow pages of pages not committed now dropped; extras %d ranges %.1f MB (%zu pages); %d modules got the mark maps\n",

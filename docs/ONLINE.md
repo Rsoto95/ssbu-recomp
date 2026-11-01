@@ -157,6 +157,11 @@ still play together in a room.
 Input delay is chosen from the best measured round trip: 1 frame below about 117 ms, 2 frames from about 117 ms, 3 from 150 ms,
 4 from about 184 ms (the rest of the trip is covered by rollback).
 
+**Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
+because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**
+brings the sound back (graphics.ini `fight_sound = on`), at the cost of some stutter and, rarely, a crash. It is each
+player's own choice and is used from the next match.
+
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
 Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between
 real players over the internet. Please report how it feels.
