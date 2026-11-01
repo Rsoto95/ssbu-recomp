@@ -1679,10 +1679,13 @@ static void version_check(const char *theirs) {      /* (beacon thread) the vers
     static uint64_t next;
     if (!theirs[0] || !strcmp(theirs, "dev") || !strcmp(mine, "dev") || !strncmp(theirs, mine, VER_LEN)) { last[0] = 0; return; }     /* (the beacon carries VER_LEN characters) */
     uint64_t t = ms_now();
-    if (!strcmp(theirs, last) && t < next) return;   /* told again every 30 s while it lasts */
-    snprintf(last, sizeof last, "%s", theirs); next = t + 30000;
+    int older_here = strcmp(theirs, mine) > 0;
+    /* (tester 2026-10-31: two friends playing on one PC got it every 30 s from another friend's older lobby on Radmin) the
+     * lobby's game older: told once (nothing this player can do about it); this game older: again every 10 minutes */
+    if (!strcmp(theirs, last) && (!older_here || t < next)) return;
+    snprintf(last, sizeof last, "%s", theirs); next = t + 600000;
     char text[400];
-    if (strcmp(theirs, mine) > 0)
+    if (older_here)
         snprintf(text, sizeof text, "Your game is OLDER than the lobby's (the player who opened first).\nYours: %s\nLobby: %s\n"
                  "Close the game and open Play SSBU.bat: it updates by itself.", mine, theirs);
     else
