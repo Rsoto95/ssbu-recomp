@@ -91,10 +91,15 @@ double g_save_need_mb, g_save_avail_mb;          /* the last commit check (MB) *
 void collect(Ctx *c) {
     for (int i = 0; i < g_memory_map.range_count; i++) { rs_free(g_memory_map.ranges[i].s); g_memory_map.ranges[i].s = NULL; free(g_memory_map.ranges[i].dirty); free(g_memory_map.ranges[i].async); }
     g_memory_map.range_count = 0;
+    double tc0 = now_ms();
     if (!g_memory_map.heap_count) find_heaps();
+    double tc1 = now_ms();
     for (int i = 0; i < g_memory_map.heap_count; i++) add_alloc(g_memory_map.heap_base[i]);
+    double tc2 = now_ms();
     add_span((uint8_t *)0x7100000000ull, (uint8_t *)0x7300000000ull);
+    double tc3 = now_ms();
     add_fighter_dlls();
+    double tc4 = now_ms();
     { size_t pmn; uint8_t *pm = ppool_bookkeeping(&pmn); if (pm && pmn) add_span(pm, pm + pmn); }      /* R4: the presentation pool's bookkeeping (rb_learned.c) */
     if (g_catch_addr && !getenv("SSBU_R1_NO_CATCH")) {     /* nnunwind.c: the catch frames (guest CFA -> host jmp_buf) */
         size_t before = 0, after = 0; for (int i = 0; i < g_memory_map.range_count; i++) before += g_memory_map.ranges[i].n;
@@ -115,6 +120,8 @@ void collect(Ctx *c) {
         g_memory_map.ranges[o++] = g_memory_map.ranges[i];
     }
     g_memory_map.range_count = o;
+    {   static int said; if (said++ < 4) LOG("r1: ranges listed: heaps found %.1f ms, the heaps' allocations %.1f ms, the image span %.1f ms, fighter DLLs %.1f ms, the rest %.1f ms (%d ranges)\n",
+                                          tc1 - tc0, tc2 - tc1, tc3 - tc2, tc4 - tc3, now_ms() - tc4, g_memory_map.range_count); }      /* (2026-11-02: the 100 ms of the first save's listing) */
     if (!getenv("SSBU_R1_CUT_STACKS")) return;
     g_nex = 0; os_r1_objs(ex_cb);
     for (int e = 0; e < g_nex; e++) {                 /* cut [lo, hi) out of every range */

@@ -9,6 +9,11 @@ int g_mark;
 int g_ra, g_save_failed;        /* (R3 lwr) the thread that kept the first save from being made */
 size_t nvn_r1_cb_save(void); void nvn_r1_cb_restore(void); size_t g_ra_cb_bytes;      /* nvn_gl.c */
 static size_t g_saved_bytes;
+static int g_direct_shown;
+static void direct_note(uint8_t *a) {             /* (direct save) a page written by a host thread during the hold's pause: as the old loop below did */
+    if (g_audio_free) async_add(a);
+    if (g_session.cycle == 0 && g_direct_shown < 40) g_e[g_direct_shown++].a = a;
+}
 void save(Ctx *c) {
     double t0 = now_ms();
     collect(c);
@@ -42,30 +47,42 @@ void save(Ctx *c) {
             g_save_failed = 2; return;
         }
     }
+    /* (2026-11-02) DIRECT: the ring's / run-ahead's first save (g_rs_drop, marks on) copies the game's memory once, straight
+     * into the shadow and the extras, on the parallel copy's threads (write_marks.c mark_fill); no copy of its own (r->s).
+     * Before: two copies of 1.9 GB, the first on one thread: ~1.04 s with the game held at a fight's first frame. SSBU_R1_DIRECT=0: as before */
+    static int direct_on = -1; if (direct_on < 0) { const char *e = getenv("SSBU_R1_DIRECT"); direct_on = !(e && e[0] == '0'); }
+    int direct = direct_on && g_rs_drop && g_mark > 0 && g_session.cycle == 0;
     {   int bad = 0;
         for (int i = 0; i < g_memory_map.range_count && !bad; i++) {
             Rng *r = &g_memory_map.ranges[i];
-            r->s = (rb_test_nomem() == 2 && i == g_memory_map.range_count / 2) ? NULL : rs_alloc(r->n);
+            r->s = direct ? NULL : (rb_test_nomem() == 2 && i == g_memory_map.range_count / 2) ? NULL : rs_alloc(r->n);
             r->dirty = calloc(r->n / PG, 1);
             r->async = calloc(r->n / PG, 1);
-            if (!r->s || !r->dirty || !r->async) { bad = 1; LOG("r1: FULL SAVE NOT MADE: allocation of %.1f MB for range %d of %d FAILED%s\n", r->n / 1048576.0, i, g_memory_map.range_count, rb_test_nomem() == 2 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=2)" : ""); }
+            if ((!direct && !r->s) || !r->dirty || !r->async) { bad = 1; LOG("r1: FULL SAVE NOT MADE: allocation of %.1f MB for range %d of %d FAILED%s\n", r->n / 1048576.0, i, g_memory_map.range_count, rb_test_nomem() == 2 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=2)" : ""); }
         }
         if (!bad && !g_guest_fibers.pool) { g_guest_fibers.pool = malloc(g_guest_fibers.pool_cap); if (!g_guest_fibers.pool) { bad = 1; LOG("r1: FULL SAVE NOT MADE: fiber pool allocation FAILED\n"); } }
         if (!bad && g_ecap < 65536) { void *ne = realloc(g_e, 65536 * sizeof *g_e); if (ne) { g_e = ne; g_ecap = 65536; } else { bad = 1; LOG("r1: FULL SAVE NOT MADE: list allocation FAILED\n"); } }   /* no allocation while threads are held */
         if (bad) { release(); g_save_failed = 2; return; }
     }
+    double tprep = now_ms();
+    if (direct && !mark_prepare()) { release(); g_save_failed = 2; return; }      /* (the shadow's reservation and the extras' buffers, before the hold) */
+    tprep = now_ms() - tprep;
     if (g_fast > 0 && g_session.cycle < g_learn) async_learn();
     double tp0 = now_ms();
-    if (g_ra > 0) { if (!ra_hold_quiet(200)) { LOG("r1: RA: first save: no quiet moment within 200 ms: not now (busy: %s)\n", g_ra_busy_first_save()); g_save_failed = 1; return; } } else park_quiet(0);
+    if (g_ra > 0) { if (!ra_hold_quiet(200)) { LOG("r1: RA: first save: no quiet moment within 200 ms: not now (busy: %s)\n", g_ra_busy_first_save()); if (direct) mark_abort(); g_save_failed = 1; return; } } else park_quiet(0);
     fibers_save();
     double t1b = now_ms();
-    for (int i = 0; i < g_memory_map.range_count; i++) { memcpy(g_memory_map.ranges[i].s, g_memory_map.ranges[i].a, g_memory_map.ranges[i].n); g_saved_bytes += g_memory_map.ranges[i].n; }
+    int dfail = 0;
+    if (direct) { g_saved_bytes = mark_fill(); dfail = !g_saved_bytes; }
+    else for (int i = 0; i < g_memory_map.range_count; i++) { memcpy(g_memory_map.ranges[i].s, g_memory_map.ranges[i].a, g_memory_map.ranges[i].n); g_saved_bytes += g_memory_map.ranges[i].n; }
     double t2 = now_ms();
     {   /* pages the OTHER threads write while main is held here (audio, vsync counter, loaders, render threads): they are
          * not the simulation's; they are left out of restore and verify. SSBU_R1_PAUSE=<ms> (default 50, 0 = none) */
         const char *pe = getenv("SSBU_R1_PAUSE"); int pause = pe ? atoi(pe) : 30;
         size_t np = 0; int shown = 0;
-        if (pause > 0) {
+        if (pause > 0 && direct && !dfail) {
+            Sleep((DWORD)pause);                      /* (the recheck itself runs inside mark_finish_direct, overlapped with the marks being set) */
+        } else if (pause > 0 && !direct) {
             Sleep((DWORD)pause);
             for (int i = 0; i < g_memory_map.range_count; i++) {
                 Rng *r = &g_memory_map.ranges[i];
@@ -78,7 +95,16 @@ void save(Ctx *c) {
             }
         }
         int mfail = 0;
-        if (g_mark > 0 && g_session.cycle == 0) { g_ctx_save = *c; mfail = !mark_setup(); }     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
+        double tfin = now_ms();
+        if (g_mark > 0 && g_session.cycle == 0) {
+            g_ctx_save = *c;
+            if (!direct) mfail = !mark_setup();
+            else if (dfail) mfail = 1;
+            else { mfail = !mark_finish_direct(pause > 0 ? direct_note : NULL, &np); shown = g_direct_shown; g_direct_shown = 0; }
+        }     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
+        tfin = now_ms() - tfin;
+        if (direct) LOG("r1: FULL SAVE (direct, one copy on the parallel copy's threads): buffers %.1f ms before the hold; copy %.1f MB in %.1f ms; pause %d ms; recheck (%zu pages differed) + marks set %.1f ms%s\n",
+                        tprep, g_saved_bytes / 1048576.0, t2 - t1b, pause, np, tfin, dfail ? " (the copy FAILED: no ring)" : "");
         if (g_ra > 0 && !mfail) nvn_r1_cb_save();
         unpark();
         if (mfail) { release(); g_save_failed = 2; return; }

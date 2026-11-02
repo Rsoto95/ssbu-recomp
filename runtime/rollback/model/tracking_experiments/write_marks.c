@@ -124,6 +124,7 @@ void hs_exclude_all(void) {
     LOG("r1: host stacks: %d threads and the host fibers looked at; %lld pages in %lld ranges inside the guest windows left out\n", nth, g_hs_pages, g_hs_ranges);
 }
 /* (hs13) a mark_setup that could not finish: everything it made is given back, no mark map is set (marks stay off) */
+static uint8_t *g_pre_m1, *g_pre_m2;                   /* the mark maps, allocated by mark_prepare (so that mark_finish cannot fail) */
 static void mark_undo(void) {
     if (g_sh1) VirtualFree(g_sh1, 0, MEM_RELEASE);
     if (g_sh2) VirtualFree(g_sh2, 0, MEM_RELEASE);
@@ -131,9 +132,18 @@ static void mark_undo(void) {
     g_sh1 = g_sh2 = g_sh1c = g_sh2c = g_dc = g_ns1 = g_ns2 = NULL;
     for (int i = 0; i < g_nx; i++) { free(g_x[i].b); g_x[i].b = NULL; }
     g_nx = 0; g_xbytes = 0; g_win1 = NULL; g_wn1 = 0;
+    if (g_pre_m1) VirtualFree(g_pre_m1, 0, MEM_RELEASE);
+    if (g_pre_m2) VirtualFree(g_pre_m2, 0, MEM_RELEASE);
+    g_pre_m1 = g_pre_m2 = NULL;
 }
-/* after the first (full) save: shadows, extras, maps on. 1 = done; 0 = out of memory (mark_undo done: no marks) */
-int mark_setup(void) {
+/* (2026-11-02) the parts of mark_setup, so that the ring's first save can copy the game's memory ONCE, straight into the
+ * shadow and the extras, on the parallel copy's threads (full_save.c, g_rs_drop): before, the full save copied 1.9 GB
+ * into its own buffer (one thread, fresh pages) and mark_setup copied it a second time into the shadow / extras while
+ * giving that buffer back 1 MB at a time: ~1.04 s with the game held at the first frame of every fight (Test_G_mem,
+ * 2026-11-02: listing 100 ms, copy 1 328 ms, hold 30 ms, copy 2 + decommits ~450 ms, read-only 108 ms).
+ * mark_prepare: the shadow's reservation, its maps, the extras listed and allocated (no copy). 1 = done; 0 = out of memory. */
+void mark_abort(void) { mark_undo(); }
+int mark_prepare(void) {
     size_t big = 0; uint8_t *base = NULL;
     for (int i = 0; i < g_memory_map.heap_count; i++) {
         MEMORY_BASIC_INFORMATION m; uint8_t *p = g_memory_map.heap_base[i];
@@ -147,9 +157,7 @@ int mark_setup(void) {
     g_dc = calloc(g_wn1 >> 12, 1); g_ns1 = calloc(g_wn1 >> 12, 1); g_ns2 = calloc(WN2 >> 12, 1);
     g_sh2 = VirtualAlloc(NULL, WN2, MEM_RESERVE, PAGE_NOACCESS); g_sh2c = calloc(WN2 >> 12, 1);
     if (!g_sh1 || !g_sh1c || !g_dc || !g_ns1 || !g_ns2 || !g_sh2 || !g_sh2c) { LOG("r1: MARK setup: allocation of the shadow / its maps FAILED: marks OFF\n"); mark_undo(); return 0; }
-    hs_exclude_all();
     g_nx = 0; g_xbytes = 0;
-    size_t shb = 0;
     for (int i = 0; i < g_memory_map.range_count; i++) {                    /* the extras: the runs of pages outside both windows */
         Rng *r = &g_memory_map.ranges[i];
         for (size_t p = 0; p < r->n / PG; p++) {
@@ -165,6 +173,78 @@ int mark_setup(void) {
         g_x[i].b = malloc(g_x[i].n); g_xbytes += g_x[i].n;
         if (!g_x[i].b) { LOG("r1: MARK setup: allocation of %.1f KB for an extra FAILED: marks OFF\n", g_x[i].n / 1024.0); mark_undo(); return 0; }
     }
+    g_pre_m1 = VirtualAlloc(NULL, g_wn1 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);      /* (the mark maps: mark_finish takes them) */
+    g_pre_m2 = VirtualAlloc(NULL, WN2 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!g_pre_m1 || !g_pre_m2) { LOG("r1: MARK setup: allocation of the mark maps FAILED: marks OFF\n"); mark_undo(); return 0; }
+    return 1;
+}
+/* mark_fill (the direct first save, threads held): every page of the save's ranges copied from the game's memory into its
+ * place (the shadow or its extra), on the parallel copy's threads; the jobs are kept for mark_recheck. Returns the bytes
+ * queued, 0 when a shadow commit failed (mark_undo done). */
+static CopyJob *g_df; static size_t g_ndf, g_cdf; static size_t g_df_shb;
+size_t mark_fill(void) {
+    g_ndf = 0; g_df_shb = 0;
+    int cx = 0; size_t xo = 0;
+    for (int i = 0; i < g_memory_map.range_count; i++) {
+        Rng *r = &g_memory_map.ranges[i]; size_t np = r->n / PG;
+        for (size_t p = 0; p < np; p++) {
+            uint8_t *a = r->a + p * PG, *cm, *d = NULL; size_t pi; uint8_t *sh = in_shadow(a, &cm, &pi);
+            if (sh) {
+                if (!sh_commit(sh, cm, pi)) { LOG("r1: MARK setup: commit of the shadow FAILED after %.1f MB%s: marks OFF\n", g_df_shb / 1048576.0, rb_test_nomem() == 4 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=4)" : ""); mark_undo(); g_ndf = 0; return 0; }
+                d = sh; g_df_shb += PG;
+            } else {
+                if (cx < g_nx && xo == g_x[cx].n) { cx++; xo = 0; }
+                if (cx < g_nx && g_x[cx].a + xo == a) { d = g_x[cx].b + xo; xo += PG; }
+            }
+            if (!d) continue;
+            if (g_ndf == g_cdf) { size_t nc = g_cdf ? g_cdf * 2 : 1u << 19; CopyJob *n2 = realloc(g_df, nc * sizeof *n2); if (!n2) { LOG("r1: MARK setup: the copy list (%zu pages) could not grow: marks OFF\n", g_ndf); mark_undo(); g_ndf = 0; return 0; } g_df = n2; g_cdf = nc; }
+            g_df[g_ndf].d = d; g_df[g_ndf].s = a; g_ndf++;
+        }
+    }
+    cp_init();
+    for (size_t k = 0; k < g_ndf; k++) cp_add(g_df[k].d, g_df[k].s);
+    cp_run();
+    return g_ndf * PG;
+}
+/* mark_recheck (after the hold's pause): the pages that differ now from their copy (written by host threads meanwhile)
+ * are copied again and reported to note(a) (full_save.c: left out of restore / verify, as before). Returns their number. */
+void cp_run_begin(void); void cp_run_end(void);
+static uint8_t *g_rc_diff;
+static void recheck_begin(void) {                      /* the compare of every page with its copy, started on the helper threads */
+    g_rc_diff = g_ndf ? calloc(g_ndf, 1) : NULL;
+    if (!g_rc_diff) return;
+    for (size_t k = 0; k < g_ndf; k++) cp_add(g_df[k].d, g_df[k].s);
+    g_cp_cmp = g_rc_diff; cp_run_begin();
+}
+static size_t recheck_end(void (*note)(uint8_t *a)) {  /* the main thread's share, the wait; the pages that differ copied again */
+    if (!g_rc_diff) return 0;
+    cp_run_end(); g_cp_cmp = NULL;
+    size_t n = 0;
+    for (size_t k = 0; k < g_ndf; k++) if (g_rc_diff[k]) { memcpy(g_df[k].d, g_df[k].s, PG); note((uint8_t *)g_df[k].s); n++; }
+    free(g_rc_diff); g_rc_diff = NULL;
+    return n;
+}
+size_t mark_recheck(void (*note)(uint8_t *a)) { recheck_begin(); return recheck_end(note); }
+/* mark_finish (threads held): the host stacks left out, the mark maps set in every module, the windows protected. 1 = done */
+static int mark_finish(size_t shb);
+/* (direct first save, after the hold's pause) the recheck runs on the helper threads WHILE the main thread sets the marks
+ * (host stacks, maps, the windows made read-only: ~150 ms; it only reads the pages the helpers compare); then the main thread
+ * takes its share of the compare. Overlapped only when mark_finish cannot fail (the maps allocated before the hold): a failure
+ * frees the buffers being compared. *nre: the pages that differed. SSBU_R1_RECHECK_OVERLAP=0: one after the other */
+int mark_finish_direct(void (*note)(uint8_t *a), size_t *nre) {
+    static int ov = -1; if (ov < 0) { const char *e = getenv("SSBU_R1_RECHECK_OVERLAP"); ov = !(e && e[0] == '0'); }
+    int ok;
+    *nre = 0;
+    if (note && ov && g_pre_m1 && g_pre_m2) { recheck_begin(); hs_exclude_all(); ok = mark_finish(g_df_shb); *nre = recheck_end(note); }
+    else { if (note) *nre = mark_recheck(note); hs_exclude_all(); ok = mark_finish(g_df_shb); }
+    free(g_df); g_df = NULL; g_ndf = g_cdf = 0;
+    return ok;
+}
+/* after the first (full) save: shadows, extras, maps on. 1 = done; 0 = out of memory (mark_undo done: no marks) */
+int mark_setup(void) {
+    if (!mark_prepare()) return 0;
+    hs_exclude_all();
+    size_t shb = 0;
     {   /* the bytes of the save point into the shadow and the extras; with g_rs_drop the copy of the full save is given back 1 MB at a time behind */
         int cx = 0; size_t xo = 0; long long dropped = 0;
         for (int i = 0; i < g_memory_map.range_count; i++) {
@@ -183,8 +263,13 @@ int mark_setup(void) {
         }
         if (g_rs_drop) LOG("r1: MARK setup: the copy of the full save given back while the shadow took it (%.1f MB): peak commit ~one copy\n", dropped * (double)PG / 1048576.0);
     }
-    uint8_t *m1 = VirtualAlloc(NULL, g_wn1 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    uint8_t *m2 = VirtualAlloc(NULL, WN2 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    return mark_finish(shb);
+}
+static int mark_finish(size_t shb) {
+    double tf0 = now_ms();
+    uint8_t *m1 = g_pre_m1 ? g_pre_m1 : VirtualAlloc(NULL, g_wn1 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    uint8_t *m2 = g_pre_m2 ? g_pre_m2 : VirtualAlloc(NULL, WN2 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    g_pre_m1 = g_pre_m2 = NULL;
     if (!m1 || !m2) { if (m1) VirtualFree(m1, 0, MEM_RELEASE); if (m2) VirtualFree(m2, 0, MEM_RELEASE); LOG("r1: MARK setup: allocation of the mark maps FAILED: marks OFF\n"); mark_undo(); return 0; }
     *pm1 = m1; *pm2 = m2; *plo1 = (uint64_t)(uintptr_t)g_win1; MemoryBarrier(); *pn2 = WN2; *pn1 = g_wn1;
     r1_m1 = m1; r1_m2 = m2; r1_lo1 = (uint64_t)(uintptr_t)g_win1; MemoryBarrier(); r1_n2 = WN2; r1_n1 = g_wn1;
@@ -202,11 +287,15 @@ int mark_setup(void) {
         names[o] = 0;
         LOG("r1: MARK maps set in the exe and %d modules:%s\n", nmod, names);
     }
+    double tf1 = now_ms();
     blk1_init();
+    double tf2 = now_ms();
     for (int i = 0; i < g_nx; i++) if (g_x[i].n >= 65536) LOG("r1:   extra %s + %.0f KB\n", where(g_x[i].a), g_x[i].n / 1024.0);
     LOG("r1: MARK on: window 1 = region at %p, %.1f GB (map %.1f MB), window 2 = %llx + %.0f GB (map %.1f MB); shadow filled with %.1f MB; extras %d ranges %.1f MB copied whole each time\n",
         (void *)g_win1, g_wn1 / 1073741824.0, (g_wn1 >> 12) / 1048576.0, WIN2, WN2 / 1073741824.0, (WN2 >> 12) / 1048576.0, shb / 1048576.0, g_nx, g_xbytes / 1048576.0);
+    double tf3 = now_ms();
     ls_start_after_base();                                   /* R4: the learned-set save protects the windows (threads still held) */
+    LOG("r1: MARK finish: maps set in the modules %.1f ms, block list %.1f ms, log lines %.1f ms, windows made read-only %.1f ms\n", tf1 - tf0, tf2 - tf1, tf3 - tf2, now_ms() - tf3);
     return 1;
 }
 /* every marked page: dir 0 memory -> shadow (save), 1 shadow -> memory (restore); marks cleared. Returns pages. */
@@ -302,6 +391,15 @@ void cp_run(void) {                            /* every queued page, then the qu
     else { int keep = g_ncp; g_ncp = 0; cp_part(0); g_ncp = keep; }
     g_ncj = 0;
     { static LONG64 seen; if (g_cp_fault != seen) { seen = g_cp_fault; LOG("r1: %lld page jobs skipped so far because the page was gone (the game decommitted it after the extras were listed)\n", (long long)g_cp_fault); LOG("r1: %lld restore copies committed a page again first (the game had decommitted it since the capture)\n", (long long)g_cp_recommitted); } }
+}
+/* (2026-11-02) the same jobs started on the helper threads only, while the main thread does other work; cp_run_end does
+ * the main thread's share and waits. Used by the direct first save: its recheck overlaps the marks being set (mark_finish) */
+static int g_cp_async;
+void cp_run_begin(void) { g_cp_async = g_ncp > 0 && g_ncj >= 64; if (g_cp_async) for (int k = 0; k < g_ncp; k++) SetEvent(g_cp_go[k]); }
+void cp_run_end(void) {
+    if (g_cp_async) { cp_part(0); WaitForMultipleObjects((DWORD)g_ncp, g_cp_done, TRUE, INFINITE); g_cp_async = 0; }
+    else { int keep = g_ncp; g_ncp = 0; cp_part(0); g_ncp = keep; }
+    g_ncj = 0;
 }
 int g_cp_defer;                                /* mark_sweep queues its copies (run-ahead) instead of doing them */
 size_t mark_sweep(int dir) {

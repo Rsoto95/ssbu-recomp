@@ -425,6 +425,11 @@ int sh_commit(uint8_t *sh, uint8_t *cmap, size_t pi);    /* model/tracking_exper
 void r1_host_stack_note(uint64_t lo, uint64_t hi);    /* model/tracking_experiments/write_marks.c */
 void hs_exclude_all(void);    /* model/tracking_experiments/write_marks.c */
 int mark_setup(void);    /* model/tracking_experiments/write_marks.c */
+int mark_prepare(void);    /* model/tracking_experiments/write_marks.c (2026-11-02: the ring's direct first save, full_save.c) */
+size_t mark_fill(void);    /* model/tracking_experiments/write_marks.c */
+size_t mark_recheck(void (*note)(uint8_t *a));    /* model/tracking_experiments/write_marks.c */
+int mark_finish_direct(void (*note)(uint8_t *a), size_t *nre);    /* model/tracking_experiments/write_marks.c */
+void mark_abort(void);    /* model/tracking_experiments/write_marks.c */
 void blk1_add(size_t p0, size_t p1);    /* model/tracking_experiments/write_marks.c */
 void blk1_rebuild(void);    /* model/tracking_experiments/write_marks.c */
 void blk1_init(void);    /* model/tracking_experiments/write_marks.c */
