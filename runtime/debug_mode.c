@@ -601,6 +601,16 @@ static void match_player_hook(Ctx *c, void *user) {
     (void)user;
     uint64_t st = c->x[0], rec = c->x[3]; int idx = (int)c->x[1];
     uint64_t was = rd64(st + 0x88); uint32_t type_was = rd32(st + 0x78);
+    if (rd8(MELEE_INFO) == 0x14 && idx <= 3) {          /* (2026-11-02, arenas: research) where each player's panel state is, and whose it is (spectators) */
+        printf("[arena] set-up: player %d: panel state %llx (record %llx): name tag %u, network player %u, controller slot %d, type %u, ui_chara %016llx\n", idx + 1,
+               (unsigned long long)st, (unsigned long long)rec, rd8(st + 0x450), rd8(st + 0x451), (int)rd32(st + 0x210), rd32(st + 0x78), (unsigned long long)rd64(st + 0x88));
+        if (idx == 0) for (int i = 0; i < 4; i++) {        /* the select screens' per-player table (PANEL below): all the players at once */
+            uint64_t e = GA(0x7105307770ULL) + 0x1c8ull * (uint64_t)i; uint8_t h[0x1c8]; if (!safe_read(e, h, sizeof h)) continue;
+            char t[0x1c8 * 2 + 1]; int k = 0; for (int j = 0; j < 0x1c8; j++) k += sprintf(t + k, "%02x", h[j]);
+            printf("[arena] set-up: select table entry %d (%llx): %s\n", i, (unsigned long long)e, t);
+        }
+        fflush(stdout);
+    }
     if (idx == 0) { g_hs_p1_ok = safe_read(st, g_hs_p1, sizeof g_hs_p1); InterlockedIncrement(&g_dm_setups); }
     if (idx == 0 && g_dm_list) {                          /* SSBU_DEBUG_MATCH_LIST: every new match set-up takes the next line (the last one stays) */
         char line[256];
@@ -828,6 +838,7 @@ void debug_mode_init(void) {
     g_hs_wanted = rbn_handshake_wanted();
     {   const char *e = getenv("SSBU_RB_NET_P2NONE"), *a = getenv("SSBU_RB_NET_AUTOP2");      /* (hs12) the select screen's player 2 for an online match */
         g_p2none = e && atoi(e) > 0; g_autop2 = a && a[0] ? atoi(a) > 0 : g_hs_wanted;
+        {   const char *om = getenv("SSBU_ONLINE_MENU"); if (om && om[0] == '1' && !(a && a[0])) g_autop2 = 0; }   /* (2026-11-02) the game's own Online menu: its Battle Arenas set their players; a CPU put on an empty player 2 joined every arena fight */
         if (g_p2none || g_autop2) printf("debug match: hook on the select screen's table copy %llx: id %d (auto player 2 %s%s)\n", GA(0x710179e440ULL), hook_install(GA(0x710179e440ULL), panel_copy_hook, NULL, &g_orig_panel_copy),
                                          g_autop2 ? "on" : "off", g_p2none ? "; test: entry 1 copied as none" : ""); }
     if (getenv("SSBU_DEBUG_MATCH") || g_dm_list || g_hs_wanted) {
