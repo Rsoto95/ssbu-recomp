@@ -495,6 +495,11 @@ def main():
         env['SSBU_UPDATE_FLAG'] = flag
         env['SSBU_UPDATE_CMD'] = subprocess.list2cmdline([sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
         env['SSBU_UPDATE_DIR'] = REPO                  # (where "Play SSBU.bat" runs it)
+        try:                                          # (2026-11-02) F1 > About > Check for updates compares GitHub's newest with this
+            import update
+            env['SSBU_UPDATE_HAVE'] = git_head() if os.path.exists(os.path.join(REPO, '.git')) else (update.read_manifest() or {}).get('commit') or ''
+        except Exception:
+            pass
         update_watch(flag)
     for kv in a.env:
         k, _, v = kv.partition('=')

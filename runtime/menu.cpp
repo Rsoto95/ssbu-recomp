@@ -49,6 +49,8 @@ extern char **environ;
 #endif
 #include "imgui.h"
 #include "net_stats.h"
+extern "C" int online_menu_status(int *players, int *ms, int *narenas, char codes[][6], int *members, int *most, int cap);   /* online_menu.inc (nnnet.c) */
+extern "C" const char *online_menu_server(void);
 extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
 extern "C" {
 #include "gfx_options.h"
@@ -1126,7 +1128,32 @@ static void sec_experimental(void) {
     help("ON: the game's own Online > Battle Arenas work, on the project's server: make an arena (it gets a 5-character code), "
          "your friends find it by its code or in the list. 1-on-1 fights use rollback; the others in the arena watch them. "
          "While it is ON the Local Wireless rooms are not available: turn it OFF to play in them again. Used when the game starts again.");
-    if (getenv("SSBU_ONLINE_MENU")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Battle Arenas are on in this run (server %s). In the game: Online > Battle Arenas.", getenv("SSBU_ONLINE_MENU_SERVER") ? getenv("SSBU_ONLINE_MENU_SERVER") : "127.0.0.1");
+    if (getenv("SSBU_ONLINE_MENU")) {                   /* (2026-11-02) the server's state, asked in the background (online_menu.inc) */
+        int players = 0, ms = 0, na = 0, mem[32], most[32]; char codes[32][6];
+        int st = online_menu_status(&players, &ms, &na, codes, mem, most, 32);
+        ImGui::Indent();
+        ImGui::TextDisabled("Server"); ImGui::SameLine(); ImGui::Text("%s", online_menu_server()); ImGui::SameLine();
+        if (st == 1) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "online (%d ms)", ms);
+        else if (st == 2) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1), "not answering");
+        else ImGui::TextDisabled("asking...");
+        if (st == 1) {
+            ImGui::TextDisabled("Players online"); ImGui::SameLine(); ImGui::Text("%d", players);
+            ImGui::SameLine(); ImGui::TextDisabled("   Arenas open"); ImGui::SameLine(); ImGui::Text("%d", na);
+            if (na > 0 && ImGui::BeginTable("arenas", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableSetupColumn("Arena code", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+                ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableHeadersRow();
+                for (int i = 0; i < na && i < 32; i++) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::Text("%s", codes[i][0] ? codes[i] : "(making)");
+                    ImGui::TableSetColumnIndex(1); if (most[i]) ImGui::Text("%d / %d", mem[i], most[i]); else ImGui::Text("%d", mem[i]);
+                }
+                ImGui::EndTable();
+            } else if (na == 0) ImGui::TextDisabled("No arena open yet: make one in the game (Online > Battle Arenas > Create Arena).");
+        } else if (st == 2) ImGui::TextDisabled("Check your internet; if it stays like this the server may be down (tell the organizer).");
+        ImGui::Unindent();
+        ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Battle Arenas are on in this run. In the game: Online > Battle Arenas.");
+    }
     if (online_differs() || S.runahead != S0.runahead || strcmp(pname, pname0) || om != om0) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. These changes are used when the game starts again.");
@@ -1671,6 +1698,9 @@ static void sec_rooms(void) {
     }
 }
 
+#ifdef _WIN32
+static void about_update_ui(void);                         /* (below: Check for updates) */
+#endif
 static void sec_about(void) {
 #ifdef _WIN32
     ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Windows");
@@ -1684,6 +1714,9 @@ static void sec_about(void) {
     ImGui::Text("Settings menu: Dear ImGui %s (MIT licence, Omar Cornut and contributors)", ImGui::GetVersion());
     ImGui::Text("graphics.ini: %s", gfx_options()->path);
     ImGui::Text("controllers.ini: %s", nnpad_config_path());
+#ifdef _WIN32
+    about_update_ui();
+#endif
     ImGui::Separator();
     help("No game content is part of this program: it runs the game files you dumped from your own console.");
 }
@@ -1738,6 +1771,77 @@ static void update_check(void) {                           /* render thread, eve
         menu_popup("New version", "A new version of the game is ready.\nPress F1 (or Home on the controller) and choose \"Update and restart\".\n"
                    "The game closes, installs it (about a minute) and opens again by itself.");
     }
+}
+static void update_and_restart(void);
+/* (2026-11-02) F1 > About > "Check for updates": GitHub's newest commit of the project (the repository "Play SSBU.bat"
+ * updates from) asked NOW, on a thread of its own (winhttp.dll loaded when pressed: no new link library), and compared with
+ * this copy's (SSBU_UPDATE_HAVE, run.py: the installed commit, or the git checkout's HEAD). A newer one is written to
+ * SSBU_UPDATE_FLAG, so "Update and restart" appears at once (update_check). */
+typedef void *(WINAPI *WhOpen)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD);
+typedef void *(WINAPI *WhConnect)(void *, LPCWSTR, WORD, DWORD);
+typedef void *(WINAPI *WhOpenRequest)(void *, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR *, DWORD);
+typedef BOOL (WINAPI *WhSend)(void *, LPCWSTR, DWORD, LPVOID, DWORD, DWORD, DWORD_PTR);
+typedef BOOL (WINAPI *WhReceive)(void *, LPVOID);
+typedef BOOL (WINAPI *WhRead)(void *, LPVOID, DWORD, LPDWORD);
+typedef BOOL (WINAPI *WhClose)(void *);
+static volatile LONG g_chk_state;                          /* 0 never, 1 asking, 2 the newest, 3 a newer one, 4 could not ask */
+static char g_chk_latest[16];
+static DWORD WINAPI update_ask_thread(LPVOID unused) {
+    (void)unused;
+    char got[64] = ""; DWORD n = 0;
+    HMODULE w = LoadLibraryW(L"winhttp.dll");
+    WhOpen open_ = w ? (WhOpen)GetProcAddress(w, "WinHttpOpen") : NULL; WhConnect conn = w ? (WhConnect)GetProcAddress(w, "WinHttpConnect") : NULL;
+    WhOpenRequest req = w ? (WhOpenRequest)GetProcAddress(w, "WinHttpOpenRequest") : NULL; WhSend send_ = w ? (WhSend)GetProcAddress(w, "WinHttpSendRequest") : NULL;
+    WhReceive recv_ = w ? (WhReceive)GetProcAddress(w, "WinHttpReceiveResponse") : NULL; WhRead read_ = w ? (WhRead)GetProcAddress(w, "WinHttpReadData") : NULL;
+    WhClose close_ = w ? (WhClose)GetProcAddress(w, "WinHttpCloseHandle") : NULL;
+    if (open_ && conn && req && send_ && recv_ && read_ && close_) {
+        void *s = open_(L"ssbu-recomp", 0 /* default proxy */, NULL, NULL, 0);
+        void *c = s ? conn(s, L"api.github.com", 443, 0) : NULL;
+        void *r = c ? req(c, L"GET", L"/repos/Rsoto95/ssbu-recomp/commits/main", NULL, NULL, NULL, 0x00800000 /* WINHTTP_FLAG_SECURE */) : NULL;
+        if (r && send_(r, L"Accept: application/vnd.github.sha\r\n", (DWORD)-1, NULL, 0, 0, 0) && recv_(r, NULL)) read_(r, got, sizeof got - 1, &n);
+        if (r) close_(r);
+        if (c) close_(c);
+        if (s) close_(s);
+    }
+    got[n < sizeof got ? n : sizeof got - 1] = 0;
+    int ok = n >= 40; for (int i = 0; i < 40 && ok; i++) ok = isxdigit((unsigned char)got[i]);
+    if (!ok) { printf("menu: check for updates: GitHub could not be asked\n"); fflush(stdout); InterlockedExchange(&g_chk_state, 4); return 0; }
+    snprintf(g_chk_latest, sizeof g_chk_latest, "%.7s", got);
+    const char *have = getenv("SSBU_UPDATE_HAVE");
+    int newer = have && *have && _strnicmp(have, got, 7) != 0;
+    printf("menu: check for updates: GitHub has %s, this copy %s: %s\n", g_chk_latest, have && *have ? have : "(not known)", newer ? "a NEWER version" : have && *have ? "the newest" : "?"); fflush(stdout);
+    if (newer && getenv("SSBU_UPDATE_FLAG")) { FILE *f = fopen(getenv("SSBU_UPDATE_FLAG"), "w"); if (f) { fputs(g_chk_latest, f); fclose(f); } snprintf(g_upd, sizeof g_upd, "%s", g_chk_latest); }
+    InterlockedExchange(&g_chk_state, newer ? 3 : 2);
+    return 0;
+}
+static void about_update_ui(void) {
+    ImGui::Separator();
+    LONG st = g_chk_state;
+    if (st == 1) ImGui::BeginDisabled();
+    if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) {
+        InterlockedExchange(&g_chk_state, 1);
+        HANDLE t = CreateThread(NULL, 0, update_ask_thread, NULL, 0, NULL); if (t) CloseHandle(t); else InterlockedExchange(&g_chk_state, 4);
+    }
+    if (st == 1) ImGui::EndDisabled();
+    ImGui::SameLine();
+    const char *have = getenv("SSBU_UPDATE_HAVE");
+    if (st == 2 && have && *have) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "You have the latest version (%s).", g_chk_latest);
+    else if (st == 2) ImGui::TextDisabled("The newest on GitHub is %s; this copy's is not known: start the game with \"Play SSBU.bat\".", g_chk_latest);
+    else if (st == 3 && getenv("SSBU_UPDATE_CMD")) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "A new version is ready (%s).", g_chk_latest);
+        ImGui::SameLine();
+        if (ImGui::Button("Update and restart##about")) ImGui::OpenPopup("Update the game?##about");
+        if (ImGui::BeginPopupModal("Update the game?##about", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("The game closes, installs the new version (about a minute) and opens again by itself.");
+            if (ImGui::Button("Yes, update now")) { update_and_restart(); ImGui::CloseCurrentPopup(); }
+            ImGui::SameLine();
+            if (ImGui::Button("Not now")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
+    else if (st == 3) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "A new version is on GitHub (%s): close the game and open it with \"Play SSBU.bat\".", g_chk_latest);
+    else if (st == 4) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1), "GitHub could not be asked: check your internet and try again.");
+    else ImGui::TextDisabled("Asks GitHub now whether a newer version of the game is out.");
 }
 static void update_and_restart(void) {
     wchar_t pid[16], *cmd = _wcsdup(_wgetenv(L"SSBU_UPDATE_CMD") ? _wgetenv(L"SSBU_UPDATE_CMD") : L"");

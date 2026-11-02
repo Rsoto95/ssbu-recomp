@@ -199,6 +199,50 @@ static void om_nsd_ResolveEx(Ctx *c) {
  * rollback of an arena's match (net_session.c): the opponent is looked for in the lobby with the arena as the key. 1 = asked
  * and answered (gid 0: in none); 0 = the Online menu is off or the server did not answer (3 tries, 300 ms each). */
 static int g_om_on;
+/* (2026-11-02, F1 > Experimental) the server's state: "STATUS?" -> "STATUS!" + players online u16 + arenas u8 + per
+ * arena code[5] + members u8 + most u8 (tools/net/nex_server.py). Asked every 3 s by a thread of its own while F1 shows it
+ * (online_menu_status called in the last 2 s): the menu never waits for the network. */
+typedef struct { char code[6]; int members, most; } OmArenaRow;
+static SRWLOCK g_om_st_lock = SRWLOCK_INIT;
+static int g_om_st_state;                                 /* 0 not asked yet, 1 answered, 2 no answer */
+static int g_om_st_players, g_om_st_n, g_om_st_ms; static OmArenaRow g_om_st_rows[32];
+static volatile LONG64 g_om_st_wanted; static volatile LONG g_om_st_thread;
+static DWORD WINAPI om_status_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) {
+        if (GetTickCount64() - (ULONGLONG)g_om_st_wanted > 2000) { Sleep(200); continue; }
+        SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (u == INVALID_SOCKET) { Sleep(3000); continue; }
+        struct sockaddr_in a; memset(&a, 0, sizeof a); a.sin_family = AF_INET; a.sin_port = htons(39599);
+        InetPtonA(AF_INET, g_om_server, &a.sin_addr);
+        DWORD to = 1500; setsockopt(u, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
+        ULONGLONG t0 = GetTickCount64();
+        sendto(u, "STATUS?", 7, 0, (struct sockaddr *)&a, sizeof a);
+        uint8_t b[600]; int n = recv(u, (char *)b, sizeof b, 0);
+        closesocket(u);
+        AcquireSRWLockExclusive(&g_om_st_lock);
+        if (n >= 10 && !memcmp(b, "STATUS!", 7)) {
+            g_om_st_state = 1; g_om_st_ms = (int)(GetTickCount64() - t0); g_om_st_players = b[7] | b[8] << 8;
+            int k = b[9]; if (k > 32) k = 32; g_om_st_n = 0;
+            for (int i = 0; i < k && 10 + 7 * i + 7 <= n; i++) { OmArenaRow *r = &g_om_st_rows[g_om_st_n++]; memcpy(r->code, b + 10 + 7 * i, 5); r->code[5] = 0; r->members = b[15 + 7 * i]; r->most = b[16 + 7 * i]; }
+        } else g_om_st_state = 2;
+        ReleaseSRWLockExclusive(&g_om_st_lock);
+        Sleep(3000);
+    }
+    return 0;
+}
+/* -1 = the Online menu is off; 0 = asking; 1 = answered (players, arenas, round trip ms); 2 = not answering */
+int online_menu_status(int *players, int *ms, int *narenas, char codes[][6], int *members, int *most, int cap) {
+    if (!g_om_on) return -1;
+    InterlockedExchange64(&g_om_st_wanted, (LONG64)GetTickCount64());
+    if (!InterlockedExchange(&g_om_st_thread, 1)) { HANDLE t = CreateThread(NULL, 0, om_status_thread, NULL, 0, NULL); if (t) CloseHandle(t); }
+    AcquireSRWLockShared(&g_om_st_lock);
+    int st = g_om_st_state; *players = g_om_st_players; *ms = g_om_st_ms; *narenas = g_om_st_n;
+    for (int i = 0; i < g_om_st_n && i < cap; i++) { memcpy(codes[i], g_om_st_rows[i].code, 6); members[i] = g_om_st_rows[i].members; most[i] = g_om_st_rows[i].most; }
+    ReleaseSRWLockShared(&g_om_st_lock);
+    return st;
+}
+const char *online_menu_server(void) { return g_om_server; }
 int online_menu_arena(uint32_t *gid, int *players, int *own_seat) {
     *gid = 0; *players = 0; *own_seat = -1;
     if (!g_om_on) return 0;

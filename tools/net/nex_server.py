@@ -428,6 +428,9 @@ def create_matchmake_session_with_param(client, req):
     r = Reader(bytes(session))
     r.raw(5 + 4 + 16)
     mn, mx = r.u("H"), r.u("H")
+    with ARENAS_LOCK:
+        if gid in ARENAS:
+            ARENAS[gid]["max"] = mx
     client.log("%s     arena %d created by pid %d (%d..%d players, session %d bytes, %d more bytes in the param: %s; "
                "session key %s)" % (client.who, gid, client.pid or 0, mn, mx, len(session), len(b) - end, b[end:].hex(" "),
                                     key.hex() if key else "none"))
@@ -666,12 +669,30 @@ def get_session_urls(client, req):
 _next_round = [1]
 
 
+def leave_arenas(pid, only_gid=None):
+    """(2026-11-02) a member out of its arenas' member lists (a departed member kept there made the fighters wait for a
+    spectator's HELLO that never came, and the F1 counts were wrong). Call with ARENAS_LOCK held."""
+    for gid, a in ARENAS.items():
+        if only_gid is not None and gid != only_gid:
+            continue
+        parts = a.get("players")
+        if parts and pid in parts and pid != a["owner"]:
+            parts.remove(pid)
+            a.get("clients", {}).pop(pid, None)
+
+
 def referee_1(client, req):
     """MatchmakeReferee (50 here) method 1: 7 bytes (the arena's gid u32, then 01 00 00) right after a player joined.
     UNCONFIRMED what it is for Smash (StartRound in other games: answered with a round id u64): answered with a new
     number u64."""
     n = _next_round[0]
     _next_round[0] += 1
+    try:
+        gid = struct.unpack_from("<I", req.body, 0)[0]
+        with ARENAS_LOCK:
+            leave_arenas(client.pid, gid)              # (MatchMakingExt EndParticipation(gid, message): the member leaves)
+    except struct.error:
+        pass
     client.log("%s     MatchmakeReferee 1 (%s): answered %d (UNCONFIRMED)" % (client.who, hexdump(req.body), n))
     return Writer().u("B", 1).bytes()             # (MatchMakingExt EndParticipation(gid u32, message String) -> bool)
 
@@ -745,6 +766,17 @@ def arena_query_listener(host, log):
         try:
             data, addr = u.recvfrom(256)
         except OSError:
+            continue
+        if data[:7] == b"STATUS?":
+            # (2026-11-02, F1 > Experimental) "STATUS!" + players online u16 + arenas u8 + per arena: code[5] (ASCII, NUL
+            # padded) + members u8 + most u8 (little-endian; at most 32 arenas)
+            with ARENAS_LOCK:
+                online = len(CLIENTS_BY_CID)
+                rows = [(a.get("code", "") or "", len(a.get("players", [a["owner"]])), a.get("max", 0)) for a in ARENAS.values()][:32]
+            out = b"STATUS!" + struct.pack("<HB", online, len(rows))
+            for code, members, most in rows:
+                out += code.encode("ascii", "replace")[:5].ljust(5, b"\0") + struct.pack("<BB", min(members, 255), min(most, 255))
+            u.sendto(out, addr)
             continue
         if len(data) < 14 or data[:6] != b"ARENA?":
             continue
@@ -1031,6 +1063,10 @@ class Client:
                 for gid in [g for g, a in ARENAS.items() if a["client"] is self]:
                     del ARENAS[gid]
                     self.log("%s arena %d closed (its host left)" % (self.who, gid))
+                if getattr(self, "cid", None) and CLIENTS_BY_CID.get(self.cid) is self:
+                    del CLIENTS_BY_CID[self.cid]
+                    if self.pid:
+                        leave_arenas(self.pid)
             self.s.close()
             self.log("%s gone" % self.who)
 
