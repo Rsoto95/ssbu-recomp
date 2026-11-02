@@ -13,6 +13,7 @@ uint32_t net_my_ip(void) { return 0; }
 int net_rb_no_destination(void) { return 0; }      /* (R3 pub1) rb_net.c's notice */
 int net_rb_ready(void) { return 0; }                /* rb_net.c (rollback over the network: off without online play) */
 int net_rb_send(const void *p, int n) { (void)p; (void)n; return 0; }
+int net_rbg_send(uint64_t key, const void *p, int n) { (void)key; (void)p; (void)n; return 0; }      /* (2026-11-02) a Battle Arena's spectators */
 int net_lobby_gone(void) { return 0; }
 void net_list_rooms(uint32_t seq) { (void)seq; }
 void net_send(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, const void *data, uint32_t len) {

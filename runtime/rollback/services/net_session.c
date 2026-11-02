@@ -106,7 +106,7 @@ int rbn_bot_on(void) { return g_bot; }
  * (seconds, default 120). No agreement = this match is played locally (Final Destination, one stock) and left at once
  * (rb_rollback.c: player 1 walks off the stage), back to the menus; the other game is told (REFUSE) so that it stops waiting. */
 #include "handshake.h"
-#define RBH_PROTO 5                                     /* 3 (hs12): RbhMatch carries the stage set-up context; 4 (hs14): PADS end with a mode byte, the stage is drawn from both picks; 5 (R3 lwr): Local Wireless room matches, LAYOUT */
+#define RBH_PROTO 6                                     /* 3 (hs12): RbhMatch carries the stage set-up context; 4 (hs14): PADS end with a mode byte, the stage is drawn from both picks; 5 (R3 lwr): Local Wireless room matches, LAYOUT; 6 (2026-11-02): a Battle Arena's spectators (RBS_*; an older game refuses: native) */
 enum { RBH_CHOICE = 0x48, RBH_PROPOSE = 0x49, RBH_ACCEPT = 0x4a, RBH_REFUSE = 0x4b, RBH_BLOCK = 0x4c, RBH_LAYOUT = 0x4d };      /* (R3 lwr) LAYOUT: a room match, each game's own player's control layout */
 #pragma pack(push, 1)
 typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t nonce, echo; RbhMatch m; } RbhMsg;
@@ -289,6 +289,64 @@ static void hs_print(const char *what, const RbhMatch *m) {
            m->hazards, m->items, m->rule_kind, m->stock, (unsigned long long)m->seed);
     fflush(stdout);
 }
+/* ---------------------------------------------------------------- (2026-11-02) spectators of a Battle Arena
+ * A member of the arena whose seat does not fight this match (debug_mode.c: the select table + 0x30) watches it. Its game runs
+ * the same match set-up as the fighters' (under the game's own netcode every member's game simulates the arena's match itself
+ * from the fighters' inputs), so it can play the match as a LOCAL match fed with both fighters' FINAL pads: no ring, never a
+ * guess (the controller's g_rbg_noring path: every pass waits for both players' pads of its frame). Messages through the
+ * lobby's arena group (net_relay.c net_rbg_send, packet type 27, key = the arena's gathering id, always via the lobby: one
+ * message, every other member; an older lobby drops them: nobody hears the spectators and the match stays native):
+ *   HERE   fighter -> group, every 100 ms during its handshake: puts it in the group (the spectators' HELLOs reach it)
+ *   HELLO  spectator -> group, every 100 ms at its set-up: its seat, the fighting seats (mask), what it sees of the match
+ *          (seat 0's fighter, rule kind, stocks); flags 1 = it refuses (the game's own netcode shows it the match)
+ *   MATCH  player 1 -> group, every 100 ms from its player-2 record until its fight starts: the agreed RbhMatch (seed, stage
+ *          set-up inputs), the seats of players 1 / 2, both players' layouts and name-tag controls as player 1 wrote them
+ *   NATIVE fighter -> group (3 times): the game's own netcode plays this match (no agreement, not 1-on-1, ...)
+ *   PADS   fighter -> group, every pass of its fight (and every 50 ms while it waits): its newest 8 FINAL pads as an rb_wire
+ *          PADS message (player = its rank, its finalized checksum frame)
+ *   NACK   spectator -> group: rank, from frame: that fighter answers with up to 64 pads from that frame (its history keeps
+ *          RBS_HIST frames: a spectator whose fight starts late gets the first frames too)
+ * Header: type, protocol (RBH_PROTO), game build, exe stamp, arena; PADS / NACK then the match tag (pads_tag) and the rank.
+ * Player 1 proposes the match only once every spectator's HELLO agrees (protocol, build, stamp, mask, set-up); else both
+ * fighters fail their handshake (native) and send NATIVE. A spectator converts only on MATCH: nobody converts unless all
+ * agreed. Fighters never wait for a spectator during the fight. SSBU_RB_NET_ARENA_SPEC=1: the game's own netcode for every
+ * arena match with spectators (the old way); =0 (test): the fighters play rollback and the spectators are not fed;
+ * SSBU_RB_NET_SPEC_WAIT=<s>: how long a spectator waits for MATCH at its set-up (default 20, longer than the fighters' 10). */
+enum { RBS_HELLO = 0x50, RBS_MATCH = 0x51, RBS_NATIVE = 0x52, RBS_PADS = 0x53, RBS_NACK = 0x54, RBS_HERE = 0x55 };
+#define RBS_B 4                                         /* the spectator's jitter buffer: frames of both fighters' pads it aims to hold */
+#define RBS_HIST 4096                                   /* a fighter's history of its own final pads (68 s), for NACKs */
+#define RBS_CK 1024                                     /* the fighters' checksums kept until the spectator's frame is final */
+#define RBS_LCTL 0x2d                                   /* debug_mode.c LWR_CTL + 2: a player's name-tag controls, option byte, GameCube flag */
+#pragma pack(push, 1)
+typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t gid; } RbsHead;
+typedef struct { RbsHead h; uint8_t seat, mask, flags, rule_kind, stock, pad[3]; uint64_t chara0; } RbsHello;
+typedef struct { RbsHead h; uint32_t match_id; uint8_t seat_of_rank[2], ctl_ok, pad; RbhMatch m; uint16_t lay[2][11]; uint8_t ctl[2][RBS_LCTL]; } RbsMatch;
+typedef struct { RbsHead h; char why[160]; } RbsNative;
+typedef struct { RbsHead h; uint8_t tag, rank; int32_t from; } RbsNack;
+typedef struct { RbsHead h; uint8_t tag, rank; } RbsPadsHead;                     /* + an rb_wire PADS message */
+#pragma pack(pop)
+static SRWLOCK g_rbs_lock = SRWLOCK_INIT;
+static volatile uint32_t g_rbs_gid;                     /* the arena of this match's group (0 = none: no message sent or taken) */
+static int g_rbs_sor[2];                                /* the seats of players 1 and 2 */
+static volatile LONG g_rbs_need;                        /* player 1, in its handshake: the spectators whose HELLO it needs */
+static volatile LONG g_rbs_fighter;                     /* this game fights the agreed match of an arena with spectators: PADS to the group */
+static RbsHello g_rbs_expect;                           /* player 1: what a spectator's HELLO must say (g_rbs_lock) */
+static volatile LONG g_rbs_seats, g_rbs_bad; static char g_rbs_bad_why[200];      /* player 1: seats with a matching HELLO; a HELLO that refused / differs */
+static RbhMatch g_rbs_agreed;                           /* player 1: the agreed match (MATCH) */
+static RbsMatch g_rbs_match;                            /* spectator: the MATCH received; player 1: the one sent (g_rbs_lock) */
+static volatile LONG g_rbs_match_tx; static uint64_t g_rbs_match_until;           /* player 1: MATCH sent again every 100 ms (ping thread) */
+static volatile LONG g_rbs_wait, g_rbs_got; static char g_rbs_native_why[200];    /* spectator at its set-up: waiting; 1 = MATCH, 2 = NATIVE */
+static volatile LONG g_spec;                            /* this game watches the match being set up / played (fed by the fighters) */
+static int g_spec_saved_local;                          /* (g_local is -1 while watching: both players are remote) */
+static uint16_t g_spec_lay[2][11]; static uint8_t g_spec_ctl[2][RBS_LCTL]; static int g_spec_ctl_ok;
+static volatile LONG64 g_rbs_tx, g_rbs_rx;
+static int rbs_spectate(long round, uint32_t gid, int players, int seat, const int sor[2], const RbhMatch *mine, RbhMatch *out);
+static void rbs_head(void *m, int type);
+static void rbs_send(const void *p, int n);
+static void rbs_native(const char *why, int spectator_seat);      /* -1: a fighter's NATIVE; else that spectator's refusing HELLO */
+static void rbs_hist_reset(void);
+static int rbs_popc(LONG v) { int n = 0; while (v) { n += (int)(v & 1); v >>= 1; } return n; }
+int rbn_spectating(void) { return g_spec != 0; }
 /* Esc (this game's window in front) or B on any controller, held 0.3 s; SSBU_RB_NET_TEST_CANCEL=<s>: as if pressed after s seconds (test) */
 static int hs_stop_pressed(double waited_ms) {
     static ULONGLONG since; static double test = -2;
@@ -333,6 +391,9 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * rollback for these fights: they are played exactly as without rollback, whatever the other game's setting; a box says so
      * once. Rollback matches: Smash (versus) with a room code (host / join modes). SSBU_RB_NET_ROOM_MATCH=1: the old way (test). */
     InterlockedExchange(&g_hs_room, 0);
+    /* (2026-11-02) spectators: what the last set-up left (a watched match that never reached its fight; a fighter's group) */
+    AcquireSRWLockExclusive(&g_hs_lock); if (g_spec) { g_local = g_spec_saved_local; InterlockedExchange(&g_spec, 0); } ReleaseSRWLockExclusive(&g_hs_lock);
+    InterlockedExchange(&g_rbs_fighter, 0); InterlockedExchange(&g_rbs_need, 0); InterlockedExchange(&g_rbs_match_tx, 0); g_rbs_gid = 0;
     /* (R3 lwr, owner 2026-10-21: "il rollback deve essere attivo anche nel local wireless con le stanze") the room's MATCH (not its
      * waiting-stage fight) with rollback on both games: the room has already agreed fighters, stage and rules on both PCs, so the
      * handshake here only checks that and agrees on a seed (no menus to wait for: both games reach this set-up together when the
@@ -354,25 +415,39 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         if (mode == 0x14) {
             /* (2026-11-02, second round) the fighters are any two seats (debug_mode.c: the select table + 0x30); this game's own
              * seat is its place in the arena's join order (our NEX server); a member whose seat does not fight is a spectator.
-             * Spectators are not driven by rollback yet (step 3): with any of them in the arena the game's own netcode plays the
-             * match for everyone (its own spectating works), unless SSBU_RB_NET_ARENA_SPEC=0 (test: the fighters play with
-             * rollback, the spectators see nothing). Every member decides the same from the same table and member list. */
+             * Every member decides the same from the same table and member list. (2026-11-02, spectators) a spectator watches
+             * the match fed by the fighters (rbs_spectate: HELLO, then player 1's MATCH or NATIVE); player 1 proposes only once
+             * every spectator said HELLO; SSBU_RB_NET_ARENA_SPEC=1: with spectators the game's own netcode plays the match for
+             * everyone (the old way), =0 (test): the fighters play with rollback, the spectators are not fed. */
             int players = 0, seat = -1, sor[2] = {0, 1}, ok = online_menu_arena(&agid, &players, &seat), nfight = dm_arena_fighters(sor);
-            int rank = seat == sor[0] ? 0 : seat == sor[1] ? 1 : -1, spectators = players - 2, spec_test = sp && sp[0] == '0';
+            int rank = seat == sor[0] ? 0 : seat == sor[1] ? 1 : -1, spectators = players - 2, spec_test = sp && sp[0] == '0', spec_off = sp && sp[0] == '1';
             const char *why = rr && rr[0] == '0' ? "arena rollback off (SSBU_RB_NET_ARENA=0)" : !ok ? "our NEX server did not say which arena" : !agid ? "the server knows no arena of this player"
-                            : nfight != 2 ? "not a 1-on-1 match" : seat < 0 ? "this player's seat is not known" : spectators > 0 && !spec_test ? "spectators in the arena (not driven by rollback yet)"
-                            : rank < 0 ? "this player watches (spectator)" : NULL;
+                            : nfight != 2 ? "not a 1-on-1 match" : seat < 0 ? "this player's seat is not known" : spectators > 0 && spec_off ? "spectators in the arena and SSBU_RB_NET_ARENA_SPEC=1 (the game's own netcode for everyone)"
+                            : rank < 0 && spec_test ? "this player watches (TEST SSBU_RB_NET_ARENA_SPEC=0: spectators are not fed)" : NULL;
+            printf("[arena] decision at the set-up (handshake %ld): arena %u, %d members (%d spectators), %d fighting (seats %d and %d), this game is seat %d = %s: %s\n", (long)round, agid, players, spectators > 0 ? spectators : 0, nfight,
+                   sor[0], sor[1], seat, rank == 0 ? "player 1" : rank == 1 ? "player 2" : "a spectator", why ? why : rank < 0 ? "watch it fed by the fighters (rollback spectator)" : spectators > 0 && !spec_test ? "rollback, with the spectators fed" : "rollback");
+            fflush(stdout);
+            if (!why && rank < 0) return rbs_spectate(round, agid, players, seat, sor, mine, out);
             if (!why) {
                 arena = lwr = 1;
                 AcquireSRWLockExclusive(&g_hs_lock); g_local = rank; ReleaseSRWLockExclusive(&g_hs_lock);
+                if (spectators > 0 && !spec_test) {         /* (2026-11-02) the group: player 1 waits for every spectator's HELLO before it proposes */
+                    AcquireSRWLockExclusive(&g_rbs_lock);
+                    g_rbs_gid = agid; g_rbs_sor[0] = sor[0]; g_rbs_sor[1] = sor[1]; g_rbs_seats = 0; g_rbs_bad = 0; g_rbs_bad_why[0] = 0;
+                    memset(&g_rbs_expect, 0, sizeof g_rbs_expect); rbs_head(&g_rbs_expect, RBS_HELLO);
+                    g_rbs_expect.mask = (uint8_t)((1u << sor[0]) | (1u << sor[1])); g_rbs_expect.rule_kind = mine->rule_kind; g_rbs_expect.stock = mine->stock; g_rbs_expect.chara0 = mine->chara[0];
+                    InterlockedExchange(&g_rbs_need, rank == 0 ? spectators : 0);
+                    ReleaseSRWLockExclusive(&g_rbs_lock);
+                }
                 printf("[rbnet] handshake %ld: a Battle Arena's match (arena %u, %d members, fighting seats %d and %d; this game is seat %d = player %d%s): agreeing on a rollback match with its other fighter (found in the lobby by the arena)\n",
-                       (long)round, agid, players, sor[0], sor[1], seat, g_local + 1, spectators > 0 ? "; TEST: the spectators are not fed" : "");
+                       (long)round, agid, players, sor[0], sor[1], seat, g_local + 1, spectators > 0 ? (spec_test ? "; TEST: the spectators are not fed" : rank == 0 ? "; waiting for every spectator's HELLO before proposing" : "; the spectators will be fed") : "");
                 fflush(stdout);
             } else {
                 InterlockedExchange(&g_hs_room, 1);
                 printf("[rbnet] handshake %ld: a Battle Arena's match (arena %u, %d members, %d fighting; this game's seat %d): %s: the game's own online netcode plays it; no rollback, nothing changed\n",
                        (long)round, agid, players, nfight, seat, why);
                 fflush(stdout);
+                if (agid && spectators > 0) { g_rbs_gid = agid; rbs_native(why, rank < 0 ? seat : -1); }     /* (2026-11-02) the others need not wait for this game */
                 return 0;
             }
         } }
@@ -424,7 +499,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         if (find) { phase = 0; if (arena) net_match_find_rb_key(agid); else if (net_arena_queued() && !net_arena_turn()) ar_wait = 1; else net_match_find_rb(); } }
     double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 120000.0;
     if (lwr) limit = getenv("SSBU_RB_NET_ROOM_WAIT") ? atof(getenv("SSBU_RB_NET_ROOM_WAIT")) * 1000.0 : 10000.0;     /* (R3 lwr) both games are at this set-up together */
-    uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0;
+    uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0, last_here = 0;
     long long presents = nvn_front_presents(); uint64_t presents_at = t0, notes = 0, redraws = 0;
     int ok = 0, stopped = 0;
     AcquireSRWLockExclusive(&g_hs_lock);
@@ -466,7 +541,11 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         AcquireSRWLockExclusive(&g_hs_lock);
         if (phase == 0) { /* searching: nothing to send yet */ }
         else if (g_local == 0) {                             /* host: proposal = our choice + the joiner's */
-            if (!g_hs_have_prop && g_hs_have_peer && lwr) {      /* (R3 lwr) the room's match: both games built it from the room; only the seed is new */
+            if (g_rbs_need && g_rbs_bad && g_hs_have_peer && !g_hs_have_prop && !g_hs_refused) {      /* (2026-11-02) a spectator refused / differs: the game's own netcode for everyone */
+                AcquireSRWLockShared(&g_rbs_lock); snprintf(g_hs_why, sizeof g_hs_why, "%s", g_rbs_bad_why); ReleaseSRWLockShared(&g_rbs_lock);
+                g_hs_refused = 1; hs_refuse(g_hs_peer.nonce, g_hs_why);
+            }
+            if (!g_hs_have_prop && g_hs_have_peer && lwr && !g_hs_refused && rbs_popc(g_rbs_seats) >= g_rbs_need) {      /* (R3 lwr) the room's match: both games built it from the room; only the seed is new; (2026-11-02) and every spectator's HELLO is in */
                 if (g_hs_peer.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_peer.exe_stamp);
                 if (g_hs_peer.m.chara[0] != mine->chara[0] || g_hs_peer.m.rule_kind != mine->rule_kind || g_hs_peer.m.stock != mine->stock) {
                     snprintf(g_hs_why, sizeof g_hs_why, "the room's match differs on the two games (player 1 %016llx here, %016llx there; rule kind %d / %d, stocks %d / %d)", (unsigned long long)mine->chara[0], (unsigned long long)g_hs_peer.m.chara[0], mine->rule_kind, g_hs_peer.m.rule_kind, mine->stock, g_hs_peer.m.stock);
@@ -513,6 +592,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             } else {
             if (phase == 0 && ra.known && ra.status != NET_ARENA_OUT) snprintf(line, sizeof line, "Your turn in the room: starting your match against %s...", ra.opponent);
             else if (phase == 0) snprintf(line, sizeof line, !net_rb_ready() ? "Online match: connecting to the lobby..." : mm.searching > 0 ? "Online match: finding an opponent (%d of %d players of your version searching)..." : "Online match: finding an opponent...", mm.searching, mm.players);
+            else if (lwr && g_rbs_need) snprintf(line, sizeof line, "Battle Arena: agreeing on a rollback match with the other fighter and the spectators (%d of %d ready)...", rbs_popc(g_rbs_seats), (int)g_rbs_need);
             else if (lwr) snprintf(line, sizeof line, "Room match: agreeing on a rollback match with the other player...");
             else if (find) snprintf(line, sizeof line, g_hs_peer_nonce ? "Online match with %s: agreeing on the match..." : "Online match: opponent found (%s), waiting for their game...", mm.peer_name);
             else snprintf(line, sizeof line, "%s", !net_rb_ready() ? "Not connected to the other player's game yet (lobby / room not joined)." : net_rb_no_destination() && !g_hs_peer_nonce ? "The other player is not in your Local Wireless room: both players must be in the same room." : g_hs_peer_nonce ? "The other player is here: agreeing on the match..." : "Waiting for the other player to choose a fighter and start...");
@@ -523,6 +603,8 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         {   long long p = nvn_front_presents();
             if (p != presents) { presents = p; presents_at = now; }
             else if (now - presents_at > 100 && now - last_redraw >= 100) { last_redraw = now; redraws++; nvn_front_osk_redraw(); } }
+        if (g_rbs_gid && now - last_here >= 100) { last_here = now; RbsHead h; memset(&h, 0, sizeof h); rbs_head(&h, RBS_HERE); rbs_send(&h, sizeof h); }     /* (2026-11-02) in the arena's group */
+        if (g_rbs_need && now - last_log >= 5000) printf("[arena] handshake %ld: player 1 waits for the spectators: %d of %d HELLO received (seats %02lx)\n", (long)round, rbs_popc(g_rbs_seats), (int)g_rbs_need, (unsigned long)g_rbs_seats);
         if (now - last_log >= 5000) { last_log = now; printf("[rbnet] handshake %ld: still waiting (%s%.0f s; lobby %s; other game %s; messages sent %lld, received %lld; notice updates %llu, frames shown again %llu)\n", (long)round, phase ? "" : "finding an opponent, ", (now - t0) / 1000.0,
                                                           net_rb_ready() ? (net_rb_no_destination() ? "joined, no other player in the room" : "joined") : "NOT joined", g_hs_peer_nonce ? "seen" : "not seen", g_hs_tx, g_hs_rx, (unsigned long long)notes, (unsigned long long)redraws); fflush(stdout); }
         Sleep(5);
@@ -534,7 +616,11 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         if (lwr) InterlockedExchange(&g_hs_room, 1);          /* (R3 lwr) nothing was changed: the game's own netcode plays the room's match */
         ReleaseSRWLockExclusive(&g_hs_lock);
         if (find) { net_match_get(&mm); if (mm.kind == 2 && (mm.state == MM_ASKING || mm.state == MM_SEARCHING || mm.state == MM_MATCHED)) net_match_cancel(); }   /* (R3 net3) the lobby and the opponent are told */
+        if (g_rbs_need && g_hs_have_peer && !g_hs_have_prop && !g_hs_refused && !stopped)      /* (2026-11-02) the time ran out on the spectators' HELLOs */
+            snprintf(g_hs_why, sizeof g_hs_why, "not every spectator's game was ready in time (%d of %d HELLO)", rbs_popc(g_rbs_seats), (int)g_rbs_need);
         if (!told) { char w[160]; snprintf(w, sizeof w, "the other player %s", stopped ? "stopped waiting" : "gave up waiting (time limit)"); for (int k = 0; k < 3; k++) { hs_refuse(echo, w); Sleep(20); } }
+        InterlockedExchange(&g_rbs_need, 0);
+        if (g_rbs_gid) rbs_native(g_hs_why, -1);         /* (2026-11-02) the spectators: the game's own netcode shows them this match */
         if (lwr) {                                       /* (R3 lwr) */
             menu_notice(NULL);
             printf("[rbnet] handshake %ld FAILED in the %s: %s. The %s match is played by the game's own online netcode, as set up (no rollback)\n", (long)round, arena ? "Battle Arena" : "Local Wireless room", g_hs_why, arena ? "arena's" : "room's");
@@ -547,6 +633,10 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     }
     menu_notice(NULL);
     g_hs_lwr = lwr;
+    if (g_rbs_gid) {                                    /* (2026-11-02) an arena with spectators: they are fed (MATCH from player 1's player-2 record, PADS every pass) */
+        InterlockedExchange(&g_rbs_need, 0); g_rbs_agreed = *out; rbs_hist_reset(); InterlockedExchange(&g_rbs_fighter, 1);      /* (the history of an older match never answers a NACK of this one) */
+        printf("[arena] handshake %ld: agreed with the other fighter%s: this game sends its final pads to the arena's group every pass\n", (long)round, g_local == 0 ? " and every spectator (HELLO)" : "");
+    }
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
     g_hs_delay = out->pad0;
     printf("[rbnet] handshake %ld: input delay %d frames for this match (%s; here %d, 0 = auto)\n", (long)round, g_hs_delay,
@@ -592,7 +682,7 @@ static void hs_block_compare(void) {                    /* main thread (rbn_drai
 /* ---------------------------------------------------------------- receive queue (net thread -> main) */
 #define RQ_N 1024
 #define RQ_MAX 1100
-static struct { uint64_t at_us; long long at_frame; int n; uint8_t b[RQ_MAX]; } *g_rq;
+static struct { uint64_t at_us; long long at_frame; int n, grp; uint8_t b[RQ_MAX]; } *g_rq;      /* (2026-11-02) grp 1: a fighter's PADS from the arena's group (a spectator's) */
 static volatile LONG g_rq_head, g_rq_tail; static SRWLOCK g_rq_lock = SRWLOCK_INIT;
 static volatile LONG64 g_rx_pkts, g_rx_bad, g_rx_drop, g_tx_pkts, g_tx_fail, g_rx_last_ms, g_rx_oldmatch;
 static volatile LONG g_rtt_us = -1, g_rtt_min_us = -1;
@@ -644,7 +734,7 @@ void rbn_rx(const uint8_t *p, int n) {
     AcquireSRWLockExclusive(&g_rq_lock);
     if (!g_rq) g_rq = calloc(RQ_N, sizeof *g_rq);
     LONG next = (g_rq_head + 1) % RQ_N;
-    if (g_rq && next != g_rq_tail) { g_rq[g_rq_head].at_us = now_us(); g_rq[g_rq_head].at_frame = g_cur; g_rq[g_rq_head].n = n; memcpy(g_rq[g_rq_head].b, p, (size_t)n); g_rq_head = next; }
+    if (g_rq && next != g_rq_tail) { g_rq[g_rq_head].at_us = now_us(); g_rq[g_rq_head].at_frame = g_cur; g_rq[g_rq_head].n = n; g_rq[g_rq_head].grp = 0; memcpy(g_rq[g_rq_head].b, p, (size_t)n); g_rq_head = next; }
     else InterlockedIncrement64(&g_rx_drop);
     ReleaseSRWLockExclusive(&g_rq_lock);
 }
@@ -662,6 +752,11 @@ static DWORD WINAPI ping_thread(void *u) {
     for (;;) {
         Sleep(100);
         if (!net_rb_ready()) continue;
+        if (g_rbs_match_tx) {                           /* (2026-11-02) player 1: MATCH to the arena's spectators until its fight starts */
+            if (g_started || GetTickCount64() > g_rbs_match_until) InterlockedExchange(&g_rbs_match_tx, 0);
+            else { RbsMatch mm; AcquireSRWLockShared(&g_rbs_lock); mm = g_rbs_match; ReleaseSRWLockShared(&g_rbs_lock); rbs_send(&mm, sizeof mm); }
+        }
+        if (g_spec) continue;                           /* (2026-11-02) a spectator: silent toward the fighters (no ping, no time sync) */
         RbMsg m; memset(&m, 0, sizeof m); m.type = RB_MSG_PING; m.frame = (int32_t)g_cur; m.time_us = now_us();
         send_msg(&m);
     }
@@ -672,6 +767,16 @@ void rbn_init(void) {                                   /* r1_state.c ra_init: b
     if (!g_loop) CloseHandle(CreateThread(NULL, 0, ping_thread, NULL, 0, NULL));
 }
 
+/* (2026-11-02) a Battle Arena's spectators, the in-match part (at the end of this file) */
+static void rbs_hist_reset(void);
+static void rbs_fighter_pads(void);
+static long long spec_confirmed(void);
+static void spec_rx_pads(const RbMsg *m);
+static void spec_nack(int force);
+static void spec_final(long long f);
+static void spec_start(void);
+static void spec_report(FILE *o, long long frames);
+static double spec_pace(long long f);
 /* ---------------------------------------------------------------- the session */
 static long long g_f0;                                  /* the base frame (the ring's first capture) */
 static int g_delay, g_remote = 1;
@@ -713,14 +818,16 @@ static int auto_delay(void) {
 void rbn_start(long long f0) {
     g_f0 = f0; g_started = 1; g_match_n++; g_last_tag = pads_tag();
     if (g_hlog) { fprintf(g_hlog, "m %d id %08x\n", g_match_n, g_match_id); fflush(g_hlog); }      /* (rbn_cmp.py: frames are per match) */
-    g_remote = 1 - g_local;
+    g_remote = g_spec ? 0 : 1 - g_local;              /* (2026-11-02) a spectator: both players remote (g_local -1) */
     if (g_peerdelay < 0) { const char *e = getenv("SSBU_RB_NET_PEERDELAY"); g_peerdelay = !(e && e[0] == '0'); }
     g_my_lockd = lock_delay();                          /* (hs14) announced in every PADS message of this match (frozen here) */
     g_delay = auto_delay();
     if (g_delay < 1) g_delay = 1;                        /* (frames 1..delay are empty on both sides: no rollback can reach the base state, made before the start barrier) */
     rb_input_reset(2, g_local, g_delay);
     rb_ts_reset(16683);
-    if (!g_loop && rbn_handshake_wanted()) { hs_block_capture(); hs_block_send(); }     /* the match block check */
+    if (!g_loop && rbn_handshake_wanted() && !g_spec) { hs_block_capture(); hs_block_send(); }     /* the match block check (not a spectator's: it writes to no fighter) */
+    InterlockedExchange(&g_rbs_match_tx, 0); if (g_rbs_fighter) rbs_hist_reset();      /* (2026-11-02) a fighter with spectators: its pad history from frame 1 */
+    if (g_spec) spec_start();
     printf("[rbnet] match %d (id %08x) start at frame %lld: local player %d, input delay %d frames (round trip %.1f ms, best %.1f ms)\n", g_match_n, g_match_id, f0, g_local + 1, g_delay,
            g_rtt_us > 0 ? g_rtt_us / 1000.0 : -1.0, g_rtt_min_us > 0 ? g_rtt_min_us / 1000.0 : -1.0);
     fflush(stdout);
@@ -728,6 +835,7 @@ void rbn_start(long long f0) {
 /* after the start barrier: the delay again from the round trip measured meanwhile (no frame has run: the queues start over;
  * pads of the other game already queued are sent again by it, from our acknowledgement on) */
 void rbn_choose_delay(void) {
+    if (g_spec) { printf("[rbnet] spectator: after the start barrier: both fighters' pads are coming (players 1 and 2 heard); no delay of its own (it sends no pads)\n"); fflush(stdout); return; }
     int d = auto_delay(); if (d < 1) d = 1;
     if (g_lockstep && !g_peerdelay) printf("[rbnet] after the start barrier: this game has no snapshot ring (old way, SSBU_RB_NET_PEERDELAY=0): the other game keeps its own delay\n");
     else if (!g_loop && (g_lockstep || peer_lockstep())) printf("[rbnet] after the start barrier: %s snapshot ring: delay-based pacing, both games use input delay %d (announced here %d, there %d; mode byte here %02x, there %02x)\n",
@@ -737,7 +845,7 @@ void rbn_choose_delay(void) {
     if (d == g_delay) return;
     printf("[rbnet] after the start barrier: input delay %d -> %d frames (round trip %.1f ms, best %.1f ms)\n", g_delay, d, g_rtt_us > 0 ? g_rtt_us / 1000.0 : -1.0, g_rtt_min_us > 0 ? g_rtt_min_us / 1000.0 : -1.0);
     fflush(stdout);
-    g_delay = d; rb_input_reset(2, g_local, g_delay);
+    g_delay = d; rb_input_reset(2, g_local, g_delay); if (g_rbs_fighter) rbs_hist_reset();
 }
 int rbn_started(void) { return g_started; }
 int rbn_delay(void) { return g_started ? g_delay : 0; }
@@ -751,9 +859,11 @@ static void send_pads(void) {
     long long cf = g_hfinal_upto;
     if (cf > 0 && g_hframe[cf % HR] == cf) { m.check_frame = (int32_t)cf; m.check = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32)); }
     send_msg(&m); g_sent_newest = newest;
+    rbs_fighter_pads();                                 /* (2026-11-02) a fighter of an arena with spectators: the same final pads to the group */
 }
 /* the local player's pad of a real pass (frame f): kept for f + delay and sent */
 void rbn_local_pad(long long f, RbPad now) {
+    if (g_spec) return;                                 /* (2026-11-02) a spectator has no player of its own */
     if (g_bot) now = bot_pad(g_bot_seed, f);
     rb_input_local((int)f, now);
     send_pads();
@@ -811,25 +921,27 @@ void rbn_drain(long long cur) {
         for (int k = 0; k < nts; k++) rb_ts_sample(ts[k]);
     }
     for (;;) {
-        static uint8_t b[RQ_MAX]; int n = 0; uint64_t at = 0; long long atf = 0;
+        static uint8_t b[RQ_MAX]; int n = 0, grp = 0; uint64_t at = 0; long long atf = 0;
         AcquireSRWLockExclusive(&g_rq_lock);
-        if (g_rq && g_rq_tail != g_rq_head) { n = g_rq[g_rq_tail].n; at = g_rq[g_rq_tail].at_us; atf = g_rq[g_rq_tail].at_frame; memcpy(b, g_rq[g_rq_tail].b, (size_t)n); g_rq_tail = (g_rq_tail + 1) % RQ_N; }
+        if (g_rq && g_rq_tail != g_rq_head) { n = g_rq[g_rq_tail].n; grp = g_rq[g_rq_tail].grp; at = g_rq[g_rq_tail].at_us; atf = g_rq[g_rq_tail].at_frame; memcpy(b, g_rq[g_rq_tail].b, (size_t)n); g_rq_tail = (g_rq_tail + 1) % RQ_N; }
         ReleaseSRWLockExclusive(&g_rq_lock);
         if (!n) break;
         RbMsg m;
         if (!rb_msg_parse(b, (size_t)n, &m)) { g_rx_bad++; continue; }
+        if (g_spec) { if (grp && m.type == RB_MSG_PADS && g_started) spec_rx_pads(&m); continue; }     /* (2026-11-02) a spectator: only the fighters' group PADS */
         if (m.type != RB_MSG_PADS || !g_started || m.player != g_remote) continue;
         g_peer_started = 1;
         for (int k = 0; k < m.count; k++) rb_input_remote_put(g_remote, m.newest - k, m.pads[k]);
         if (m.ack > g_peer_ack && m.ack <= rb_input_local_newest_frame()) g_peer_ack = m.ack;      /* (hs12: never an acknowledgement of pads not sent yet) */
         if (m.check_frame > 0) on_check(m.check_frame, m.check);
     }
+    if (g_spec && g_started) spec_nack(0);              /* (2026-11-02) a gap in a fighter's pads: asked for again */
 }
 int rbn_take_mismatch(void) { int m = rb_input_take_mismatch(); if (m) g_stat_mis++; return m; }
 void rbn_put_mismatch(int m) { rb_input_put_mismatch(m); if (m) g_stat_mis--; }      /* (R3 pub1) r1_ring_load refused: the wrong guess stays pending */
-long long rbn_confirmed(void) { return rb_input_remote_newest_consecutive_frame(g_remote); }
+long long rbn_confirmed(void) { return g_spec ? spec_confirmed() : rb_input_remote_newest_consecutive_frame(g_remote); }
 int rbn_peer_gone(void) {
-    if (g_loop || !g_started) return 0;
+    if (g_loop || !g_started || g_spec) return 0;      /* (2026-11-02: a spectator never goes on alone: rbn_spec_wait) */
     LONG64 last = g_rx_last_ms;
     return last && GetTickCount64() - (ULONGLONG)last > 5000;
 }
@@ -898,12 +1010,13 @@ static void detail_frame(long long f) {              /* frame f is final: the pa
 }
 /* no rollback pending: every frame up to min(cur, newest remote pad) is final */
 void rbn_finalize(long long cur) {
-    long long upto = rb_input_remote_newest_consecutive_frame(g_remote);
+    long long upto = g_spec ? spec_confirmed() : rb_input_remote_newest_consecutive_frame(g_remote);
     if (upto > cur) upto = cur;
     for (long long f = g_hfinal_upto + 1; f <= upto; f++) {
         if (g_hlog && g_hframe[f % HR] == f) fprintf(g_hlog, "f %lld h %016llx\n", f, (unsigned long long)g_hash[f % HR]);
         detail_frame(f);
         g_hfinal_upto = f;
+        if (g_spec) spec_final(f);                      /* (2026-11-02) the fighters' checksums of this frame */
         ladder_final(f);
     }
     if (g_hlog && (upto & 63) == 0) fflush(g_hlog);
@@ -914,6 +1027,7 @@ void rbn_finalize(long long cur) {
 static double g_tsbias = -1;
 double rbn_pace_extra(long long f) {
     if (!g_started || g_loop) return 0;
+    if (g_spec) return spec_pace(f);                    /* (2026-11-02) a spectator: from its buffer of the fighters' pads */
     if (f % 30 == 0) {
         rb_ts_decide((int)f);
         double est_ms = rb_ts_offset() / 1000.0;
@@ -930,17 +1044,19 @@ double rbn_pace_extra(long long f) {
     return 0;
 }
 int rbn_rtt_ms(void) { return g_rtt_us > 0 ? (int)(g_rtt_us / 1000) : -1; }
-void rbn_resend(void) { if (g_started) send_pads(); }
+void rbn_resend(void) { if (g_started) { if (g_spec) spec_nack(1); else send_pads(); } }     /* (2026-11-02) a spectator waiting: the missing pads asked for */
 /* the match-start barrier: an empty PADS message says "in the match" (count 0, newest 0) */
 void rbn_hello(void) {
-    if (!g_started || g_loop) return;
+    if (!g_started || g_loop || g_spec) return;        /* (2026-11-02) a spectator says nothing: the fighters' PADS start its match */
     { static int n; if (rbn_handshake_wanted() && n++ < 20 && (n % 4) == 0) hs_block_send(); }   /* (the block check again, a few times) */
     if (rb_input_local_newest_frame() >= 1) { send_pads(); return; }
     RbMsg m; memset(&m, 0, sizeof m); m.type = RB_MSG_PADS; m.player = g_local; m.newest = 0; m.count = 0; send_msg(&m);
+    rbs_fighter_pads();                                 /* (2026-11-02) the spectators' start barrier */
 }
 int rbn_peer_started(void) { return g_loop || g_peer_started; }
 void rbn_status(char *out, size_t n) {
     LONG q = (g_rq_head - g_rq_tail + RQ_N) % RQ_N;
+    if (g_spec) { snprintf(out, n, "spectator: player 1's pads up to %d, player 2's up to %d; group messages received %lld (queue %ld)", rb_input_remote_newest_consecutive_frame(0), rb_input_remote_newest_consecutive_frame(1), (long long)g_rbs_rx, (long)q); return; }
     snprintf(out, n, "remote pads up to %d, local up to %d, the other game has ours up to %lld; packets sent %lld received %lld (bad %lld, queue %ld, full %lld)",
              rb_input_remote_newest_consecutive_frame(g_remote), rb_input_local_newest_frame(), g_peer_ack, (long long)g_tx_pkts, (long long)g_rx_pkts, (long long)g_rx_bad, (long)q, (long long)g_rx_drop);
 }
@@ -962,11 +1078,16 @@ void rbn_match_reset(void) {
     InterlockedExchange64(&g_cur, 0);
     if (g_hs_cancelled) menu_notice(NULL);
     InterlockedExchange(&g_hs_cancelled, 0);
+    if (g_spec) {                                       /* (2026-11-02) a watched match is over: this game is an arena member again */
+        AcquireSRWLockExclusive(&g_hs_lock); g_local = g_spec_saved_local; InterlockedExchange(&g_spec, 0); ReleaseSRWLockExclusive(&g_hs_lock);
+        printf("[rbnet] spectator: the watched match is over\n");
+    }
     printf("[rbnet] match %d over: the session is ready for the next match (pads of an older match dropped so far: %lld)\n", g_match_n, (long long)g_rx_oldmatch);
     fflush(stdout);
 }
 int rbn_match_number(void) { return g_match_n; }
 long long rbn_desyncs(void) { return g_desync; }       /* (ladder_report.c) checksum mismatches of this match so far */
+static long long rbs_hist_upto(void);
 void rbn_report(FILE *o, long long frames) {
     if (g_on <= 0) return;
     if (g_hlog) fflush(g_hlog);
@@ -977,5 +1098,317 @@ void rbn_report(FILE *o, long long frames) {
     fprintf(o, "[rbnet] report: pad check of the final simulations: %lld pad values differ from the final ones (first frame %lld)\n", g_padcheck_bad, g_padcheck_first);
     fprintf(o, "[rbnet] report: packets sent %lld (failed %lld), received %lld (bad %lld, queue full %lld); remote pads up to %d, local up to %d\n",
             (long long)g_tx_pkts, (long long)g_tx_fail, (long long)g_rx_pkts, (long long)g_rx_bad, (long long)g_rx_drop, rb_input_remote_newest_consecutive_frame(g_remote), rb_input_local_newest_frame());
+    if (g_spec) spec_report(o, frames);                 /* (2026-11-02) */
+    else if (g_rbs_fighter) fprintf(o, "[arena] report: this fighter sent the arena's group %lld messages (pads every pass, answers to NACKs), received %lld; its pad history up to frame %lld\n", (long long)g_rbs_tx, (long long)g_rbs_rx, rbs_hist_upto());
     fflush(o);
+}
+
+/* ---------------------------------------------------------------- (2026-11-02) spectators of a Battle Arena (RBS_*, see above the handshake) */
+int net_rbg_send(uint64_t key, const void *p, int n);  /* net_relay.c: packet type 27, to every other member of the arena's group */
+static void rbs_head(void *m, int type) {
+    RbsHead *h = (RbsHead *)m; h->type = (uint8_t)type; h->proto = RBH_PROTO; h->game_build = (int16_t)g_game_build; h->exe_stamp = exe_stamp(); h->gid = g_rbs_gid;
+}
+static void rbs_send(const void *p, int n) { if (g_rbs_gid && net_rbg_send(g_rbs_gid, p, n)) InterlockedIncrement64(&g_rbs_tx); }
+static void rbs_native(const char *why, int spectator_seat) {
+    if (!g_rbs_gid) return;
+    for (int k = 0; k < 3; k++) {
+        if (spectator_seat >= 0) { RbsHello h; memset(&h, 0, sizeof h); rbs_head(&h, RBS_HELLO); h.seat = (uint8_t)spectator_seat; h.flags = 1; rbs_send(&h, sizeof h); }
+        else { RbsNative m; memset(&m, 0, sizeof m); rbs_head(&m, RBS_NATIVE); snprintf(m.why, sizeof m.why, "%s", why); rbs_send(&m, sizeof m); }
+        Sleep(20);
+    }
+    printf("[arena] %s sent to the arena's group (arena %u, 3 times): %s\n", spectator_seat >= 0 ? "a refusing HELLO (this spectator watches with the game's own netcode)" : "NATIVE (the game's own netcode plays this match)", g_rbs_gid, why);
+    fflush(stdout);
+}
+/* the spectator at its set-up (rbn_handshake, its seat does not fight): HELLO every 100 ms until player 1's MATCH (or NATIVE,
+ * or the time limit, or Esc / B). MATCH: this game plays the agreed match as a local match fed by both fighters (1, *out =
+ * the match, as a fighter's handshake gives it); otherwise nothing is changed and the game's own netcode shows the match (0). */
+static int rbs_spectate(long round, uint32_t gid, int players, int seat, const int sor[2], const RbhMatch *mine, RbhMatch *out) {
+    double limit = getenv("SSBU_RB_NET_SPEC_WAIT") ? atof(getenv("SSBU_RB_NET_SPEC_WAIT")) * 1000.0 : 20000.0;
+    RbsHello h; memset(&h, 0, sizeof h);
+    AcquireSRWLockExclusive(&g_rbs_lock);
+    g_rbs_gid = gid; g_rbs_sor[0] = sor[0]; g_rbs_sor[1] = sor[1]; g_rbs_native_why[0] = 0;
+    InterlockedExchange(&g_rbs_got, 0); InterlockedExchange(&g_rbs_wait, 1);
+    rbs_head(&h, RBS_HELLO); h.seat = (uint8_t)seat; h.mask = (uint8_t)((1u << sor[0]) | (1u << sor[1])); h.rule_kind = mine->rule_kind; h.stock = mine->stock; h.chara0 = mine->chara[0];
+    ReleaseSRWLockExclusive(&g_rbs_lock);
+    printf("[rbnet] spectator: handshake %ld: a Battle Arena's match (arena %u, %d members, fighting seats %d and %d; this game is seat %d and watches): HELLO to the arena's group every 100 ms, waiting for player 1's MATCH (at most %.0f s)\n",
+           round, gid, players, sor[0], sor[1], seat, limit / 1000.0);
+    fflush(stdout);
+    uint64_t t0 = GetTickCount64(), last_tx = 0, last_note = 0, last_log = t0, last_redraw = 0, presents_at = t0; long long presents = nvn_front_presents(), hellos = 0; int stopped = 0;
+    for (;;) {
+        uint64_t now = GetTickCount64();
+        if (g_rbs_got) break;
+        if ((double)(now - t0) > limit) break;
+        if (hs_stop_pressed((double)(now - t0))) { stopped = 1; break; }
+        if (now - last_tx >= 100) { last_tx = now; rbs_send(&h, sizeof h); hellos++; }
+        if (now - last_note >= 250) { last_note = now; char t[400];
+            snprintf(t, sizeof t, "Battle Arena: you are watching this match.\nWaiting for the fighters to start it (%.0f s; after %.0f s the game shows it its own way).\nPress Esc or hold B to stop waiting.", (now - t0) / 1000.0, limit / 1000.0);
+            menu_notice(t); }
+        {   long long pr = nvn_front_presents();
+            if (pr != presents) { presents = pr; presents_at = now; }
+            else if (now - presents_at > 100 && now - last_redraw >= 100) { last_redraw = now; nvn_front_osk_redraw(); } }
+        if (now - last_log >= 5000) { last_log = now; printf("[rbnet] spectator: handshake %ld: still waiting for player 1's MATCH (%.0f s; HELLO sent %lld, group messages received %lld; lobby %s)\n", round, (now - t0) / 1000.0, hellos, (long long)g_rbs_rx, net_rb_ready() ? "joined" : "NOT joined"); fflush(stdout); }
+        Sleep(5);
+    }
+    AcquireSRWLockExclusive(&g_rbs_lock); int got = (int)g_rbs_got; RbsMatch mm = g_rbs_match; char nwhy[200]; snprintf(nwhy, sizeof nwhy, "%s", g_rbs_native_why); InterlockedExchange(&g_rbs_wait, 0); ReleaseSRWLockExclusive(&g_rbs_lock);
+    menu_notice(NULL);
+    uint32_t mid = (uint32_t)(mm.m.seed ^ (mm.m.seed >> 32)) | 1u;
+    char why[260]; why[0] = 0;
+    if (got == 2) snprintf(why, sizeof why, "NATIVE from a fighter (%s)", nwhy);
+    else if (stopped) snprintf(why, sizeof why, "stopped waiting (Esc / B)");
+    else if (got != 1) snprintf(why, sizeof why, "no MATCH from player 1 in %.0f s", limit / 1000.0);
+    else if (!mm.m.seed || mm.match_id != mid) snprintf(why, sizeof why, "the MATCH message is damaged (match id %08x, %08x from its seed)", mm.match_id, mid);
+    else if (mm.seat_of_rank[0] != sor[0] || mm.seat_of_rank[1] != sor[1]) snprintf(why, sizeof why, "player 1 says seats %d and %d fight, this game sees %d and %d", mm.seat_of_rank[0], mm.seat_of_rank[1], sor[0], sor[1]);
+    if (why[0]) {
+        if (got != 2) rbs_native(why, seat);           /* (player 1, if it still waits for this HELLO, gives up at once) */
+        InterlockedExchange(&g_hs_room, 1);
+        printf("[rbnet] spectator: handshake %ld: %s after %.1f s: the game's own online netcode shows this match; nothing changed\n", round, why, (GetTickCount64() - t0) / 1000.0);
+        fflush(stdout);
+        return 0;
+    }
+    *out = mm.m;
+    AcquireSRWLockExclusive(&g_hs_lock);
+    g_spec_saved_local = g_local; g_local = -1; InterlockedExchange(&g_spec, 1);
+    memcpy(g_spec_lay, mm.lay, sizeof g_spec_lay); memcpy(g_spec_ctl, mm.ctl, sizeof g_spec_ctl); g_spec_ctl_ok = mm.ctl_ok;
+    g_hs_cancelled = 0; g_hs_waiting = 0;
+    ReleaseSRWLockExclusive(&g_hs_lock);
+    g_hs_lwr = 1;
+    g_hs_seed = out->seed; g_match_id = mid; g_hs_delay = out->pad0;
+    host_fixed_random_reseed(g_hs_seed);
+    printf("[rbnet] spectator: handshake %ld: MATCH from player 1 after %.2f s (HELLO sent %lld; match id %08x; players' controls %s): this game shows the match as a local match fed with both fighters' final pads (no ring, no guesses; buffer %d frames)\n",
+           round, (GetTickCount64() - t0) / 1000.0, hellos, g_match_id, mm.ctl_ok ? "exchanged" : "NOT exchanged by the fighters (each with the defaults)", RBS_B);
+    hs_print("the match (spectator)", out);
+    return 1;
+}
+/* debug_mode.c (a spectator, at the fighters' records): both players' layouts and controls as player 1 wrote them; the
+ * return value is whether the fighters exchanged their controls (-1: this game does not watch) */
+int rbn_spec_controls(uint16_t lay[2][11], uint8_t ctl[2][RBS_LCTL]) {
+    if (!g_spec) return -1;
+    memcpy(lay, g_spec_lay, sizeof g_spec_lay); memcpy(ctl, g_spec_ctl, sizeof g_spec_ctl);
+    return g_spec_ctl_ok;
+}
+/* debug_mode.c (player 1, at player 2's record, after the fighters' rbn_room_layout): MATCH to the spectators, now and then
+ * every 100 ms (ping thread) until this game's fight starts */
+void rbn_spec_match_send(const uint16_t lay[2][11], const uint8_t ctl[2][RBS_LCTL], int ctl_ok) {
+    if (!g_rbs_fighter || g_local != 0 || !g_rbs_gid) return;
+    RbsMatch m; memset(&m, 0, sizeof m); rbs_head(&m, RBS_MATCH);
+    m.match_id = g_match_id; m.seat_of_rank[0] = (uint8_t)g_rbs_sor[0]; m.seat_of_rank[1] = (uint8_t)g_rbs_sor[1]; m.ctl_ok = (uint8_t)(ctl_ok != 0);
+    m.m = g_rbs_agreed; memcpy(m.lay, lay, sizeof m.lay); memcpy(m.ctl, ctl, sizeof m.ctl);
+    AcquireSRWLockExclusive(&g_rbs_lock); g_rbs_match = m; g_rbs_match_until = GetTickCount64() + 25000; ReleaseSRWLockExclusive(&g_rbs_lock);
+    rbs_send(&m, sizeof m);
+    InterlockedExchange(&g_rbs_match_tx, 1);
+    printf("[arena] MATCH sent to the arena's spectators (arena %u, match id %08x, seats %d and %d, controls %s; %d bytes): again every 100 ms until this fight starts\n", g_rbs_gid, g_match_id, g_rbs_sor[0], g_rbs_sor[1], ctl_ok ? "exchanged" : "not exchanged", (int)sizeof m);
+    fflush(stdout);
+}
+
+/* a fighter: the history of its own final pads (frames 1 ..), what the spectators get (PADS, NACK answers) */
+static RbPad g_rbs_hist[RBS_HIST]; static int g_rbs_hist_f[RBS_HIST]; static long long g_rbs_hist_n;
+static long long g_rbs_nack_rx;
+static void rbs_hist_reset(void) { AcquireSRWLockExclusive(&g_rbs_lock); memset(g_rbs_hist_f, 0, sizeof g_rbs_hist_f); g_rbs_hist_n = 0; g_rbs_nack_rx = 0; ReleaseSRWLockExclusive(&g_rbs_lock); }
+static long long rbs_hist_upto(void) { return g_rbs_hist_n; }
+static void rbs_hist_update(void) {
+    long long nf = rb_input_local_newest_frame();
+    AcquireSRWLockExclusive(&g_rbs_lock);
+    for (long long f = g_rbs_hist_n + 1; f <= nf; f++) {
+        RbPad p; if (!rb_input_local_get((int)f, &p)) memset(&p, 0, sizeof p);
+        g_rbs_hist[f % RBS_HIST] = p; g_rbs_hist_f[f % RBS_HIST] = (int)f;
+    }
+    if (nf > g_rbs_hist_n) g_rbs_hist_n = nf;
+    ReleaseSRWLockExclusive(&g_rbs_lock);
+}
+/* PADS to the group: this fighter's pads `from` .. (at most `most`, newest first as rb_wire has them); check: its newest
+ * finalized checksum (the main thread only) */
+static void rbs_send_pads(long long from, int most, int check) {
+    uint8_t b[sizeof(RbsPadsHead) + RB_PADS_HEAD + RB_MAX_PADS_PER_MSG * RB_PAD_WIRE + 16];
+    RbMsg m; memset(&m, 0, sizeof m); m.type = RB_MSG_PADS; m.player = g_local;
+    if (most > RB_MAX_PADS_PER_MSG) most = RB_MAX_PADS_PER_MSG;
+    AcquireSRWLockShared(&g_rbs_lock);
+    long long upto = g_rbs_hist_n;
+    if (from < 1) from = 1;
+    if (from < upto - RBS_HIST + 1) from = upto - RBS_HIST + 1;
+    long long newest = from + most - 1; if (newest > upto) newest = upto;
+    m.newest = (int32_t)upto;
+    if (newest >= from) { m.newest = (int32_t)newest; for (long long f = newest; f >= from && m.count < most; f--) { int x = (int)(f % RBS_HIST); if (g_rbs_hist_f[x] != f) break; m.pads[m.count++] = g_rbs_hist[x]; } }
+    ReleaseSRWLockShared(&g_rbs_lock);
+    if (check) { long long cf = g_hfinal_upto; if (cf > 0 && g_hframe[cf % HR] == cf) { m.check_frame = (int32_t)cf; m.check = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32)); } }
+    RbsPadsHead h; memset(&h, 0, sizeof h); rbs_head(&h, RBS_PADS); h.tag = pads_tag(); h.rank = (uint8_t)g_local;
+    memcpy(b, &h, sizeof h);
+    size_t k = rb_msg_build(b + sizeof h, sizeof b - sizeof h, &m);
+    if (k) rbs_send(b, (int)(sizeof h + k));
+}
+static void rbs_fighter_pads(void) {                    /* every pass of the fight (send_pads), every 50 ms while waiting, at the start barrier */
+    if (!g_rbs_fighter || !g_started || g_loop) return;
+    rbs_hist_update();
+    rbs_send_pads(g_rbs_hist_n - 7, 8, 1);
+}
+
+/* the spectator in the match */
+static long long g_spec_newest[2], g_spec_pkts, g_spec_nack_tx, g_spec_waits, g_spec_long_waits, g_spec_slow, g_spec_fast, g_spec_lead_n, g_spec_lead_sum, g_spec_lead_min, g_spec_lead_max;
+static long long g_spec_ck_ok, g_spec_ck_bad, g_spec_ck_first = -1, g_spec_ck_lost;
+static double g_spec_wait_ms, g_spec_wait_max;
+static long long g_spec_far;                            /* pads left out: too far ahead for the input ring (asked for again) */
+static int g_spec_seen, g_spec_noticed, g_spec_said;
+static uint64_t g_spec_nack_ms[2];
+static int g_spec_ck_f[2][RBS_CK]; static uint32_t g_spec_ck[2][RBS_CK];
+static void spec_start(void) {
+    memset(g_spec_newest, 0, sizeof g_spec_newest); g_spec_pkts = g_spec_nack_tx = g_spec_waits = g_spec_long_waits = g_spec_slow = g_spec_fast = g_spec_lead_n = g_spec_lead_sum = 0;
+    g_spec_lead_min = -1; g_spec_lead_max = 0; g_spec_ck_ok = g_spec_ck_bad = g_spec_ck_lost = g_spec_far = 0; g_spec_ck_first = -1; g_spec_wait_ms = g_spec_wait_max = 0;
+    g_spec_seen = g_spec_noticed = g_spec_said = 0; memset(g_spec_nack_ms, 0, sizeof g_spec_nack_ms); memset(g_spec_ck_f, 0, sizeof g_spec_ck_f);
+    printf("[rbnet] spectator: match %d (id %08x) start: showing players 1 and 2 (seats %d and %d) from their final pads; buffer %d frames; waiting for both fighters' pads (start barrier)\n", g_match_n, g_match_id, g_rbs_sor[0], g_rbs_sor[1], RBS_B);
+    fflush(stdout);
+}
+static long long spec_confirmed(void) {
+    long long a = rb_input_remote_newest_consecutive_frame(0), b = rb_input_remote_newest_consecutive_frame(1);
+    return a < b ? a : b;
+}
+static void spec_compare(int p, long long f, uint32_t ck) {
+    uint32_t mine = (uint32_t)(g_hash[f % HR] ^ (g_hash[f % HR] >> 32));
+    if (mine == ck) { g_spec_ck_ok++; return; }
+    g_spec_ck_bad++; if (g_spec_ck_first < 0) g_spec_ck_first = f;
+    if (g_spec_ck_bad <= 5) { printf("[rbnet] spectator: CHECK MISMATCH with player %d at frame %lld: here %08x, the fighter %08x (this view differs from the fight; notice only)\n", p + 1, f, mine, ck); fflush(stdout); }
+}
+static void spec_check(int p, long long cf, uint32_t ck) {
+    if (cf <= 0) return;
+    if (cf <= g_hfinal_upto) { if (g_hframe[cf % HR] == cf) spec_compare(p, cf, ck); else g_spec_ck_lost++; return; }
+    g_spec_ck_f[p][cf % RBS_CK] = (int)cf; g_spec_ck[p][cf % RBS_CK] = ck;      /* (compared when this frame is final here) */
+}
+static void spec_final(long long f) {
+    for (int p = 0; p < 2; p++) { int x = (int)(f % RBS_CK); if (g_spec_ck_f[p][x] != f) continue; g_spec_ck_f[p][x] = 0; if (g_hframe[f % HR] == f) spec_compare(p, f, g_spec_ck[p][x]); else g_spec_ck_lost++; }
+}
+static void spec_rx_pads(const RbMsg *m) {              /* rbn_drain: a fighter's PADS (player = its rank) */
+    int p = m->player; if (p < 0 || p > 1) return;
+    g_spec_pkts++;
+    if (!(g_spec_seen & (1 << p))) { g_spec_seen |= 1 << p; printf("[rbnet] spectator: first pads of player %d (newest frame %d)\n", p + 1, m->newest); fflush(stdout); }
+    if (g_spec_seen == 3) g_peer_started = 1;           /* (the start barrier: both fighters are in the match) */
+    /* (a spectator far behind the fighters: a pad more than the input ring ahead of the next frame to show would take the slot
+     * of a frame not shown yet, which would then run on a guess; such pads are left out and asked for again later by NACK) */
+    long long ahead_max = (long long)g_cur + RB_RING - 32;
+    for (int k = 0; k < m->count; k++) { long long f = (long long)m->newest - k; if (f <= ahead_max) rb_input_remote_put(p, (int)f, m->pads[k]); else g_spec_far++; }
+    if (m->newest > g_spec_newest[p]) g_spec_newest[p] = m->newest;
+    if (m->check_frame > 0) spec_check(p, m->check_frame, m->check);
+}
+static void spec_nack(int force) {                      /* force: the controller waits (rbn_resend) */
+    uint64_t now = GetTickCount64();
+    for (int p = 0; p < 2; p++) {
+        long long c = rb_input_remote_newest_consecutive_frame(p);
+        int want = force ? c < g_cur + 1 : g_spec_newest[p] > c;
+        if (!want || now - g_spec_nack_ms[p] < 60) continue;
+        g_spec_nack_ms[p] = now;
+        RbsNack k; memset(&k, 0, sizeof k); rbs_head(&k, RBS_NACK); k.tag = pads_tag(); k.rank = (uint8_t)p; k.from = (int32_t)(c + 1);
+        rbs_send(&k, sizeof k); g_spec_nack_tx++;
+        if (g_spec_nack_tx <= 10 || g_spec_nack_tx % 100 == 0) { printf("[rbnet] spectator: NACK %lld to player %d: pads from frame %lld (its newest seen %lld)%s\n", g_spec_nack_tx, p + 1, c + 1, g_spec_newest[p], force ? " (waiting)" : ""); fflush(stdout); }
+    }
+}
+/* the jitter buffer: under RBS_B frames of both fighters' pads ahead, a little slower; over 3 x RBS_B, faster (catching up) */
+static double spec_pace(long long f) {
+    long long lead = spec_confirmed() - f; if (lead < 0) lead = 0;
+    g_spec_lead_n++; g_spec_lead_sum += lead; if (g_spec_lead_min < 0 || lead < g_spec_lead_min) g_spec_lead_min = lead; if (lead > g_spec_lead_max) g_spec_lead_max = lead;
+    if (lead > 3 * RBS_B) { g_spec_fast++; return lead > 30 ? -8.0 : -4.0; }
+    if (lead < RBS_B) { g_spec_slow++; return 3.0; }
+    return 0;
+}
+static void spec_give_up(const char *why) {
+    AcquireSRWLockExclusive(&g_hs_lock); snprintf(g_hs_why, sizeof g_hs_why, "%s", why); InterlockedExchange(&g_hs_cancelled, 1); ReleaseSRWLockExclusive(&g_hs_lock);
+    printf("[rbnet] spectator: %s at frame %lld: this view is given up (its player 1 walks off the stage to end the match here)\n", why, (long long)g_cur);
+    spec_report(stdout, g_cur);
+}
+/* rollback_controller.c, at the start barrier: no pads from the fighters in time */
+void rbn_spec_give_up(const char *why) { if (g_spec) spec_give_up(why); }
+/* rollback_controller.c, every turn of its wait for the pads of the next frame (waited_ms since the wait began): a notice after
+ * 1 s; after 30 s the match is given up (1: the controller leaves it the way of a match not agreed) */
+int rbn_spec_wait(double waited_ms) {
+    if (!g_spec) return 0;
+    static uint64_t last_note;
+    if (waited_ms >= 1000) {
+        if (!g_spec_said) { g_spec_said = 1; printf("[rbnet] spectator: waiting for the fighters at frame %lld for 1 s (player 1's pads up to %d, newest seen %lld; player 2's up to %d, newest seen %lld): notice shown\n", (long long)g_cur + 1,
+                                                   rb_input_remote_newest_consecutive_frame(0), g_spec_newest[0], rb_input_remote_newest_consecutive_frame(1), g_spec_newest[1]); fflush(stdout); }
+        if (GetTickCount64() - last_note >= 500) { last_note = GetTickCount64(); char t[300];
+            snprintf(t, sizeof t, "Watching the match: waiting for the fighters (%.0f s).\nThe match goes on by itself as soon as their moves arrive.", waited_ms / 1000.0); menu_notice(t); g_spec_noticed = 1; }
+    }
+    if (waited_ms >= 30000) { spec_give_up("the fighters' pads stopped coming for 30 s"); return 1; }
+    return 0;
+}
+void rbn_spec_wait_done(double waited_ms) {             /* the wait is over (the pads came) */
+    if (!g_spec) return;
+    g_spec_waits++; g_spec_wait_ms += waited_ms; if (waited_ms > g_spec_wait_max) g_spec_wait_max = waited_ms; if (waited_ms >= 100) g_spec_long_waits++;
+    if (g_spec_said) { printf("[rbnet] spectator: the fighters' pads came again after %.1f s\n", waited_ms / 1000.0); fflush(stdout); }
+    if (g_spec_noticed) menu_notice(NULL);
+    g_spec_noticed = g_spec_said = 0;
+}
+static void spec_report(FILE *o, long long frames) {
+    fprintf(o, "[rbnet] spectator: report (match %d, id %08x): %lld frames shown (final %lld); player 1's pads up to %d (newest seen %lld), player 2's up to %d (newest seen %lld); pad messages %lld, group messages received %lld, NACKs sent %lld, pads too far ahead left out %lld\n",
+            g_match_n, g_match_id, frames, g_hfinal_upto, rb_input_remote_newest_consecutive_frame(0), g_spec_newest[0], rb_input_remote_newest_consecutive_frame(1), g_spec_newest[1], g_spec_pkts, (long long)g_rbs_rx, g_spec_nack_tx, g_spec_far);
+    fprintf(o, "[rbnet] spectator: report: waits for the fighters %lld (%lld of 100 ms or more; %.0f ms in all, longest %.0f ms); buffer ahead %lld..%lld frames (mean %.1f); frames slowed (under %d) %lld, sped up (over %d) %lld\n",
+            g_spec_waits, g_spec_long_waits, g_spec_wait_ms, g_spec_wait_max, g_spec_lead_min < 0 ? 0 : g_spec_lead_min, g_spec_lead_max, g_spec_lead_n ? (double)g_spec_lead_sum / g_spec_lead_n : 0.0, RBS_B, g_spec_slow, 3 * RBS_B, g_spec_fast);
+    fprintf(o, "[rbnet] spectator: report: the fighters' checksums compared %lld, MISMATCHES %lld (first frame %lld), not comparable (too old) %lld\n", g_spec_ck_ok + g_spec_ck_bad, g_spec_ck_bad, g_spec_ck_first, g_spec_ck_lost);
+    fflush(o);
+}
+
+/* net_relay.c's receive thread: a message of the arena's group (packet type 27) */
+void rbs_rx(uint32_t src, const uint8_t *p, int n) {
+    (void)src;
+    if (rbn_on() <= 0 || n < (int)sizeof(RbsHead)) return;
+    RbsHead h; memcpy(&h, p, sizeof h);
+    if (h.type < RBS_HELLO || h.type > RBS_HERE || !g_rbs_gid || h.gid != g_rbs_gid) return;
+    InterlockedIncrement64(&g_rbs_rx);
+    switch (h.type) {
+    case RBS_HELLO: {                                   /* (player 1, in its handshake) */
+        if (!g_rbs_need || n < (int)sizeof(RbsHello)) break;
+        RbsHello m; memcpy(&m, p, sizeof m);
+        char why[200]; why[0] = 0;
+        AcquireSRWLockExclusive(&g_rbs_lock);
+        LONG bit = m.seat < 8 ? 1L << m.seat : 0;
+        if (m.flags & 1) snprintf(why, sizeof why, "the spectator at seat %d watches this match with the game's own netcode", m.seat);
+        else if (m.h.proto != RBH_PROTO) snprintf(why, sizeof why, "the spectator at seat %d has another version of the rollback (protocol %d here, %d there)", m.seat, RBH_PROTO, m.h.proto);
+        else if (m.h.game_build != g_rbs_expect.h.game_build) snprintf(why, sizeof why, "the spectator at seat %d has another game version (build %d here, %d there)", m.seat, g_rbs_expect.h.game_build, m.h.game_build);
+        else if (m.h.exe_stamp != g_rbs_expect.h.exe_stamp) snprintf(why, sizeof why, "the spectator at seat %d runs another build of the PC port (exe stamp %08x here, %08x there)", m.seat, g_rbs_expect.h.exe_stamp, m.h.exe_stamp);
+        else if (!bit || (g_rbs_expect.mask & bit)) snprintf(why, sizeof why, "seat %d is not a spectator's seat here", m.seat);
+        else if (m.mask != g_rbs_expect.mask) snprintf(why, sizeof why, "the spectator at seat %d sees other fighting seats (mask %02x here, %02x there)", m.seat, g_rbs_expect.mask, m.mask);
+        else if (m.rule_kind != g_rbs_expect.rule_kind || m.stock != g_rbs_expect.stock || ((g_rbs_expect.mask & 1) && m.chara0 != g_rbs_expect.chara0))
+            snprintf(why, sizeof why, "the spectator at seat %d sees another match (rule kind %d / %d, stocks %d / %d, seat 0's fighter %016llx / %016llx)", m.seat, g_rbs_expect.rule_kind, m.rule_kind, g_rbs_expect.stock, m.stock,
+                     (unsigned long long)g_rbs_expect.chara0, (unsigned long long)m.chara0);
+        int fresh = 0;
+        if (why[0]) { if (!g_rbs_bad) { snprintf(g_rbs_bad_why, sizeof g_rbs_bad_why, "%s", why); InterlockedExchange(&g_rbs_bad, 1); fresh = 1; } }
+        else if (!(g_rbs_seats & bit)) { g_rbs_seats |= bit; fresh = 2; }
+        int have = rbs_popc(g_rbs_seats), need = (int)g_rbs_need;
+        ReleaseSRWLockExclusive(&g_rbs_lock);
+        if (fresh == 1) printf("[arena] HELLO from the spectator at seat %d REFUSED: %s\n", m.seat, why);
+        if (fresh == 2) printf("[arena] HELLO from the spectator at seat %d: ready (%d of %d spectators)\n", m.seat, have, need);
+        if (fresh) fflush(stdout);
+        break; }
+    case RBS_MATCH:                                     /* (a spectator at its set-up) */
+        if (!g_rbs_wait || n < (int)sizeof(RbsMatch)) break;
+        AcquireSRWLockExclusive(&g_rbs_lock);
+        if (!g_rbs_got && h.proto == RBH_PROTO) { memcpy(&g_rbs_match, p, sizeof g_rbs_match); InterlockedExchange(&g_rbs_got, 1); }
+        ReleaseSRWLockExclusive(&g_rbs_lock);
+        break;
+    case RBS_NATIVE: {
+        if (!g_rbs_wait) break;
+        RbsNative m; memset(&m, 0, sizeof m); memcpy(&m, p, (size_t)n < sizeof m ? (size_t)n : sizeof m); m.why[sizeof m.why - 1] = 0;
+        AcquireSRWLockExclusive(&g_rbs_lock);
+        if (!g_rbs_got) { snprintf(g_rbs_native_why, sizeof g_rbs_native_why, "%s", m.why); InterlockedExchange(&g_rbs_got, 2); }
+        ReleaseSRWLockExclusive(&g_rbs_lock);
+        break; }
+    case RBS_PADS: {                                    /* (a spectator in its match) into the receive queue, drained with the game's frames */
+        if (!g_spec || !g_started || n < (int)sizeof(RbsPadsHead) + RB_PADS_HEAD) break;
+        RbsPadsHead ph; memcpy(&ph, p, sizeof ph);
+        if (ph.tag != pads_tag()) { InterlockedIncrement64(&g_rx_oldmatch); break; }
+        const uint8_t *q = p + sizeof ph; int qn = n - (int)sizeof ph;
+        if (qn > RQ_MAX) { InterlockedIncrement64(&g_rx_bad); break; }
+        InterlockedIncrement64(&g_rx_pkts); InterlockedExchange64(&g_rx_last_ms, (LONG64)GetTickCount64());
+        AcquireSRWLockExclusive(&g_rq_lock);
+        if (!g_rq) g_rq = calloc(RQ_N, sizeof *g_rq);
+        LONG next = (g_rq_head + 1) % RQ_N;
+        if (g_rq && next != g_rq_tail) { g_rq[g_rq_head].at_us = now_us(); g_rq[g_rq_head].at_frame = g_cur; g_rq[g_rq_head].n = qn; g_rq[g_rq_head].grp = 1; memcpy(g_rq[g_rq_head].b, q, (size_t)qn); g_rq_head = next; }
+        else InterlockedIncrement64(&g_rx_drop);
+        ReleaseSRWLockExclusive(&g_rq_lock);
+        break; }
+    case RBS_NACK: {                                    /* (a fighter, also after its fight: the history stays until its next set-up) */
+        if (!g_rbs_fighter || n < (int)sizeof(RbsNack)) break;
+        RbsNack k; memcpy(&k, p, sizeof k);
+        if (k.tag != pads_tag() || k.rank != (uint8_t)g_local) break;
+        long long c = ++g_rbs_nack_rx;
+        rbs_send_pads(k.from, RB_MAX_PADS_PER_MSG, 0);
+        if (c <= 10 || c % 100 == 0) { printf("[arena] NACK %lld from a spectator: this fighter's pads from frame %d sent again (history up to %lld)\n", c, k.from, g_rbs_hist_n); fflush(stdout); }
+        break; }
+    }
 }

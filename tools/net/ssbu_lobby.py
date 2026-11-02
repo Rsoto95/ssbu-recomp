@@ -57,6 +57,11 @@ started in ARENA_TURN_FOR s or a match longer than ARENA_PLAY_FOR s: both go to 
                             u8 (0 / 1) + (name[32] x 2, streak u8 x 2, state u8: 2 turn, 3 playing), then the queue: count u8
                             + count x (name[32], streak u8)
 A game polls (op 1 or 2) every second while it is in the arena or shows it; the lobby also sends ARENA_STATE at each change.
+Spectators of a Battle Arena (lobby 1.7, 2026-11-02; the game's own Online menu on our NEX server, net_session.c): the
+members of one arena (its gathering id = the key) form a group; a message to the group goes to every other member of it.
+    27 RB_GROUP     client: cookie u64, key u64 (0 = leave the group), message      (a non-zero key also joins that group)
+                    lobby:  source u32, message
+An older lobby drops type 27: nobody hears the spectators and every member's game plays the match with its own netcode.
 
 Python 3.8+, standard library only. No encryption: run it for people you know."""
 import argparse
@@ -81,7 +86,7 @@ except (ImportError, OSError):   # (ladder.py not installed next to it: no ladde
     ladder_mod = None
 
 PROTO = 1
-LOBBY_VERSION = "1.6"
+LOBBY_VERSION = "1.7"
 (JOIN, WELCOME, REJECT, PING, PONG, DATA, LEAVE, LIST, LISTING, LIST_END,
  PEERS, PUNCH, DIRECT, BCAST) = range(1, 15)
 RB = 16          # online rollback messages between two games (recomp-study/net_relay.c T_RB, rb_net.c)
@@ -89,6 +94,7 @@ ROOMS, ROOM_INFO, ROOMS_END = 17, 18, 19     # O1 room browser (net_relay.c): ev
 MATCH, MATCH_STATE = 20, 21                  # O2 matchmaking (net_relay.c): find an opponent of the same build and code
 RESULT, RESULT_ACK = 22, 23                  # 1.5 ladder: a rollback match's result (net_relay.c, ladder_report.c)
 ARENA, ARENA_STATE = 24, 25                  # 1.6 arena: a queue of players taking turns at 1-on-1 rollback matches
+RB_GROUP = 27                                # 1.7 (2026-11-02): a Battle Arena's group (fighters + spectators, key = the arena)
 AR_OUT, AR_WAITING, AR_TURN, AR_PLAYING = range(4)
 ARENA_TURN_FOR, ARENA_PLAY_FOR, ARENA_WATCH_FOR, ARENA_LIST = 120.0, 900.0, 3.0, 16
 LD_UNRANKED, LD_RANKED, LD_UNKNOWN = 0, 1, 2
@@ -179,6 +185,7 @@ class Client:
         self.ladder_why = ""      # (its ladder name, or why it is not ranked)
         self.arena_streak = 0     # 1.6: wins in a row in the arena
         self.arena_seen = None    # 1.6: when it last asked for the arena's state (it is shown the changes for ARENA_WATCH_FOR s)
+        self.rb_group = None      # 1.7: the Battle Arena group it is in (RB_GROUP key), None = none
 
 
 class Arena:
@@ -369,6 +376,18 @@ class Lobby:
                     self.ladder_open_set(h, g)
                     self.match_end(h, MS_TOGETHER, "playing a rollback match with %s" % g.name)
                     self.match_end(g, MS_TOGETHER, "playing a rollback match with %s" % h.name)
+        elif kind == RB_GROUP and 20 <= len(p) <= 1500 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
+            # (1.7, 2026-11-02) a Battle Arena's spectators: the sender joins the group of the key (0 = leaves it) and the message
+            # goes to every other player of the same build and lobby code in the same group (fighters <-> spectators)
+            key = struct.unpack_from(">Q", p, 12)[0]
+            if (key or None) != c.rb_group:
+                self.say("arena group: %s %s" % (c.name, "joins the group of arena %u" % key if key else "leaves its arena group"))
+            c.rb_group = key or None
+            if key and len(p) > 20:
+                out = hdr(RB_GROUP) + struct.pack(">I", c.ip) + p[20:]
+                for x in list(self.by_at.values()):
+                    if x is not c and x.part == c.part and x.rb_group == key:
+                        self.send(out, x.at)
         elif kind == RESULT and len(p) >= RESULT_LEN and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.arena_result(c, p, now)
             self.on_result(c, p)

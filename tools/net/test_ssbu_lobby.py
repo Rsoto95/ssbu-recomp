@@ -352,6 +352,32 @@ def rollback_matchmaking(lob):
     time.sleep(0.2)
 
 
+def arena_group(lob):
+    """1.7 (2026-11-02): RB_GROUP, a Battle Arena's fighters and spectators: a message goes to every other member of the key's
+    group (same build and code), never to another group, a client without a group or the sender; key 0 leaves the group."""
+    X, P = b"ssbu-recomp-ldn1-13.0.5", b"public"
+    f1, f2, sp, other, nogroup = (Fake(lob, n, X, mods(), P) for n in ("F1", "F2", "SP", "OT", "NG"))
+    i1, i2, i_s, io, ing = f1.join(), f2.join(), sp.join(), other.join(), nogroup.join()
+    def grp(f, key, body=b""):
+        f.tx(L.RB_GROUP, struct.pack(">QQ", f.cookie, key) + body)
+    for f in (f1, f2, sp):
+        grp(f, 777)                                  # (joins the group: no message)
+    grp(other, 778)
+    time.sleep(0.2)
+    grp(sp, 777, b"Phello")
+    for f in (f1, f2):
+        got = f.rx(L.RB_GROUP)
+        assert struct.unpack_from(">I", got)[0] == i_s and got[4:] == b"Phello", got
+    assert none_of(sp, L.RB_GROUP, 0.2) and none_of(other, L.RB_GROUP, 0.2) and none_of(nogroup, L.RB_GROUP, 0.2)
+    grp(f1, 0)                                       # leaves the group
+    time.sleep(0.1)
+    grp(f2, 777, b"Spads")
+    assert sp.rx(L.RB_GROUP)[4:] == b"Spads" and none_of(f1, L.RB_GROUP, 0.3)
+    for x in (f1, f2, sp, other, nogroup):
+        x.tx(L.LEAVE, struct.pack(">Q", x.cookie))
+    time.sleep(0.2)
+
+
 def main():
     port, sport = free_port(), free_tcp_port()
     exe = os.environ.get("LOBBY_EXE")
@@ -374,6 +400,8 @@ def main():
         room_browser(lob)
         matchmaking(lob)
         rollback_matchmaking(lob)
+        if not exe:
+            arena_group(lob)                         # (1.7: the C lobby inside a host's game drops RB_GROUP: arenas use the server lobby)
         if exe:
             print("lobby self-test (%s): ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped; "
                   "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game; rollback matchmaking: op 2 only with op 2, roles, RB relay, together)" % os.path.basename(exe))
@@ -435,7 +463,7 @@ def main():
         assert json.loads(get_status(sport)[2])["rooms"] == 0
         print("lobby self-test: ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped; "
               "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game; "
-              "rollback matchmaking: op 2 only with op 2, roles, RB relay, together, stranger dropped; join, list, room join, PEERS, "
+              "rollback matchmaking: op 2 only with op 2, roles, RB relay, together, stranger dropped; arena group relay; join, list, room join, PEERS, "
               "broadcast + unicast relay, outsider refused, room closed, status endpoint)")
         return 0
     finally:

@@ -667,6 +667,23 @@ int net_rb_send(const void *p, int n) {
     return 1;
 }
 
+/* (2026-11-02) spectators of a Battle Arena (lobby 1.7, net_session.c rbs_*): the arena's members (its fighters and the
+ * members whose seat does not fight) form a group in the lobby, keyed by the arena's gathering id; a message to the group
+ * goes to every other member of it, always through the lobby (one message, several receivers):
+ *   client -> lobby: 'S' 'U' 1 27 | cookie u64 | key u64 (the arena; 0 = leave the group) | message
+ *   lobby -> client: 'S' 'U' 1 27 | source u32 | message
+ * An older lobby drops type 27: nobody hears the spectators and every member's game plays the match with its own netcode. */
+#define T_RB_GROUP 27
+void rbs_rx(uint32_t src, const uint8_t *p, int n);    /* net_session.c */
+int net_rbg_send(uint64_t key, const void *p, int n) {
+    if (!net_rb_ready() || n < 0 || n > 1400) return 0;
+    uint8_t b[1500];
+    hdr(b, T_RB_GROUP); s64(b + 4, g_cookie); s64(b + 12, key);
+    if (n) memcpy(b + 20, p, (size_t)n);
+    tx(b, 20 + n, &g_lobby);
+    return 1;
+}
+
 /* ladder (lobby 1.5): the result of a rollback match (ladder_report.c), sent every 2 s until the lobby acknowledges it
  * (RESULT_ACK) or LD_TRIES times (an older lobby, or the in-game lobbies of HOST / LAN / JOIN: no ladder there).
  *   22 RESULT     client: cookie u64, match seed u64, the other player's address u32, slot u8, rule kind u8, stocks of the
@@ -1988,6 +2005,9 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             break;
         case T_PEERS:
             if (g_joined && g_direct) read_peers(buf + 4, n - 4);
+            break;
+        case T_RB_GROUP:                                 /* (2026-11-02) a Battle Arena group's message (fighters <-> spectators) */
+            if (n > 8 && g_joined) { uint32_t src = g32(buf + 4); if (src && src != g_ip) rbs_rx(src, buf + 8, n - 8); }
             break;
         case T_RB:                                       /* R3: a rollback message of the other player */
             if (n > 8 && g_joined) { uint32_t src = g32(buf + 4), mp = g_rb_match_peer;

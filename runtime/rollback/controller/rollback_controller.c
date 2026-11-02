@@ -71,6 +71,7 @@ void rbn_pass_hash(long long f); void rbn_finalize(long long cur); double rbn_pa
 int rbn_delay(void); int rbn_rtt_ms(void); double rbn_offset_ms(void); void rbn_resend(void); void rbn_status(char *out, size_t n); void rbn_hello(void); int rbn_peer_started(void); void rbn_choose_delay(void);
 
 int rbn_match_cancelled(void); void rbn_match_reset(void); int rbn_match_number(void);      /* (hs12) */
+int rbn_spectating(void); int rbn_spec_wait(double waited_ms); void rbn_spec_wait_done(double waited_ms); void rbn_spec_give_up(const char *why);      /* (2026-11-02) net_session.c: a Battle Arena's spectator */
 void rbn_set_lockstep(int on); int rbn_loop(void);      /* (hs13) */
 /* (hs13) a match WITHOUT the ring (r1_ring.c g_rg_nomem: not enough memory for the snapshot ring, e.g. a PC short of commit
  * memory: tw1j crashed there): the pads are still exchanged, but every real pass waits until the other player's pad of
@@ -253,12 +254,19 @@ static void rbg_step_body(Ctx *c) {
         {   static int tl = -1; if (tl < 0) { const char *e = getenv("SSBU_RB_NET_TEST_LATEBASE"); tl = e ? atoi(e) : 0; }     /* (net3, TEST ONLY) the base made n passes late */
             if (tl > 0 && g_session.fight_frame - g_rbg_ff_first < tl) { LOG("r1: RB NET TEST_LATEBASE: no base state at fight frame %lld\n", g_session.fight_frame); return; } }
         if (g_rbg_basefix) g_rgs_next = i = g_session.fight_frame - g_rbg_ff_first;      /* (net3) the base's frame number: 0, or the passes it came late */
-        if (g_rbg_rebase) { if (!g_rbg_basefix) g_rgs_next = i = 0; if (!r1_ring_rebase(i, c) && !g_rg_nomem) return; }
+        /* (2026-11-02) a Battle Arena's spectator: no ring and no full save (it never runs a frame on a guess: every pass waits
+         * for both fighters' final pads, the g_rbg_noring path below) */
+        int spect = rbn_spectating();
+        if (spect) { /* nothing to capture: the base is this frame */ }
+        else if (g_rbg_rebase) { if (!g_rbg_basefix) g_rgs_next = i = 0; if (!r1_ring_rebase(i, c) && !g_rg_nomem) return; }
         else { r1_ring_capture(i, c); if (g_rbg_wdfix) g_ra_wd_pause = 1; if (!g_rg_ready && !g_rg_nomem) return; }   /* (the full save sets the pause back to 0) */
-        g_rbg_noring = g_rg_nomem != 0;
+        g_rbg_noring = g_rg_nomem != 0 || spect;
         rbn_set_lockstep(g_rbg_noring);
         rbg_fallback_reset();                           /* the failure counters of the fallback start at zero for this match */
-        if (g_rbg_noring) {
+        if (g_rbg_noring && spect) {
+            g_rbg_noring_matches++;
+            LOG("r1: RB NET: a Battle Arena spectator: no snapshot ring for this match (no full save); every pass waits for both fighters' final pads\n");
+        } else if (g_rbg_noring) {
             g_rbg_noring_matches++;
             LOG("r1: RB NET: ROLLBACK OFF FOR THIS MATCH: %s; the match goes on delay-based: every frame waits for the other player's pad\n",
                 rb_norollback_asked() ? "asked for by SSBU_RB_NET_NOROLLBACK" : g_rg_nomem == 1 ? "not enough memory for the snapshot ring (the base state needs about one copy of the game's memory in free commit)" : "the ring broke on the way: off for the rest of this session");
@@ -282,11 +290,17 @@ static void rbg_step_body(Ctx *c) {
         LOG("r1: RB NET: match start, base state = frame %lld (fight frame %lld); pacing %s; re-run skip mask %d, lite mask %d%s\n", i, g_session.fight_frame, g_rbg_pace ? "60 Hz" : "off", g_rgs_skip, g_rgs_lite, g_rgs_lastlite ? " (the last re-run pass too)" : "");
         {   /* start barrier: both games begin frame 1 together (the one that finished loading first waits here, at frame 0,
              * instead of stalling seconds at frame 8 with states it might have to roll back to: rnh2 / rnh3 hung after that) */
-            double tb = now_ms(), lastx = 0;
-            while (!rbn_peer_started() && now_ms() - tb < 120000) {
-                if (now_ms() - lastx >= 50) { lastx = now_ms(); rbn_hello(); }
+            double tb = now_ms(), lastx = 0, blim = spect ? 30000.0 : 120000.0;      /* (2026-11-02) a spectator: both fighters' first pads, at most 30 s */
+            while (!rbn_peer_started() && now_ms() - tb < blim) {
+                if (now_ms() - lastx >= 50) { lastx = now_ms(); rbn_hello(); if (spect) rbn_resend(); }
                 rbn_drain(i);
                 rbg_wait_until(now_ms() + 1.0);
+            }
+            if (spect && !rbn_peer_started()) {
+                LOG("r1: RB NET: spectator: no pads from both fighters in %.0f ms at the match start: this view is given up (player 1 walks off)\n", now_ms() - tb);
+                rbn_spec_give_up("no pads from the fighters at the match start for 30 s");
+                g_rbg_in_match = 2; g_rbg_quit_t0 = now_ms();
+                return;
             }
             rbn_hello(); rbn_choose_delay();
             if (i > rbn_delay()) LOG("r1: RB NET: WARNING: the base state is frame %lld, later than the input delay (%d): the other player's first pads may differ (desync risk)\n", i, rbn_delay());
@@ -394,6 +408,12 @@ static void rbg_step_body(Ctx *c) {
         if (!g_rbg_noring && g_rg_short && g_rgs_next - rbn_confirmed() <= rbn_ahead() && !stalled) g_rbg_short_waits++;
         if (rbn_peer_gone()) { if (!g_rbg_gone++) LOG("r1: RB NET: no message from the other player for 5 s at frame %lld: going on alone (guesses)\n", i); break; }
         if (!stalled) { stalled = 1; ts = now_ms(); g_rbg_stalls++; r1_ring_let_go(); }
+        if (rbn_spectating() && rbn_spec_wait(now_ms() - ts)) {     /* (2026-11-02) a spectator: a notice after 1 s; after 30 s this view is given up */
+            g_rbg_stall_ms += now_ms() - ts; stalled = 0;
+            LOG("r1: RB NET: spectator: the fighters' pads stopped coming for 30 s at frame %lld: this view is given up (player 1 walks off)\n", i);
+            g_rbg_in_match = 2; g_rbg_quit_t0 = now_ms();
+            break;
+        }
         {   /* while waiting: our newest pads again every 50 ms (a lost datagram must not leave both games waiting), a line every 2 s */
             static double last_tx, last_log; double now = now_ms();
             if (now - last_tx >= 50) { last_tx = now; rbn_resend(); }
@@ -402,7 +422,7 @@ static void rbg_step_body(Ctx *c) {
         }
         rbg_wait_until(now_ms() + 0.5);
     }
-    if (stalled) g_rbg_stall_ms += now_ms() - ts;
+    if (stalled) { g_rbg_stall_ms += now_ms() - ts; rbn_spec_wait_done(now_ms() - ts); }
     r1_ring_let_go();
     rbn_finalize(g_rbg_pend > 0 && g_rbg_pend - 1 < i ? g_rbg_pend - 1 : i);      /* (R3 pub1) a refused load: its frames are not final yet */
     if (g_rbg_pace) {
@@ -632,7 +652,8 @@ static void rbg_dist(const char *what, const float *v, int n, const unsigned cha
 }
 void rbg_report(void) {
     if (g_rbg <= 0 || (!g_rg_ready && !g_rbg_noring) || !g_rbg_real) return;
-    if (g_rbg_noring) LOG("r1: RB NET report: this match ran WITHOUT rollback (not enough memory for the ring: %s); matches without the ring so far %lld\n", g_rg_nomem == 2 ? "broken for the session" : "base not made", g_rbg_noring_matches);
+    if (g_rbg_noring && rbn_spectating()) LOG("r1: RB NET report: a Battle Arena spectator: this match was shown from both fighters' final pads, without the ring\n");
+    else if (g_rbg_noring) LOG("r1: RB NET report: this match ran WITHOUT rollback (not enough memory for the ring: %s); matches without the ring so far %lld\n", g_rg_nomem == 2 ? "broken for the session" : "base not made", g_rbg_noring_matches);
     LOG("r1: RB NET report: %lld real frames, %lld rollbacks, %lld frames run again (k: 1 %lld, 2 %lld, 3 %lld, 4 %lld, 5 %lld, 6 %lld, 7 %lld, more %lld); rollbacks impossible (state not in the ring) %lld\n",
         g_rbg_real, g_rbg_rb, g_rbg_rerun, g_rbg_k[1], g_rbg_k[2], g_rbg_k[3], g_rbg_k[4], g_rbg_k[5], g_rbg_k[6], g_rbg_k[7], g_rbg_k[RG_MAXSLOT + 1] + g_rbg_k[8], g_rbg_miss);
     LOG("r1: RB NET report: stalls for the other player %lld (%.1f ms in all; %lld of them because the ring was short of memory); captures failed %lld, re-run captures not needed %lld; load mean %.3f ms; peer silent %lld\n",

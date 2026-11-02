@@ -446,6 +446,7 @@ static uint64_t prof_ptr(uint32_t prof) {
  * match each game sends its own player's 0x2b bytes + that byte; both games then hold both players' own controls. */
 #define LWR_CTL 0x2b
 static uint8_t g_lwr_ctl[2][LWR_CTL + 2];      /* + LWR_CTL: the option byte; + LWR_CTL + 1: 1 = the player's own controller is a GameCube one */ static int g_lwr_ctl_ok, g_lwr_ctl_applied;
+static uint16_t g_lwr_lay[2][11];               /* (2026-11-02) the layout words written at each player's record (player 1 sends both to an arena's spectators) */
 static void lwr_own_controls(uint64_t st, uint8_t out[LWR_CTL + 2]) {
     uint32_t prof = rd32(st + 0x214), slot = rd32(st + 0x210);
     uint64_t p = rd8(st + 0x450) && rd32(st + 0x78) == 0 ? prof_ptr(prof) : GA(0x7105313518ULL);
@@ -586,9 +587,21 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         if (norm) {
             int rbn_local_player(void); int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[LWR_CTL + 2], uint16_t other[11], int *other_has, uint8_t other_ctl[LWR_CTL + 2]);
             int local = rbn_local_player(), has = 0; uint16_t lay[11]; memset(lay, 0, sizeof lay);
+            int rbn_spectating(void), spect = rbn_spectating();
             if (rank == 0) { g_lwr_ctl_ok = 0; g_lwr_ctl_applied = 0; }
             if (rank == local) lwr_own_controls(st, g_lwr_ctl[rank]);      /* (before the state is changed below: its own profile and controller) */
-            if (rank == 0) { if (local == 0) has = hs_layout(st, lay); else { has = g_hs_m.has_layout[0]; memcpy(lay, g_hs_m.layout[0], sizeof lay); } }
+            if (spect) {                                  /* (2026-11-02) a Battle Arena's spectator: both players' layouts and controls as player 1 wrote them (net_session.c MATCH) */
+                int rbn_spec_controls(uint16_t lay2[2][11], uint8_t ctl2[2][LWR_CTL + 2]); uint16_t sl[2][11];
+                int ok = rbn_spec_controls(sl, g_lwr_ctl);
+                has = 1; memcpy(lay, sl[rank], sizeof lay);
+                if (rank == 1) {
+                    void nnhid_lwr_styles(int on, int gc0, int gc1);
+                    g_lwr_ctl_ok = ok > 0;
+                    if (ok > 0) nnhid_lwr_styles(1, g_lwr_ctl[0][LWR_CTL + 1], g_lwr_ctl[1][LWR_CTL + 1]);
+                    printf("[rbnet] spectator: the fighters' controls %s (controller kinds: player 1 %s, player 2 %s)\n", ok > 0 ? "taken from player 1's MATCH" : "NOT exchanged by the fighters: the defaults", g_lwr_ctl[0][LWR_CTL + 1] ? "GameCube" : "Pro", g_lwr_ctl[1][LWR_CTL + 1] ? "GameCube" : "Pro");
+                }
+            }
+            else if (rank == 0) { if (local == 0) has = hs_layout(st, lay); else { has = g_hs_m.has_layout[0]; memcpy(lay, g_hs_m.layout[0], sizeof lay); } }
             else {
                 uint16_t own[11], other[11]; int own_has, other_has = 0;
                 if (local == 1) own_has = hs_layout(st, own); else { own_has = g_hs_m.has_layout[0]; memcpy(own, g_hs_m.layout[0], sizeof own); }
@@ -601,9 +614,14 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
             }
             if (!has) { uint64_t p = GA(0x7105313518ULL); for (int k = 0; k < 11; k++) lay[k] = rd16(p + 0xc + 2ull * k); }      /* (the game's default profile) */
             printf("[rbnet] room match: player %d (seat %d, %s): ui_chara %016llx colour %u; panel state: name tag %d, network player %d, controller slot %d, profile %d -> controller slot %d, a local human\n", rank + 1, idx,
-                   rank == local ? "this game's player" : "the other game's player", (unsigned long long)rd64(st + 0x88), rd8(st + 0x90), rd8(st + 0x450), rd8(st + 0x451), (int)rd32(st + 0x210), (int)rd32(st + 0x214), rank);
+                   spect ? "a fighter; this game watches" : rank == local ? "this game's player" : "the other game's player", (unsigned long long)rd64(st + 0x88), rd8(st + 0x90), rd8(st + 0x450), rd8(st + 0x451), (int)rd32(st + 0x210), (int)rd32(st + 0x214), rank);
             wr8(st + 0x450, 1); wr8(st + 0x451, 0); wr32(st + 0x210, (uint32_t)rank); wr32(st + 0x214, 0xffffffffu);
             wr8(st + 0x454, 1); for (int k = 0; k < 11; k++) wr16(st + 0x54 + 2ull * k, lay[k]);
+            memcpy(g_lwr_lay[rank], lay, sizeof lay);
+            if (rank == 1 && local == 0 && !spect) {      /* (2026-11-02) player 1 of an arena with spectators: the match as written here, to them (net_session.c MATCH) */
+                void rbn_spec_match_send(const uint16_t lay2[2][11], const uint8_t ctl2[2][LWR_CTL + 2], int ctl_ok);
+                rbn_spec_match_send((const uint16_t (*)[11])g_lwr_lay, (const uint8_t (*)[LWR_CTL + 2])g_lwr_ctl, g_lwr_ctl_ok);
+            }
             fflush(stdout);
         }
         return;

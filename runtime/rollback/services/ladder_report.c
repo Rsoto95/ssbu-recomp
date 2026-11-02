@@ -65,6 +65,7 @@ void ladder_fight_off(void) {
     memset(g_lr_ring, 0, sizeof g_lr_ring);
     memset(g_lr_dmg, 0, sizeof g_lr_dmg);
     if (!lr_on() || !have) return;
+    {   int rbn_spectating(void); if (rbn_spectating()) return; }      /* (2026-11-02) a Battle Arena's spectator: not its match */
     memset(&r, 0, sizeof r);
     if (!dm_ladder_match(&r.rule_kind, &r.stock, r.chara, &r.stage)) return;   /* (not an agreed online match: never ranked) */
     r.seed = rbn_match_seed();
