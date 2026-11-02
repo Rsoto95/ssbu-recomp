@@ -465,8 +465,9 @@ def report_nat_properties(client, req):
     the NAT check, when an arena is made)."""
     r = Reader(req.body)
     a = pia_claim(client)
-    client.log("%s     NAT properties: mapping %d, filtering %d, rtt %d; Pia socket %s" % (client.who, r.u("I"), r.u("I"),
-               r.u("I"), "%s:%d" % a if a else "NOT SEEN (no probe to 33335 in the last 5 s)"))
+    client.log("%s     NAT properties: mapping %d, filtering %d, rtt %d; Pia socket %s, station id (CID) %s" % (client.who,
+               r.u("I"), r.u("I"), r.u("I"), "%s:%d" % a if a else "NOT SEEN (no probe to 33335 in the last 5 s)",
+               getattr(client, "pia_cid", None)))
     return b""
 
 
@@ -625,6 +626,8 @@ def stations_for(c):
             fields["address"], fields["port"] = pub_ip(pia[0]), str(pia[1])
             if "Pa" in fields:
                 fields["Pa"] = pub_ip(pia[0])
+        if getattr(c, "pia_cid", None):
+            fields["CID"] = str(c.pia_cid)
         fields.setdefault("PID", str(c.pid or 0))
         fields.setdefault("RVCID", str(getattr(c, "cid", 0)))
         out.append(scheme + ":/" + ";".join("%s=%s" % kv for kv in sorted(fields.items())))
@@ -669,7 +672,7 @@ def referee_1(client, req):
     n = _next_round[0]
     _next_round[0] += 1
     client.log("%s     MatchmakeReferee 1 (%s): answered %d (UNCONFIRMED)" % (client.who, hexdump(req.body), n))
-    return Writer().u("Q", n).bytes()
+    return Writer().u("B", 1).bytes()             # (MatchMakingExt EndParticipation(gid u32, message String) -> bool)
 
 
 def update_application_buffer(client, req):
@@ -704,7 +707,7 @@ def update_application_buffer(client, req):
     return b""
 
 
-PIA_SEEN = []                  # (time, (ip, port)) of the sockets that sent a Pia packet to 33335, not given to a client yet
+PIA_SEEN = []                  # (time, (ip, port), cid) of the sockets that sent a Pia packet to 33335, not given to a client yet
 PIA_LOCK = threading.Lock()
 
 
@@ -714,11 +717,12 @@ def pia_claim(client):
     way: by the order of the probe and the report, not by the address."""
     now = time.time()
     with PIA_LOCK:
-        PIA_SEEN[:] = [(t, a) for t, a in PIA_SEEN if now - t < 5]
+        PIA_SEEN[:] = [e for e in PIA_SEEN if now - e[0] < 5]
         if not PIA_SEEN:
             return None
-        t, a = PIA_SEEN.pop()
+        t, a, cid = PIA_SEEN.pop()
     client.pia = a
+    client.pia_cid = cid
     return a
 
 
@@ -738,10 +742,14 @@ def sinkhole(host, port, log):
             data, addr = u.recvfrom(2048)
         except OSError:
             continue
-        if port == 33335 and data[:4] == b"\x32\xab\x98\x64":
+        if port == 33335 and data[:4] == b"\x32\xab\x98\x64" and not data[4] & 0x80 and len(data) >= 76:
+            # the first probe is in the clear; its last 4 bytes are the game's Pia station id (its variable id, the
+            # CID of its station URLs: a joiner's connection request names the host by it; without CID in the host's
+            # URLs the host denied it, result 3, and the joiner showed 2618-0502)
+            cid = struct.unpack(">I", data[72:76])[0]
             with PIA_LOCK:
-                if all(a != addr for _, a in PIA_SEEN):
-                    PIA_SEEN.append((time.time(), addr))
+                if all(e[1] != addr for e in PIA_SEEN):
+                    PIA_SEEN.append((time.time(), addr, cid))
         if addr not in seen:
             seen.add(addr)
             log("reachability %s:%d <- %s:%d %d bytes (not answered, as it should be): %s" % (host, port, addr[0], addr[1], len(data), hexdump(data[:48])))
