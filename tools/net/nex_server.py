@@ -294,6 +294,7 @@ def request_ticket(client, req):
 
 
 _next_cid = [1]
+CLIENTS_BY_CID = {}            # connection id (RVCID) -> Client (the secure connection)
 
 
 def register(client, req):
@@ -304,11 +305,15 @@ def register(client, req):
     urls = [r.string() for _ in range(r.u("I"))]
     cid = client.cid = _next_cid[0]
     _next_cid[0] += 1
+    CLIENTS_BY_CID[cid] = client
     first = urls[0] if urls else "prudp:/address=%s;port=0" % client.peer[0]
     scheme, _, params = first.partition(":/")
     fields = dict(kv.split("=", 1) for kv in params.split(";") if "=" in kv)
-    fields["address"] = client.peer[0]
-    fields.update(type="3", PID=str(client.pid or 0), RVCID=str(cid))
+    fields["address"] = pub_ip(client.peer[0])
+    # Smash's Pia (5.19) builds its NAT probe from the public station only with type=11 (behind NAT 1 | public 2 |
+    # Switch 8) and Pa=<an address> (public knowledge of the Smash server protocol); type=3 without Pa (the older
+    # Pia's shape): the two games probed each other, then "one or more other consoles are not responding" (2618-0502).
+    fields.update(type="11", PID=str(client.pid or 0), RVCID=str(cid), Pa=fields["address"])
     public = scheme + ":/" + ";".join("%s=%s" % kv for kv in sorted(fields.items()))
     client.urls = urls + [public]
     client.log("%s     register: %s -> connection id %d, public %s" % (client.who, " | ".join(urls), cid, public))
@@ -346,6 +351,59 @@ def matchmake_session_span(b, o):
     return o + 5 + g + 5 + m
 
 
+def _skip_variant(b, o):
+    """The end of a Variant at b[o:] (type u8, then: 1 s64, 2 double, 3 bool, 4 String, 5 DateTime, 6 u64)."""
+    t = b[o]
+    o += 1
+    if t in (1, 2, 5, 6):
+        return o + 8
+    if t == 3:
+        return o + 1
+    if t == 4:
+        return o + 2 + struct.unpack_from("<H", b, o)[0]
+    return o
+
+
+def finish_session(session, players, key=None):
+    """A MatchmakeSession (Gathering + MatchmakeSession, structure headers, NEX 4.x field order) with the fields the server
+    owns filled in, as the game expects when it reads an arena (a joiner ignored one without them): participation count,
+    a session key of 32 random bytes (Pia's), the start time, and the MatchmakeParam entries @SR = true, @GIR = 3 (the
+    values are public knowledge of the Smash server protocol; this code is our own). The fields after StartedTime are kept."""
+    b = bytes(session)
+    g = struct.unpack_from("<I", b, 1)[0]
+    mh = 5 + g                                   # MatchmakeSession header: version u8, length u32
+    o = session_participants_offset(b)
+    head = b[:o]
+    o += 4                                       # participation count
+    o += 1                                       # progress score
+    o += 4 + struct.unpack_from("<I", b, o)[0]   # session key Buffer
+    option = b[o:o + 4]
+    o += 4
+    po = o                                       # MatchmakeParam: structure (version, length), Map<String, Variant>
+    plen = struct.unpack_from("<I", b, po + 1)[0]
+    n = struct.unpack_from("<I", b, po + 5)[0]
+    q = po + 9
+    entries = []
+    for _ in range(n):
+        kl = struct.unpack_from("<H", b, q)[0]
+        name = b[q + 2:q + 2 + kl].rstrip(b"\0").decode("ascii", "replace")
+        e = _skip_variant(b, q + 2 + kl)
+        entries.append((name, b[q:e]))
+        q = e
+    o = po + 5 + plen
+    o += 8                                       # StartedTime
+    tail = b[o:]
+    entries = [(k, v) for k, v in entries if k not in ("@SR", "@GIR")]
+    entries.append(("@SR", Writer().string("@SR").u("B", 3).u("B", 1).bytes()))
+    entries.append(("@GIR", Writer().string("@GIR").u("B", 1).u("q", 3).bytes()))
+    pbody = struct.pack("<I", len(entries)) + b"".join(v for _, v in entries)
+    key = key or os.urandom(32)
+    out = bytearray(head + struct.pack("<I", players) + b"\0" + struct.pack("<I", len(key)) + key + option +
+                    b[po:po + 1] + struct.pack("<I", len(pbody)) + pbody + struct.pack("<Q", nex_datetime()) + tail)
+    struct.pack_into("<I", out, mh + 1, len(out) - mh - 5)
+    return bytes(out), key
+
+
 def create_matchmake_session_with_param(client, req):
     """MatchmakeExtension method 38, creating a Battle Arena: CreateMatchmakeSessionParam {MatchmakeSession (Gathering
     {gid u32, owner u64, host u64, min u16, max u16, policy u32, policy argument u32, flags u32, state u32,
@@ -359,15 +417,22 @@ def create_matchmake_session_with_param(client, req):
         gid = _next_gid[0]
         _next_gid[0] += 1
         struct.pack_into("<IQQ", session, 5, gid, client.pid or 0, client.pid or 0)
-        ARENAS[gid] = {"owner": client.pid, "session": bytes(session), "client": client}
+        try:
+            done, key = finish_session(session, 1)
+        except (struct.error, IndexError) as e:
+            client.log("%s     arena %d: the session could not be completed (%s): kept as sent" % (client.who, gid, e))
+            done, key = bytes(session), None
+        session = bytearray(done)
+        ARENAS[gid] = {"owner": client.pid, "session": done, "client": client, "key": key}
     r = Reader(bytes(session))
     r.raw(5 + 4 + 16)
     mn, mx = r.u("H"), r.u("H")
-    client.log("%s     arena %d created by pid %d (%d..%d players, session %d bytes, %d more bytes in the param: %s)" % (
-        client.who, gid, client.pid or 0, mn, mx, len(session), len(b) - end, b[end:].hex(" ")))
+    client.log("%s     arena %d created by pid %d (%d..%d players, session %d bytes, %d more bytes in the param: %s; "
+               "session key %s)" % (client.who, gid, client.pid or 0, mn, mx, len(session), len(b) - end, b[end:].hex(" "),
+                                    key.hex() if key else "none"))
     # NexMatchCreateSessionJob::WaitNotification: the game waits ~10 s for a notification after creating, then gives
     # up ("a communication error"). Sent after the answer: participation (3001) of the owner in his own gathering.
-    client.after_reply = lambda: client.notify(NOTIFY_PARTICIPATION, gid, client.pid or 0)
+    client.after_reply = lambda: client.notify(NOTIFY_PARTICIPATION, gid, client.pid or 0, param3=1)
     return bytes(session)
 
 
@@ -395,7 +460,308 @@ def matchmake_ext_52(client, req):
     return w.bytes()
 
 
+def report_nat_properties(client, req):
+    """NATTraversal method 5 ReportNATProperties(natmapping u32, natfiltering u32, rtt u32) -> nothing (sent right after
+    the NAT check, when an arena is made)."""
+    r = Reader(req.body)
+    a = pia_claim(client)
+    client.log("%s     NAT properties: mapping %d, filtering %d, rtt %d; Pia socket %s" % (client.who, r.u("I"), r.u("I"),
+               r.u("I"), "%s:%d" % a if a else "NOT SEEN (no probe to 33335 in the last 5 s)"))
+    return b""
+
+
+ARENA_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXY0123456789"     # (no I / O / Z: easy to read out) UNCONFIRMED: the game's own set
+
+
+def matchmake_ext_55(client, req):
+    """MatchmakeExtension method 55 (Smash's own): makes the arena's code (the 5 characters shown to share it) for the
+    gathering id u32. Answer: a structure {String code, DateTime} (version 0) (the shape: public knowledge of the
+    Smash server protocol; this code is our own)."""
+    gid = Reader(req.body).u("I")
+    with ARENAS_LOCK:
+        a = ARENAS.get(gid)
+        code = a.get("code") if a else None
+        while not code or any(x.get("code") == code for x in ARENAS.values()):
+            code = "".join(ARENA_CODE_ALPHABET[b % len(ARENA_CODE_ALPHABET)] for b in os.urandom(5))
+        if a is not None:
+            a["code"] = code
+    client.log("%s     MatchmakeExtension 55: arena %d gets the code %s%s" % (client.who, gid, code, "" if a else " (gid unknown)"))
+    return Writer().structure(Writer().string(code).u("Q", nex_datetime()).bytes()).bytes()
+
+
+def matchmake_ext_56(client, req):
+    """MatchmakeExtension method 56 (Smash's own): the arena whose code a player typed. Request: a structure {String
+    code, u64} (2026-11-02: "Ebh2v" for the code EBH2V: compared without case). Answer: the gathering id u32 (0: no such
+    arena; the game then says "arena not found")."""
+    r = Reader(req.body)
+    r.raw(5)                                  # (the structure's version u8 and length u32)
+    n = r.u("H")
+    code = r.raw(n).rstrip(b"\0").decode("ascii", "replace").strip().upper()
+    with ARENAS_LOCK:
+        gid = next((g for g, a in ARENAS.items() if a.get("code", "").upper() == code), 0)
+    client.log("%s     MatchmakeExtension 56: code %s -> %s" % (client.who, code, ("arena %d" % gid) if gid else "no arena"))
+    return Writer().u("I", gid).bytes()
+
+
+def find_by_gathering_ids(client, req):
+    """MatchmakeExtension method 48 FindMatchmakeSessionByGatheringID(List<u32> gids) -> List<MatchmakeSession>: asked
+    right after an arena code was resolved (method 56), before joining it. The sessions as they were made (the same
+    bytes the search, method 52, answers with)."""
+    r = Reader(req.body)
+    gids = [r.u("I") for _ in range(r.u("I"))]
+    with ARENAS_LOCK:
+        found = [ARENAS[g]["session"] for g in gids if g in ARENAS]
+    client.log("%s     FindMatchmakeSessionByGatheringID %s: %d found" % (client.who, gids, len(found)))
+    w = Writer().u("I", len(found))
+    for session in found:
+        w.raw(session)
+    return w.bytes()
+
+
+def session_participants_offset(session):
+    """Where the participation count u32 sits in a stored MatchmakeSession (the bytes of create, method 38): after the
+    Gathering, the MatchmakeSession header, game mode u32, attributes List<u32>, open participation u8, matchmake system
+    type u32 and the application buffer (NEX 4.x field order; UNCONFIRMED)."""
+    g = struct.unpack_from("<I", session, 1)[0]
+    o = 5 + g + 5
+    o += 4
+    o += 4 + 4 * struct.unpack_from("<I", session, o)[0]
+    o += 1 + 4
+    o += 4 + struct.unpack_from("<I", session, o)[0]
+    return o
+
+
+def join_matchmake_session_with_param(client, req):
+    """MatchmakeExtension method 39 JoinMatchmakeSessionWithParam(JoinMatchmakeSessionParam {gid u32, ...}) ->
+    MatchmakeSession: a player enters an arena (after method 56 / 48 or the search). The session is answered with the
+    participation count now; every player already in it gets a participation notification (3001) for the newcomer, and
+    the newcomer one for itself."""
+    r = Reader(req.body)
+    r.raw(5)
+    gid = r.u("I")
+    with ARENAS_LOCK:
+        a = ARENAS.get(gid)
+        if a is None:
+            client.log("%s     JoinMatchmakeSessionWithParam: arena %d does not exist" % (client.who, gid))
+            return 0x8068000c          # RendezVous::SessionVoid (UNCONFIRMED: the game's message for it)
+        parts = a.setdefault("players", [a["owner"]])
+        if client.pid not in parts:
+            parts.append(client.pid)
+        session = bytearray(a["session"])
+        try:
+            struct.pack_into("<I", session, session_participants_offset(session), len(parts))
+        except struct.error:
+            pass
+        a["session"] = bytes(session)
+        conns = a.setdefault("clients", {a["owner"]: a["client"]})
+        conns[client.pid] = client
+        others = [c for p, c in conns.items() if c is not client and p in parts]
+    client.log("%s     JoinMatchmakeSessionWithParam: pid %d into arena %d (%d players: %s)" % (client.who, client.pid or 0, gid, len(parts), parts))
+    joiner = client.pid or 0
+    count = len(parts)
+    existing = [p for p in parts if p != joiner]
+
+    def tell():
+        # (public knowledge of the Smash server protocol; this code is our own) every player in the arena, the newcomer
+        # too, is told "joiner joined" with the player count in param3; then the newcomer is told about each player
+        # already in it, one notification each. Without the second part the newcomer never learnt the host was there:
+        # the two games probed each other, then "one or more other consoles are not responding" (2618-0502).
+        client.notify(NOTIFY_PARTICIPATION, gid, joiner, source=joiner, param3=count)
+        for c in others:
+            c.notify(NOTIFY_PARTICIPATION, gid, joiner, source=joiner, param3=count)
+        for p in existing:
+            client.notify(NOTIFY_PARTICIPATION, gid, p, source=joiner, param3=count)
+    client.after_reply = tell
+    return bytes(session)
+
+
+def request_probe_initiation_ext(client, req):
+    """NATTraversal method 3 RequestProbeInitiationExt(targets List<String>, station String) -> nothing: a player who
+    joined asks the server to tell the others (their station URLs: the RVCID is their connection id) to probe it at the
+    same time (the hole punch). Each target gets InitiateProbe (NATTraversal method 2, station String) from the server."""
+    r = Reader(req.body)
+    targets = [r.string() for _ in range(r.u("I"))]
+    station = r.string()
+    told = []
+    for t in targets:
+        fields = dict(kv.split("=", 1) for kv in t.partition(":/")[2].split(";") if "=" in kv)
+        c = CLIENTS_BY_CID.get(int(fields.get("RVCID", "0") or 0))
+        if c is None or c is client:
+            continue
+        c.call(3, 2, Writer().string(station).bytes(), "InitiateProbe(%s)" % station)
+        told.append(c.pid)
+    client.log("%s     RequestProbeInitiationExt: probe %s; told %s (targets %s)" % (client.who, station, told, targets))
+    return b""
+
+
+def nat_result(client, req):
+    """NATTraversal method 4 ReportNATTraversalResult / 7 ReportNATTraversalResultDetail: how a probe went (logged)."""
+    client.log("%s     NAT traversal result (method %d): %s" % (client.who, req.method, hexdump(req.body, 96)))
+    return b""
+
+
+def nat_ack(client, req):
+    """NATTraversal methods 1 / 2 (RequestProbeInitiation, InitiateProbe) sent to the server: nothing to do."""
+    client.log("%s     NATTraversal %d: acknowledged" % (client.who, req.method))
+    return b""
+
+
+def relay_signature_key(client, req):
+    """NATTraversal method 6 GetRelaySignatureKey -> relay mode s32 0, current time DateTime, relay address String "",
+    relay port u16 0, relay address type s32 0, game server id u32 0: no relay (direct connections only)."""
+    client.log("%s     GetRelaySignatureKey: no relay" % client.who)
+    return Writer().u("i", 0).u("Q", nex_datetime()).string("").u("H", 0).u("i", 0).u("I", 0).bytes()
+
+
+def stations_for(c):
+    """The host's two stations for a joiner: its local one (as registered) and its public one, both with the address and
+    port of its Pia socket."""
+    out = []
+    pia = getattr(c, "pia", None)
+    for u in (getattr(c, "urls", None) or [])[:1] + (getattr(c, "urls", None) or [])[-1:]:
+        scheme, _, params = u.partition(":/")
+        fields = dict(kv.split("=", 1) for kv in params.split(";") if "=" in kv)
+        if pia:
+            fields["address"], fields["port"] = pub_ip(pia[0]), str(pia[1])
+            if "Pa" in fields:
+                fields["Pa"] = pub_ip(pia[0])
+        fields.setdefault("PID", str(c.pid or 0))
+        fields.setdefault("RVCID", str(getattr(c, "cid", 0)))
+        out.append(scheme + ":/" + ";".join("%s=%s" % kv for kv in sorted(fields.items())))
+    return out
+
+
+def station_for(c):
+    """The station URL other players reach this game at: its public one (register) with the address and port of its
+    Pia socket (seen by the reachability port). The port the game registers is not its Pia port (it registers before
+    Pia binds; public knowledge of the Smash server protocol: the server puts the NAT check's port in)."""
+    public = c.urls[-1] if getattr(c, "urls", None) else "prudp:/address=%s;port=0" % c.peer[0]
+    scheme, _, params = public.partition(":/")
+    fields = dict(kv.split("=", 1) for kv in params.split(";") if "=" in kv)
+    pia = getattr(c, "pia", None)
+    if pia:
+        fields["address"], fields["port"] = pub_ip(pia[0]), str(pia[1])
+    return scheme + ":/" + ";".join("%s=%s" % kv for kv in sorted(fields.items()))
+
+
+def get_session_urls(client, req):
+    """MatchMaking method 41 GetSessionURLs(gid u32) -> List<StationURL>: a player who joined an arena asks where its
+    host is (then Pia connects to it)."""
+    gid = Reader(req.body).u("I")
+    with ARENAS_LOCK:
+        a = ARENAS.get(gid)
+        host = a and a.get("client")
+    urls = stations_for(host) if host else []
+    client.log("%s     GetSessionURLs arena %d: %s" % (client.who, gid, urls or "no host"))
+    w = Writer().u("I", len(urls))
+    for u in urls:
+        w.string(u)
+    return w.bytes()
+
+
+_next_round = [1]
+
+
+def referee_1(client, req):
+    """MatchmakeReferee (50 here) method 1: 7 bytes (the arena's gid u32, then 01 00 00) right after a player joined.
+    UNCONFIRMED what it is for Smash (StartRound in other games: answered with a round id u64): answered with a new
+    number u64."""
+    n = _next_round[0]
+    _next_round[0] += 1
+    client.log("%s     MatchmakeReferee 1 (%s): answered %d (UNCONFIRMED)" % (client.who, hexdump(req.body), n))
+    return Writer().u("Q", n).bytes()
+
+
+def update_application_buffer(client, req):
+    """MatchmakeExtension method 11 UpdateApplicationBuffer(gid u32, buffer Buffer) -> nothing: inside the arena the
+    host rewrites its application buffer (the arena's settings, the players' names: 414 bytes on 2026-11-02). It replaces
+    the one inside the stored session: a joiner reads the arena from it (methods 48 / 52) and ignored the one of the
+    creation (2026-11-02: the code resolved, the arena was sent, the game said "not found")."""
+    r = Reader(req.body)
+    gid = r.u("I")
+    n = r.u("I")
+    buf = r.raw(n)
+    how = " (gid unknown)"
+    with ARENAS_LOCK:
+        a = ARENAS.get(gid)
+        if a is not None:
+            a["app_buffer"] = buf
+            b = a["session"]
+            try:
+                g = struct.unpack_from("<I", b, 1)[0]
+                q = 5 + g + 5 + 4
+                q += 4 + 4 * struct.unpack_from("<I", b, q)[0]
+                q += 1 + 4                                    # q: the application buffer (u32 length + bytes)
+                old = struct.unpack_from("<I", b, q)[0]
+                out = bytearray(b[:q] + struct.pack("<I", n) + buf + b[q + 4 + old:])
+                mh = 5 + g
+                struct.pack_into("<I", out, mh + 1, len(out) - mh - 5)
+                a["session"] = bytes(out)
+                how = " (the arena's buffer replaced: %d -> %d bytes)" % (old, n)
+            except (struct.error, IndexError) as e:
+                how = " (kept beside the session: %s)" % e
+    client.log("%s     UpdateApplicationBuffer: arena %d, %d bytes%s" % (client.who, gid, n, how))
+    return b""
+
+
+PIA_SEEN = []                  # (time, (ip, port)) of the sockets that sent a Pia packet to 33335, not given to a client yet
+PIA_LOCK = threading.Lock()
+
+
+def pia_claim(client):
+    """The Pia socket of this client: the latest one that probed 33335 in the last 5 s and no one has claimed yet (the
+    game probes it just before ReportNATProperties). Several games on one IP (two copies on one PC) are told apart this
+    way: by the order of the probe and the report, not by the address."""
+    now = time.time()
+    with PIA_LOCK:
+        PIA_SEEN[:] = [(t, a) for t, a in PIA_SEEN if now - t < 5]
+        if not PIA_SEEN:
+            return None
+        t, a = PIA_SEEN.pop()
+    client.pia = a
+    return a
+
+
+def sinkhole(host, port, log):
+    """Pia's reachability check sends to the NAT check server on UDP 33334 / 33335 and expects NO answer: the ports
+    only have to be open (on Windows a datagram to a closed loopback port comes back as an error on the game's socket:
+    with nothing there, creating an arena ended in 2618-0006)."""
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        u.bind((host, port))
+    except OSError as e:
+        log("reachability port %s:%d: %s" % (host, port, e))
+        return
+    seen = set()
+    while True:
+        try:
+            data, addr = u.recvfrom(2048)
+        except OSError:
+            continue
+        if port == 33335 and data[:4] == b"\x32\xab\x98\x64":
+            with PIA_LOCK:
+                if all(a != addr for _, a in PIA_SEEN):
+                    PIA_SEEN.append((time.time(), addr))
+        if addr not in seen:
+            seen.add(addr)
+            log("reachability %s:%d <- %s:%d %d bytes (not answered, as it should be): %s" % (host, port, addr[0], addr[1], len(data), hexdump(data[:48])))
+
+
 HANDLERS = {
+    (3, 5): report_nat_properties,
+    (3, 3): request_probe_initiation_ext,
+    (3, 4): nat_result,
+    (3, 7): nat_result,
+    (3, 1): nat_ack,
+    (3, 2): nat_ack,
+    (3, 6): relay_signature_key,
+    (109, 55): matchmake_ext_55,
+    (109, 11): update_application_buffer,
+    (109, 56): matchmake_ext_56,
+    (109, 48): find_by_gathering_ids,
+    (109, 39): join_matchmake_session_with_param,
+    (21, 41): get_session_urls,
+    (50, 1): referee_1,
     (21, 2): unregister_gathering,
     (109, 38): create_matchmake_session_with_param,
     (109, 52): matchmake_ext_52,
@@ -549,14 +915,20 @@ class Client:
         self.log("%s     secure CONNECT: pid %d (check data pid %d), connection id %d, check %08x" % (self.who, pid, cpid, cid, value))
         return Writer().buffer(struct.pack("<I", (value + 1) & 0xffffffff)).bytes()
 
-    def notify(self, type_, param1, param2, text="", param3=0):
+    def notify(self, type_, param1, param2, text="", param3=0, source=None):
         """NotificationEvents (protocol 14) method 1 ProcessNotificationEvent(NotificationEvent {source pid u64, type u32,
         param1 u64, param2 u64, string, param3 u64}) (UNCONFIRMED: the NEX 4.6 field list, structure version 0)."""
-        event = Writer().u("Q", self.pid or 0).u("I", type_).u("Q", param1).u("Q", param2).string(text).u("Q", param3).bytes()
+        event = Writer().u("Q", (self.pid if source is None else source) or 0).u("I", type_).u("Q", param1).u("Q", param2).string(text).u("Q", param3).bytes()
         self.notify_call = getattr(self, "notify_call", 0x10000) + 1
         self.log("%s     notification %d to pid %d: param1 %d param2 %d" % (self.who, type_, self.pid or 0, param1, param2))
         self.send_data(rmc_request(14, self.notify_call, 1, Writer().structure(event).bytes()), self.last_ports[0],
                        self.last_ports[1])
+
+    def call(self, protocol, method, body, what=""):
+        """A remote call from the server to this game (an RMC request; its answer is only logged)."""
+        self.notify_call = getattr(self, "notify_call", 0x10000) + 1
+        self.log("%s     call to pid %d: protocol %d method %d %s" % (self.who, self.pid or 0, protocol, method, what))
+        self.send_data(rmc_request(protocol, self.notify_call, method, body), self.last_ports[0], self.last_ports[1])
 
     def send_data(self, payload, src_port=1, dst_port=0x1f):
         p = Packet(TYPE_DATA, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE, self.seq_out, 10, 10, src_port, dst_port,
@@ -625,20 +997,62 @@ class Client:
             self.log("%s gone" % self.who)
 
 
-NAT_PORTS = (10025, 10125)  # UNCONFIRMED: Pia's NAT check servers (nncs1 / nncs2); the game's SendTo log shows the real ones
+NAT_PORTS = (10025, 10125)  # Pia's NAT check servers (nncs1 / nncs2): primary and secondary port (the game sends to 10025)
+NAT_HOSTS = ("127.0.0.1", "127.0.0.2")   # nncs1, nncs2 (runtime/online_menu.inc resolves them to these)
+
+# The NAT check (Kinnay's NintendoClients wiki, "NAT Check Server"): UDP, big-endian, 16 bytes both ways:
+#   +0 type u32 (the game's), +4 external port u32, +8 external IP u32, +0xC the answering server's own IP u32 (the server's).
+# Where the answer comes from tells the game how its NAT filters: 2 = from the other IP and the other port, 3 / 102 (0x66)
+# = from the same IP and the other port, every other type (1, 4, 5, 101, 103) = from the socket it was sent to.
+# (2026-11-02: the game sends 101 and 102 to nncs1:10025 and 103 to nncs2:10025; unanswered, creating an arena ended
+# in 2618-0201 after ~17 s.)
+FAKE_IP = [""]                 # --fake-ip: the address games on THIS PC are told they have (runtime SSBU_ONLINE_MENU_FAKEIP)
 
 
-def nat_listener(bind, port, log):
-    """Logs what Pia's NAT check sends to nncs1 (127.0.0.1) / nncs2 (127.0.0.2); answers nothing yet."""
-    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        u.bind((bind, port))
-    except OSError as e:
-        log("NAT check listener %s:%d: %s" % (bind, port, e))
-        return
+def pub_ip(ip):
+    """The address other players reach a game at: a loopback one (a game on this PC) becomes --fake-ip (Pia drops 127.x
+    from station URLs: two copies on one PC had no address for each other)."""
+    return FAKE_IP[0] if FAKE_IP[0] and ip.startswith("127.") else ip
+
+
+NAT_OTHER_PORT = {2, 3, 0x66}
+NAT_OTHER_IP = {2}
+
+
+def nat_answer(data, addr, here, socks):
+    if len(data) < 4:
+        return None, None
+    kind = struct.unpack(">I", data[:4])[0]
+    host, port = here
+    if kind in NAT_OTHER_IP:
+        host = NAT_HOSTS[1] if host == NAT_HOSTS[0] else NAT_HOSTS[0]
+    if kind in NAT_OTHER_PORT:
+        port = NAT_PORTS[1] if port == NAT_PORTS[0] else NAT_PORTS[0]
+    out = struct.pack(">IIII", kind, addr[1], struct.unpack(">I", socket.inet_aton(pub_ip(addr[0])))[0],
+                      struct.unpack(">I", socket.inet_aton(host))[0])
+    return out, socks.get((host, port))
+
+
+def nat_listener(here, socks, log):
+    """Answers Pia's NAT check sent to nncs1 (127.0.0.1) / nncs2 (127.0.0.2), ports 10025 / 10125."""
+    u = socks[here]
+    seen = set()
     while True:
-        data, addr = u.recvfrom(2048)
-        log("NAT check %s:%d <- %s:%d %d bytes: %s" % (bind, port, addr[0], addr[1], len(data), hexdump(data)))
+        try:
+            data, addr = u.recvfrom(2048)
+        except OSError:
+            continue            # (Windows: an ICMP port unreachable of an earlier answer)
+        out, via = nat_answer(data, addr, here, socks)
+        key = (addr, data[:4])
+        if out is None or via is None:
+            log("NAT check %s:%d <- %s:%d %d bytes: %s: NOT ANSWERED" % (here[0], here[1], addr[0], addr[1], len(data), hexdump(data)))
+            continue
+        via.sendto(out, addr)
+        if key not in seen:     # (each type is resent ~5 times: logged once per client socket)
+            seen.add(key)
+            src = via.getsockname()
+            log("NAT check %s:%d <- %s:%d type %s: answered from %s:%d with %s" % (here[0], here[1], addr[0], addr[1],
+                hexdump(data[:4]), src[0], src[1], hexdump(out)))
 
 
 def main():
@@ -646,16 +1060,31 @@ def main():
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=443)
     ap.add_argument("--log", default="")
+    ap.add_argument("--fake-ip", default="", help="the address games on this PC are told they have (two copies on one PC; "
+                    "the same as their SSBU_ONLINE_MENU_FAKEIP, default there 10.200.0.1)")
     a = ap.parse_args()
     log = Log(a.log)
+    FAKE_IP[0] = a.fake_ip
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((a.bind, a.port))
     srv.listen(8)
     log("nex server on TCP %s:%d (WebSocket, PRUDP lite)" % (a.bind, a.port))
-    for host in ("127.0.0.1", "127.0.0.2"):
+    socks = {}
+    for host in NAT_HOSTS:
         for port in NAT_PORTS:
-            threading.Thread(target=nat_listener, args=(host, port, log), daemon=True).start()
+            u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                u.bind((host, port))
+            except OSError as e:
+                log("NAT check listener %s:%d: %s" % (host, port, e))
+                continue
+            socks[(host, port)] = u
+    for here in list(socks):
+        threading.Thread(target=nat_listener, args=(here, socks, log), daemon=True).start()
+    for host in NAT_HOSTS:
+        for port in (33334, 33335):
+            threading.Thread(target=sinkhole, args=(host, port, log), daemon=True).start()
     while True:
         s, addr = srv.accept()
         threading.Thread(target=Client(s, addr, log).run, daemon=True).start()

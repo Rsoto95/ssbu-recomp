@@ -13,12 +13,25 @@
 static char g_om_server[64] = "127.0.0.1";
 static volatile LONG g_om_packets, g_om_udp;               /* nn::ssl / UDP packets whose first bytes were logged */
 #define OM_PACKETS_LOGGED 64
-#define OM_UDP_LOGGED 256
+#define OM_UDP_LOGGED 20000
 /* Pia's NAT check asks nncs1 and nncs2 and compares the answers: they must be two addresses. nncs2 -> the second one
  * (SSBU_ONLINE_MENU_SERVER2, default 127.0.0.2: loopback too on Windows). */
 static char g_om_server2[64] = "127.0.0.2";
 static ImportFn g_om_prev_gai2, g_om_prev_gainn, g_om_prev_ghbn, g_om_prev_resolve, g_om_prev_connect, g_om_prev_sendto,
-                g_om_prev_send, g_om_prev_socket, g_om_prev_ssl_host, g_om_prev_primary_ip;
+                g_om_prev_send, g_om_prev_socket, g_om_prev_ssl_host, g_om_prev_primary_ip, g_om_prev_bind, g_om_prev_recvfrom,
+                g_om_prev_bind2, g_om_prev_recvfrom2;
+static volatile LONG g_om_rx;                              /* UDP packets received whose first bytes were logged */
+#define OM_RX_LOGGED 20000
+
+/* (2026-11-02) Pia drops 127.x from station URLs (a console never has a loopback address): two copies of the game on one
+ * PC, which reach each other over 127.0.0.1, then had no address for each other and never sent a packet (2618-0521). The
+ * game is told its address is SSBU_ONLINE_MENU_FAKEIP (default 10.200.0.1; "off" = none): its primary IP, and the source
+ * of what other players' sockets send it; a datagram TO that address goes to 127.0.0.1. The servers' ports (NAT check
+ * 10025 / 10125, reachability 33334 / 33335) are left alone: their answers must come from the address the game asked.
+ * tools/net/nex_server.py --fake-ip reports the same address in the NAT check and the station URLs. Test on one PC only:
+ * with two PCs each game has a real address. */
+static uint32_t g_om_fake;                                 /* network order; 0 = off */
+static int om_server_port(unsigned port) { return port == 10025 || port == 10125 || port == 33334 || port == 33335 || port == 443; }
 
 static void om_log(const char *fmt, ...) {
     va_list ap;
@@ -31,11 +44,14 @@ static void om_log(const char *fmt, ...) {
 }
 static void om_hex_n(volatile LONG *count, LONG most, const char *what, uint64_t buf, uint64_t len) {
     if (InterlockedIncrement(count) > most || !buf) return;
-    char t[3 * 48 + 1];
-    int n = len < 48 ? (int)len : 48, k = 0;
+    static __declspec(thread) char t[3 * 1500 + 1];
+    const uint8_t *b0 = (const uint8_t *)(uintptr_t)buf;
+    int pia = len >= 4 && b0[0] == 0x32 && b0[1] == 0xab && b0[2] == 0x98 && b0[3] == 0x64;     /* Pia packets whole (decrypted offline) */
+    int cap = pia ? 1500 : 48;
+    int n = len < (uint64_t)cap ? (int)len : cap, k = 0;
     for (int i = 0; i < n; i++) k += sprintf(t + k, "%02x ", ((const uint8_t *)(uintptr_t)buf)[i]);
     t[k] = 0;
-    om_log("%s %llu bytes: %s%s", what, (unsigned long long)len, t, len > 48 ? "..." : "");
+    om_log("%s %llu bytes: %s%s", what, (unsigned long long)len, t, len > (uint64_t)cap ? "..." : "");
 }
 static void om_hex(const char *what, uint64_t buf, uint64_t len) { om_hex_n(&g_om_packets, OM_PACKETS_LOGGED, what, buf, len); }
 static const char *om_server_for(const char *name) {      /* our address for a nintendo.net name */
@@ -60,7 +76,7 @@ static void om_nifm_keep(Ctx *c) { (void)c; }
 static void om_nifm_GetCurrentPrimaryIpAddress(Ctx *c) {
     uint64_t out = A0;
     g_om_prev_primary_ip(c);
-    if ((uint32_t)c->x[0] == 0) M32(out) = htonl(INADDR_LOOPBACK);
+    if ((uint32_t)c->x[0] == 0) M32(out) = g_om_fake ? g_om_fake : htonl(INADDR_LOOPBACK);
 }
 
 /* ---------------------------------------------------------------- nn::account: a network service account */
@@ -169,7 +185,59 @@ static void om_SendTo(Ctx *c) {
     om_addr_text(c->x[4], to, sizeof to);
     snprintf(what, sizeof what, "SendTo(fd %d, %s)", fd, to);
     om_hex_n(&g_om_udp, OM_UDP_LOGGED, what, buf, len);
+    uint64_t dst = c->x[4];
+    int swapped = g_om_fake && dst && M8(dst + 1) == 2 && M32(dst + 4) == g_om_fake;
+    if (swapped) M32(dst + 4) = htonl(INADDR_LOOPBACK);
     g_om_prev_sendto(c);
+    if (swapped) M32(dst + 4) = g_om_fake;
+}
+static void om_Bind(Ctx *c) {                              /* (fd, const sockaddr *, len): which port each socket asks for (Pia: 2026-11-02) */
+    int fd = (int)A0;
+    char at[48];
+    om_addr_text(A1, at, sizeof at);
+    uint64_t sa = A1;
+    int swapped = g_om_fake && sa && M8(sa + 1) == 2 && M32(sa + 4) == g_om_fake;
+    if (swapped) M32(sa + 4) = 0;
+    g_om_prev_bind(c);
+    if (swapped) M32(sa + 4) = g_om_fake;
+    om_log("Bind(fd %d, %s) -> %d", fd, at, (int)c->x[0]);
+}
+static void om_bind_log(Ctx *c, ImportFn prev) {
+    int fd = (int)A0;
+    char at[48];
+    om_addr_text(A1, at, sizeof at);
+    prev(c);
+    om_log("Bind(fd %d, %s) -> %d", fd, at, (int)c->x[0]);
+}
+static void om_Bind2(Ctx *c) { om_bind_log(c, g_om_prev_bind2); }
+static void om_fake_from(uint64_t from) {
+    if (g_om_fake && from && M8(from + 1) == 2 && M32(from + 4) == htonl(INADDR_LOOPBACK) && !om_server_port(ntohs(M16(from + 2))))
+        M32(from + 4) = g_om_fake;
+}
+static void om_recv_log(Ctx *c, ImportFn prev) {
+    int fd = (int)A0;
+    uint64_t buf = A1, from = A4;
+    prev(c);
+    long long got = (long long)(int64_t)c->x[0];
+    if (got <= 0) return;
+    om_fake_from(from);
+    char who[48], what[96];
+    om_addr_text(from, who, sizeof who);
+    snprintf(what, sizeof what, "RecvFrom(fd %d, %s)", fd, who);
+    om_hex_n(&g_om_rx, OM_RX_LOGGED, what, buf, (uint64_t)got);
+}
+static void om_RecvFrom2(Ctx *c) { om_recv_log(c, g_om_prev_recvfrom2); }
+static void om_RecvFrom(Ctx *c) {                          /* (fd, buf, len, flags, sockaddr *from, socklen *): what comes back */
+    int fd = (int)A0;
+    uint64_t buf = A1, from = A4;
+    g_om_prev_recvfrom(c);
+    long long got = (long long)(int64_t)c->x[0];
+    if (got <= 0) return;
+    om_fake_from(from);
+    char who[48], what[96];
+    om_addr_text(from, who, sizeof who);
+    snprintf(what, sizeof what, "RecvFrom(fd %d, %s)", fd, who);
+    om_hex_n(&g_om_rx, OM_RX_LOGGED, what, buf, (uint64_t)got);
 }
 static void om_Send(Ctx *c) {
     char what[48];
@@ -270,6 +338,11 @@ static void online_menu_register(void) {
         snprintf(g_om_server, sizeof g_om_server, "%s", e);
     }
     if ((e = getenv("SSBU_ONLINE_MENU_SERVER2")) && *e) snprintf(g_om_server2, sizeof g_om_server2, "%s", e);
+    {   const char *f = getenv("SSBU_ONLINE_MENU_FAKEIP");
+        struct in_addr a;
+        if (!f || !*f) f = "10.200.0.1";
+        if (_stricmp(f, "off") && InetPtonA(AF_INET, f, &a) == 1) g_om_fake = a.s_addr;
+        if (g_om_fake) printf("[online-menu] this game's address for other players: %s (sent to 127.0.0.1; one-PC tests)\n", f); }
     g_om_prev_gai2 = om_prev(OM_SOK("11GetAddrInfoEPKcS2_PK8addrinfoPPS3_"));
     g_om_prev_gainn = om_prev(OM_SOK("11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_"));
     g_om_prev_ghbn = om_prev("nnsocketGetHostByNameWithOptions");
@@ -278,6 +351,10 @@ static void online_menu_register(void) {
     g_om_prev_connect = om_prev(OM_SOK("7ConnectEiPK8sockaddrj"));
     g_om_prev_sendto = om_prev(OM_SOK("6SendToEiPKvmiPK8sockaddrj"));
     g_om_prev_send = om_prev(OM_SOK("4SendEiPKvmi"));
+    g_om_prev_bind = om_prev(OM_SOK("4BindEiPK8sockaddrj"));
+    g_om_prev_recvfrom = om_prev(OM_SOK("8RecvFromEiPvmiP8sockaddrPj"));
+    g_om_prev_bind2 = om_prev(OM_SOK("4BindEiPKNS0_8SockAddrEj"));
+    g_om_prev_recvfrom2 = om_prev(OM_SOK("8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj"));
     g_om_prev_ssl_host = om_prev("nnsslConnectionSetHostName");
     g_om_prev_primary_ip = om_prev("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr");
     static const ImportDef defs[] = {
@@ -300,6 +377,9 @@ static void online_menu_register(void) {
         {OM_SOK("7ConnectEiPK8sockaddrj"), om_Connect}, {"nnsocketConnect", om_Connect},
         {OM_SOK("6SendToEiPKvmiPK8sockaddrj"), om_SendTo}, {OM_SOK("6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj"), om_SendTo},
         {OM_SOK("4SendEiPKvmi"), om_Send}, {"nnsocketSend", om_Send},
+        {OM_SOK("4BindEiPK8sockaddrj"), om_Bind},
+        {OM_SOK("8RecvFromEiPvmiP8sockaddrPj"), om_RecvFrom}, {OM_SOK("4BindEiPKNS0_8SockAddrEj"), om_Bind2},
+        {OM_SOK("8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj"), om_RecvFrom2},
         {"nnsslConnectionSetHostName", om_ssl_SetHostName},
         {"nnsslConnectionDoHandshakeWithCertBuffer", om_ssl_DoHandshake}, {"nnsslConnectionRead", om_ssl_Read},
         {"nnsslConnectionWrite", om_ssl_Write}, {"nnsslConnectionPending", om_ssl_Pending},
