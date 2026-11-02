@@ -268,6 +268,7 @@ def validate_and_request_ticket(client, req):
     internal = Writer().u("Q", pid).raw(session_key).bytes()     # only our secure server reads it (our own format)
     ticket = kerberos_encrypt(key, Writer().raw(session_key).u("Q", SECURE_PID).buffer(internal).bytes())
     host, port = client.local
+    host = PUBLIC_IP[0] or host                              # (a cloud VM: the public address, not its private one)
     url = "prudps:/address=%s;port=%d;CID=1;PID=2;sid=%d;stream=10;type=2" % (host, port, SECURE_STREAM_PORT)
     body = (Writer().u("Q", pid).buffer(ticket).string(url).u("Q", nex_datetime()).string(SERVER_NAME)
             .string(key.hex()).bytes())
@@ -1055,6 +1056,10 @@ def pub_ip(ip, port=None):
     return "10.200.%d.%d" % (port >> 8 & 255, port & 255) if port is not None else FAKE_IP[0]
 
 
+PUBLIC_IP = [""]               # --public-ip: this server's address as the players reach it (a cloud VM: its public IP, not
+                               # the private one of its network card); empty = the address each connection came in on
+
+
 NAT_OTHER_PORT = {2, 3, 0x66}
 NAT_OTHER_IP = {2}
 
@@ -1069,7 +1074,7 @@ def nat_answer(data, addr, here, socks):
     if kind in NAT_OTHER_PORT:
         port = NAT_PORTS[1] if port == NAT_PORTS[0] else NAT_PORTS[0]
     out = struct.pack(">IIII", kind, addr[1], struct.unpack(">I", socket.inet_aton(pub_ip(addr[0], addr[1])))[0],
-                      struct.unpack(">I", socket.inet_aton(host))[0])
+                      struct.unpack(">I", socket.inet_aton(PUBLIC_IP[0] or host))[0])
     return out, socks.get((host, port))
 
 
@@ -1100,6 +1105,9 @@ def main():
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=443)
     ap.add_argument("--log", default="")
+    ap.add_argument("--public-ip", default="", help="this server's address as the players reach it (a cloud VM behind 1:1 NAT: "
+                    "its public IP; the NAT check and the login's secure server address say it); with it the NAT check "
+                    "listens on every interface (0.0.0.0)")
     ap.add_argument("--nat-ip", default="127.0.0.1,127.0.0.2",
                     help="the address(es) of the NAT check (nncs1[,nncs2]) as the players reach this PC: one address for a "
                          "server the players reach over a network (Radmin, a VPS: the game is told nncs2 = nncs1); two "
@@ -1110,6 +1118,9 @@ def main():
     log = Log(a.log)
     FAKE_IP[0] = a.fake_ip
     NAT_HOSTS[:] = [h.strip() for h in a.nat_ip.split(",") if h.strip()][:2]
+    PUBLIC_IP[0] = a.public_ip
+    if a.public_ip:
+        NAT_HOSTS[:] = ["0.0.0.0"]                           # (one server, every interface; the answers name --public-ip)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((a.bind, a.port))
