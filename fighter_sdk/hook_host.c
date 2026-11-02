@@ -616,6 +616,63 @@ static void hook_selftest_module(Ctx *c, NroModule *m) {
     *c = saved;
 }
 
+/* ---------------------------------------------------------------- SSBU_HOOK_TRACE: a call trace of a window of time
+ * (2026-11-02, the Pia station research) SSBU_HOOK_TRACE=<lo hex>,<hi hex>[,<ms>]: a pass-through hook on every function
+ * of main in [lo, hi) (the lifter's own function starts: function_at); while a trace window is open every call is written
+ * to hook_trace.txt (beside the log; SSBU_HOOK_TRACE_FILE) as "+<ms> t<thread> <depth> f_<addr>(x0, x1, x2, x3) -> x0".
+ * A window is opened by hook_trace_window() (online_menu.inc: when a Pia connection request arrives) and lasts <ms>
+ * (default 400); at most 200000 lines in all. Nothing is written outside a window. Test only. */
+volatile LONG64 g_hk_trace_until;                      /* GetTickCount64 ms; 0 = closed */
+static FILE *g_hk_trace_f;
+static volatile LONG g_hk_trace_lines;
+static ULONGLONG g_hk_trace_t0;
+static int g_hk_trace_ms = 400;
+typedef struct { ImportFn orig; uint64_t addr; } HkTrace;
+static __declspec(thread) int t_hk_depth;
+void hook_trace_window(const char *why) {
+    if (!g_hk_trace_f) return;
+    ULONGLONG now = GetTickCount64();
+    if (!g_hk_trace_t0) g_hk_trace_t0 = now;
+    fprintf(g_hk_trace_f, "=== window +%llu ms: %s\n", (unsigned long long)(now - g_hk_trace_t0), why);
+    fflush(g_hk_trace_f);
+    InterlockedExchange64(&g_hk_trace_until, (LONG64)(now + (ULONGLONG)g_hk_trace_ms));
+}
+static void hk_trace_fn(Ctx *c, void *user) {
+    HkTrace *t = (HkTrace *)user;
+    ULONGLONG until = (ULONGLONG)g_hk_trace_until;
+    if (!until || GetTickCount64() > until || g_hk_trace_lines > 200000) { t->orig(c); return; }
+    uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3];
+    int d = t_hk_depth++;
+    t->orig(c);
+    t_hk_depth--;
+    InterlockedIncrement(&g_hk_trace_lines);
+    fprintf(g_hk_trace_f, "+%llu t%lu %d f_%llx(%llx, %llx, %llx, %llx) -> %llx\n", (unsigned long long)(GetTickCount64() - g_hk_trace_t0),
+            GetCurrentThreadId(), d, (unsigned long long)t->addr, (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2,
+            (unsigned long long)a3, (unsigned long long)c->x[0]);
+}
+static void hook_trace_start(void) {
+    const char *e = getenv("SSBU_HOOK_TRACE");
+    if (!e || !*e) return;
+    uint64_t lo = 0, hi = 0; int ms = 0;
+    if (sscanf(e, "%llx,%llx,%d", (unsigned long long *)&lo, (unsigned long long *)&hi, &ms) < 2 || hi <= lo) { printf("hook trace: SSBU_HOOK_TRACE=%s: <lo hex>,<hi hex>[,<ms>]\n", e); return; }
+    if (ms > 0) g_hk_trace_ms = ms;
+    const char *fn = getenv("SSBU_HOOK_TRACE_FILE");
+    g_hk_trace_f = fopen(fn && *fn ? fn : "hook_trace.txt", "w");
+    if (!g_hk_trace_f) { printf("hook trace: cannot write the trace file\n"); return; }
+    setvbuf(g_hk_trace_f, NULL, _IOFBF, 1 << 20);
+    int n = 0, failed = 0;
+    for (uint64_t a = lo; a < hi; a += 4) {
+        if (!function_at(a)) continue;
+        HkTrace *t = (HkTrace *)calloc(1, sizeof *t);
+        if (!t) break;
+        t->addr = a;
+        if (hook_install(a, hk_trace_fn, t, &t->orig)) n++; else { failed++; free(t); }
+    }
+    printf("hook trace: %d functions in [%llx, %llx) hooked (%d failed: %s); windows of %d ms\n", n, (unsigned long long)lo,
+           (unsigned long long)hi, failed, failed ? g_hk_error : "-", g_hk_trace_ms);
+    fflush(stdout);
+}
+
 static int g_hk_selftest;
 static void fighter_debug_start(void);                 /* S10: fighter_host.c, SSBU_FIGHTER_DEBUG (test only; nothing without the variable) */
 static void hook_start(Ctx *c) {                       /* once, before the game starts (nnro.c module_coverage_start) */
@@ -623,6 +680,7 @@ static void hook_start(Ctx *c) {                       /* once, before the game 
     g_hk_selftest = getenv("SSBU_HOOK_SELFTEST") != NULL;
     if (g_hk_selftest) hook_selftest_main(c);
     hook_count_start();
+    hook_trace_start();
     hook_health_start();
     fighter_debug_start();
     hook_load_mods();

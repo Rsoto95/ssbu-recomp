@@ -30,8 +30,16 @@ static volatile LONG g_om_rx;                              /* UDP packets receiv
  * 10025 / 10125, reachability 33334 / 33335) are left alone: their answers must come from the address the game asked.
  * tools/net/nex_server.py --fake-ip reports the same address in the NAT check and the station URLs. Test on one PC only:
  * with two PCs each game has a real address. */
-static uint32_t g_om_fake;                                 /* network order; 0 = off */
+static uint32_t g_om_fake;                                 /* network order; 0 = off (any value: on) */
 static int om_server_port(unsigned port) { return port == 10025 || port == 10125 || port == 33334 || port == 33335 || port == 443; }
+/* (2026-11-02, second round) ONE fake address for both copies made the host take the joiner for a station it already
+ * had (its own address): Pia's ConnectionRequest handler [0x710019d654] looks the requester's public address up among
+ * its stations, finds itself, and denies (ConnectionResponse result 3 [0x710019dfd0]; the joiner: 2618-0502). So every
+ * socket of a copy is seen at 10.200.<port / 256>.<port % 256> (from its own port: no shared table needed, and
+ * tools/net/nex_server.py --fake-ip derives the same in the NAT check and the station URLs); the copy's own primary IP
+ * is 10.201.x.y (from its player id). A datagram to 10.200.0.0/15 goes to 127.0.0.1, same port. */
+static int om_is_fake(uint32_t a) { const uint8_t *b = (const uint8_t *)&a; return b[0] == 10 && (b[1] == 200 || b[1] == 201); }
+static uint32_t om_fake_for_port(unsigned port) { uint8_t b[4] = {10, 200, (uint8_t)(port >> 8), (uint8_t)port}; uint32_t a; memcpy(&a, b, 4); return a; }
 
 static void om_log(const char *fmt, ...) {
     va_list ap;
@@ -73,10 +81,14 @@ static int om_ours(const char *name) {                     /* a name answered wi
 static void om_nifm_true(Ctx *c) { RET(1); }
 static void om_nifm_false(Ctx *c) { RET(0); }
 static void om_nifm_keep(Ctx *c) { (void)c; }
+static uint64_t om_nsa_id(void);
 static void om_nifm_GetCurrentPrimaryIpAddress(Ctx *c) {
     uint64_t out = A0;
     g_om_prev_primary_ip(c);
-    if ((uint32_t)c->x[0] == 0) M32(out) = g_om_fake ? g_om_fake : htonl(INADDR_LOOPBACK);
+    if ((uint32_t)c->x[0] == 0) {
+        if (g_om_fake) { uint64_t id = om_nsa_id(); uint8_t b[4] = {10, 201, (uint8_t)(id >> 16), (uint8_t)(id >> 8) | 1}; uint32_t a; memcpy(&a, b, 4); M32(out) = a; }
+        else M32(out) = htonl(INADDR_LOOPBACK);
+    }
 }
 
 /* ---------------------------------------------------------------- nn::account: a network service account */
@@ -186,20 +198,22 @@ static void om_SendTo(Ctx *c) {
     snprintf(what, sizeof what, "SendTo(fd %d, %s)", fd, to);
     om_hex_n(&g_om_udp, OM_UDP_LOGGED, what, buf, len);
     uint64_t dst = c->x[4];
-    int swapped = g_om_fake && dst && M8(dst + 1) == 2 && M32(dst + 4) == g_om_fake;
+    uint32_t was = dst ? M32(dst + 4) : 0;
+    int swapped = g_om_fake && dst && M8(dst + 1) == 2 && om_is_fake(was);
     if (swapped) M32(dst + 4) = htonl(INADDR_LOOPBACK);
     g_om_prev_sendto(c);
-    if (swapped) M32(dst + 4) = g_om_fake;
+    if (swapped) M32(dst + 4) = was;
 }
 static void om_Bind(Ctx *c) {                              /* (fd, const sockaddr *, len): which port each socket asks for (Pia: 2026-11-02) */
     int fd = (int)A0;
     char at[48];
     om_addr_text(A1, at, sizeof at);
     uint64_t sa = A1;
-    int swapped = g_om_fake && sa && M8(sa + 1) == 2 && M32(sa + 4) == g_om_fake;
+    uint32_t was = sa ? M32(sa + 4) : 0;
+    int swapped = g_om_fake && sa && M8(sa + 1) == 2 && om_is_fake(was);
     if (swapped) M32(sa + 4) = 0;
     g_om_prev_bind(c);
-    if (swapped) M32(sa + 4) = g_om_fake;
+    if (swapped) M32(sa + 4) = was;
     om_log("Bind(fd %d, %s) -> %d", fd, at, (int)c->x[0]);
 }
 static void om_bind_log(Ctx *c, ImportFn prev) {
@@ -210,9 +224,14 @@ static void om_bind_log(Ctx *c, ImportFn prev) {
     om_log("Bind(fd %d, %s) -> %d", fd, at, (int)c->x[0]);
 }
 static void om_Bind2(Ctx *c) { om_bind_log(c, g_om_prev_bind2); }
+void hook_trace_window(const char *why);                   /* fighter_sdk/hook_host.c (SSBU_HOOK_TRACE) */
+static void om_trace_rx(uint64_t buf, long long got) {     /* a Pia packet of the size of a station connection request */
+    const uint8_t *b = (const uint8_t *)(uintptr_t)buf;
+    if (got == 144 && b[0] == 0x32 && b[1] == 0xab && b[2] == 0x98 && b[3] == 0x64) hook_trace_window("a 144-byte Pia packet received");
+}
 static void om_fake_from(uint64_t from) {
     if (g_om_fake && from && M8(from + 1) == 2 && M32(from + 4) == htonl(INADDR_LOOPBACK) && !om_server_port(ntohs(M16(from + 2))))
-        M32(from + 4) = g_om_fake;
+        M32(from + 4) = om_fake_for_port(ntohs(M16(from + 2)));
 }
 static void om_recv_log(Ctx *c, ImportFn prev) {
     int fd = (int)A0;
@@ -221,6 +240,7 @@ static void om_recv_log(Ctx *c, ImportFn prev) {
     long long got = (long long)(int64_t)c->x[0];
     if (got <= 0) return;
     om_fake_from(from);
+    om_trace_rx(buf, got);
     char who[48], what[96];
     om_addr_text(from, who, sizeof who);
     snprintf(what, sizeof what, "RecvFrom(fd %d, %s)", fd, who);
@@ -234,6 +254,7 @@ static void om_RecvFrom(Ctx *c) {                          /* (fd, buf, len, fla
     long long got = (long long)(int64_t)c->x[0];
     if (got <= 0) return;
     om_fake_from(from);
+    om_trace_rx(buf, got);
     char who[48], what[96];
     om_addr_text(from, who, sizeof who);
     snprintf(what, sizeof what, "RecvFrom(fd %d, %s)", fd, who);
@@ -342,7 +363,7 @@ static void online_menu_register(void) {
         struct in_addr a;
         if (!f || !*f) f = "10.200.0.1";
         if (_stricmp(f, "off") && InetPtonA(AF_INET, f, &a) == 1) g_om_fake = a.s_addr;
-        if (g_om_fake) printf("[online-menu] this game's address for other players: %s (sent to 127.0.0.1; one-PC tests)\n", f); }
+        if (g_om_fake) printf("[online-menu] fake addresses on (SSBU_ONLINE_MENU_FAKEIP=%s): each socket is 10.200.<port/256>.<port%%256>, this game's own IP 10.201.x.y; sent to 127.0.0.1 (one-PC tests)\n", f); }
     g_om_prev_gai2 = om_prev(OM_SOK("11GetAddrInfoEPKcS2_PK8addrinfoPPS3_"));
     g_om_prev_gainn = om_prev(OM_SOK("11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_"));
     g_om_prev_ghbn = om_prev("nnsocketGetHostByNameWithOptions");

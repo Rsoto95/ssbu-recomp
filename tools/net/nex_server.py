@@ -623,9 +623,9 @@ def stations_for(c):
         scheme, _, params = u.partition(":/")
         fields = dict(kv.split("=", 1) for kv in params.split(";") if "=" in kv)
         if pia:
-            fields["address"], fields["port"] = pub_ip(pia[0]), str(pia[1])
+            fields["address"], fields["port"] = pub_ip(pia[0], pia[1]), str(pia[1])
             if "Pa" in fields:
-                fields["Pa"] = pub_ip(pia[0])
+                fields["Pa"] = pub_ip(pia[0], pia[1])
         if getattr(c, "pia_cid", None):
             fields["CID"] = str(c.pia_cid)
         fields.setdefault("PID", str(c.pid or 0))
@@ -643,7 +643,7 @@ def station_for(c):
     fields = dict(kv.split("=", 1) for kv in params.split(";") if "=" in kv)
     pia = getattr(c, "pia", None)
     if pia:
-        fields["address"], fields["port"] = pub_ip(pia[0]), str(pia[1])
+        fields["address"], fields["port"] = pub_ip(pia[0], pia[1]), str(pia[1])
     return scheme + ":/" + ";".join("%s=%s" % kv for kv in sorted(fields.items()))
 
 
@@ -1017,10 +1017,13 @@ NAT_HOSTS = ("127.0.0.1", "127.0.0.2")   # nncs1, nncs2 (runtime/online_menu.inc
 FAKE_IP = [""]                 # --fake-ip: the address games on THIS PC are told they have (runtime SSBU_ONLINE_MENU_FAKEIP)
 
 
-def pub_ip(ip):
-    """The address other players reach a game at: a loopback one (a game on this PC) becomes --fake-ip (Pia drops 127.x
-    from station URLs: two copies on one PC had no address for each other)."""
-    return FAKE_IP[0] if FAKE_IP[0] and ip.startswith("127.") else ip
+def pub_ip(ip, port=None):
+    """The address other players reach a game's socket at: a loopback one (a game on this PC) becomes 10.200.<port / 256>.
+    <port % 256> with --fake-ip (Pia drops 127.x from station URLs; one shared fake address made the host take the
+    joiner for itself and deny it, result 3). The same rule as online_menu.inc's RecvFrom; without a port: --fake-ip."""
+    if not (FAKE_IP[0] and ip.startswith("127.")):
+        return ip
+    return "10.200.%d.%d" % (port >> 8 & 255, port & 255) if port is not None else FAKE_IP[0]
 
 
 NAT_OTHER_PORT = {2, 3, 0x66}
@@ -1036,7 +1039,7 @@ def nat_answer(data, addr, here, socks):
         host = NAT_HOSTS[1] if host == NAT_HOSTS[0] else NAT_HOSTS[0]
     if kind in NAT_OTHER_PORT:
         port = NAT_PORTS[1] if port == NAT_PORTS[0] else NAT_PORTS[0]
-    out = struct.pack(">IIII", kind, addr[1], struct.unpack(">I", socket.inet_aton(pub_ip(addr[0])))[0],
+    out = struct.pack(">IIII", kind, addr[1], struct.unpack(">I", socket.inet_aton(pub_ip(addr[0], addr[1])))[0],
                       struct.unpack(">I", socket.inet_aton(host))[0])
     return out, socks.get((host, port))
 
