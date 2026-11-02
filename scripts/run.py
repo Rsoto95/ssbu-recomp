@@ -86,7 +86,7 @@ def auto_update(gini):
     if os.environ.get('SSBU_PLAY_UPDATED') or ini_get(gini, 'auto_update') in ('off', '0', 'no', 'false'):
         return False
     if os.path.exists(os.path.join(REPO, '.git')):
-        return False
+        return dev_update(gini)
     import update
     have = (update.read_manifest() or {}).get('commit')
     try:
@@ -125,9 +125,55 @@ def auto_update(gini):
     return True
 
 
+UPDATE_ASKED = False    # (2026-11-02) this launcher was started by the game's "Update and restart" (SSBU_UPDATE_WAIT_PID)
+
+
+def git_head():
+    try:
+        return subprocess.run(['git', '-C', REPO, 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def dev_update(gini):
+    """(2026-11-02) A git checkout (the developer's own copy) is never updated by itself. With graphics.ini auto_update = ask
+    the game still says when GitHub has a newer version (update_watch) and F1 > "Update and restart" brings it in, only when
+    pressed: `git pull --ff-only` (refused while tracked files have changes not committed: nothing is touched then) and the
+    prebuilt runtime it names (runtime_only_update). True when the code changed (run.py starts again with it)."""
+    if not (UPDATE_ASKED and ini_get(gini, 'auto_update') == 'ask'):
+        return False
+    print('=' * 78)
+    print('Update asked in the game (F1 > Update and restart): this is a git checkout, updating it with git.')
+    dirty = subprocess.run(['git', '-C', REPO, 'status', '--porcelain', '--untracked-files=no'], capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print('NOT updated: files of the project have changes that are not committed (commit or stash them first):')
+        print(dirty)
+        print('=' * 78)
+        return False
+    before = git_head()
+    rc = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only']).returncode
+    if rc:
+        print('NOT updated: git pull --ff-only failed (code %d): this copy has commits GitHub does not have.' % rc)
+        print('=' * 78)
+        return False
+    changed = git_head() != before
+    try:
+        work = os.path.join(os.path.abspath(build_location.get()), 'work')
+        if runtime_only_update(work):
+            print('The prebuilt game program of this version is installed.')
+    except Exception as e:                                  # (the code is new anyway: Install SSBU.bat > Resume can finish it)
+        print('The game program was not installed (%s): "Install SSBU.bat" > Resume installs it.' % e)
+    print('Updated (%s -> %s).' % (before[:7], git_head()[:7]) if changed else 'The code was already the newest.')
+    print('=' * 78)
+    return changed
+
+
 def update_watch_wanted(gini):
-    """(fork, 2026-11-01) the same conditions as auto_update, minus the restart guard: a player's installed copy, not a git checkout."""
-    return not os.path.exists(os.path.join(REPO, '.git')) and ini_get(gini, 'auto_update') not in ('off', '0', 'no', 'false')
+    """(fork, 2026-11-01) the same conditions as auto_update, minus the restart guard: a player's installed copy, not a git checkout.
+    (2026-11-02) A git checkout too with auto_update = ask: it is told, and updates only when "Update and restart" is pressed."""
+    if os.path.exists(os.path.join(REPO, '.git')):
+        return ini_get(gini, 'auto_update') == 'ask'
+    return ini_get(gini, 'auto_update') not in ('off', '0', 'no', 'false')
 
 
 def update_watch(flag):
@@ -139,7 +185,7 @@ def update_watch(flag):
     import update
 
     def watch():
-        have = (update.read_manifest() or {}).get('commit')
+        have = git_head() if os.path.exists(os.path.join(REPO, '.git')) else (update.read_manifest() or {}).get('commit')
         while True:
             time.sleep(600)
             try:
@@ -299,6 +345,8 @@ def main():
     ap.add_argument('--mac', action='store_true', help='the native macOS build (default build folder build-macos, exe ssbu_native, '
                                                       'saves in ~/Library/Application Support/ssbu-recomp/userdata unless --userdata)')
     a = ap.parse_args()
+    global UPDATE_ASKED
+    UPDATE_ASKED = bool(os.environ.get('SSBU_UPDATE_WAIT_PID'))
     wait_for_old_game()
     if a.play and os.name == 'nt' and not (a.linux or a.mac or a.build) and \
             auto_update(os.path.join(os.path.abspath(build_location.get()), 'config', 'graphics.ini')):
