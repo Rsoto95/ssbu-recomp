@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Bring this folder to the newest commit of the GitHub repository's main branch.
+"""Bring this folder to the newest commit of its GitHub repository and branch.
 
     python scripts/update.py [--dry-run] [--repo owner/name] [--branch main] [--force]
+
+Which repository: a git checkout follows the one its current branch tracks (a clone of a fork stays on that fork and
+branch); any other copy uses DEFAULT_REPO / DEFAULT_BRANCH below. --repo / --branch override both.
 
 * A git checkout: `git fetch` (from the remote that points at the repository, else from its URL) and a fast-forward
   merge only. Nothing is merged if your own uncommitted changes touch a file the update changes, or if your branch has
@@ -146,6 +149,17 @@ def git(*args, check=False):
 def norm_url(u):
     m = re.search(r'github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$', u.strip(), re.I)
     return (m.group(1) + '/' + m.group(2)).lower() if m else None
+
+
+def tracked_source():
+    """A git checkout follows the GitHub repository and branch its current branch tracks (a clone of a fork updates from
+    that fork, on the branch it was cloned with); None when there is no such upstream."""
+    up = git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}').stdout.strip()      # e.g. origin/main
+    if up.count('/') < 1 or up.startswith('@'):
+        return None
+    remote, branch = up.split('/', 1)
+    repo = norm_url(git('remote', 'get-url', remote).stdout)
+    return (repo, branch) if repo else None
 
 
 def update_git(a):
@@ -407,13 +421,17 @@ def update_zip(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dry-run', action='store_true', help='show what would change, write nothing')
-    ap.add_argument('--repo', default=DEFAULT_REPO, help='owner/name on GitHub (default %s)' % DEFAULT_REPO)
-    ap.add_argument('--branch', default=DEFAULT_BRANCH)
+    ap.add_argument('--repo', help='owner/name on GitHub (default: a git checkout\'s tracked repository, else %s)' % DEFAULT_REPO)
+    ap.add_argument('--branch', help='default: a git checkout\'s tracked branch, else %s' % DEFAULT_BRANCH)
     ap.add_argument('--force', action='store_true', help='ZIP mode: also overwrite/delete files you edited yourself (backed up first)')
     a = ap.parse_args()
+    is_git = os.path.exists(os.path.join(REPO_DIR, '.git')) and shutil.which('git')
+    tracked = tracked_source() if is_git and not (a.repo and a.branch) else None
+    a.repo = a.repo or (tracked and tracked[0]) or DEFAULT_REPO
+    a.branch = a.branch or (tracked and tracked[1]) or DEFAULT_BRANCH
     if not re.fullmatch(r'[\w.-]+/[\w.-]+', a.repo):
         die('--repo must look like owner/name')
-    if os.path.exists(os.path.join(REPO_DIR, '.git')) and shutil.which('git'):
+    if is_git:
         update_git(a)
     else:
         update_zip(a)

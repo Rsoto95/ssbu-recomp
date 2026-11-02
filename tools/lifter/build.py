@@ -8,6 +8,7 @@
 """
 import concurrent.futures
 import os
+import re
 import subprocess
 import sys
 import time
@@ -35,7 +36,7 @@ PLAT_FLAGS += MACOS_MIN
 PLAT_FLAGS += ['-mcx16'] if TARGET_LINUX else []
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN] + PLAT_FLAGS
 HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c', 'nnpad_gca.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
-                'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'rollback/model/game_state.c', 'rollback/model/page_tracker_learned.c', 'rollback/model/memory_map.c', 'rollback/model/threads.c', 'rollback/model/full_save.c', 'rollback/model/tracking_experiments/fast_save.c', 'rollback/model/tracking_experiments/write_marks.c', 'rollback/model/tracking_experiments/write_protection.c', 'rollback/model/runahead.c', 'rollback/model/guest_heap.c', 'rollback/model/snapshot_ring.c', 'rollback/model/os_objects_state.c', 'rollback/debug/ring_simulation.c', 'rollback/debug/ring_audit.c', 'rollback/debug/call_trace.c', 'rollback/debug/state_measure.c', 'rollback/controller/rollback_controller.c', 'rollback/controller/fault_recovery.c',
+                'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'unlock_all.c', 'rollback/model/game_state.c', 'rollback/model/page_tracker_learned.c', 'rollback/model/memory_map.c', 'rollback/model/threads.c', 'rollback/model/full_save.c', 'rollback/model/tracking_experiments/fast_save.c', 'rollback/model/tracking_experiments/write_marks.c', 'rollback/model/tracking_experiments/write_protection.c', 'rollback/model/runahead.c', 'rollback/model/guest_heap.c', 'rollback/model/snapshot_ring.c', 'rollback/model/os_objects_state.c', 'rollback/debug/ring_simulation.c', 'rollback/debug/ring_audit.c', 'rollback/debug/call_trace.c', 'rollback/debug/state_measure.c', 'rollback/controller/rollback_controller.c', 'rollback/controller/fault_recovery.c',
                 'loose_host.c', 'osk.c', 'nnldn.c', 'net_relay.c', 'rollback/services/net_session.c', 'rollback/services/ladder_report.c', 'rollback/model/input_history.c', 'rollback/services/wire_format.c', 'rollback/services/clock_sync.c']    # the new fighters' file layer (loose_files.c): off unless SSBU_CHARACTERS / SSBU_LOOSE_FILES is set
 # nnldn.c / net_relay.c: online play over the game's Local Wireless (plan/phases/N3_local_wireless_online.md), off unless SSBU_ONLINE
 # (taken only when present: a tree without the online files, e.g. a public one before they are published, still links)
@@ -252,7 +253,12 @@ def link_dll(objs, dll, rsp, implib=True, fltused=False):
     if TARGET_LINUX:          # a .so: -z now resolves everything at load, as a DLL is
         return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll] + PLAT_FLAGS + ['-lm', '-Wl,-soname,' + os.path.basename(dll), '-Wl,-z,now'], capture_output=True, text=True, errors='replace')
     if not NOCRT:
-        return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll], capture_output=True, text=True, errors='replace')
+        # clang passes link.exe the objects on ONE response-file line, at most 131,071 characters (LNK1170): the game DLL's
+        # 1,161 absolute paths under a long install folder passed it, so name them relative to their common folder
+        base = os.path.commonpath(objs)
+        with open(rsp, 'w') as f:
+            f.write('\n'.join('"%s"' % os.path.relpath(o, base).replace('\\', '/') for o in objs))
+        return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll], cwd=base, capture_output=True, text=True, errors='replace')
     os.makedirs(libdir, exist_ok=True)
     libs = [lld_def_lib(os.path.join(NOCRT_DIR, n + '.def'), os.path.join(libdir, n + '.lib')) for n in ('ucrtbase_min', 'ntdll_min')]
     argv = [LLD_LINK, '/dll', '/noentry', '/nodefaultlib', '/machine:x64', '/out:' + dll, '@' + rsp] + libs
@@ -323,6 +329,9 @@ def game_import_lib(objdir):
 def compile_host(job):
     src, obj = job
     flags = CXX_FLAGS if src.endswith('.cpp') else HOST_FLAGS
+    ver = os.environ.get('RECOMP_VERSION', '')       # scripts/make_release.py: boot.c ssbu_version()
+    if src.endswith('boot.c') and re.fullmatch(r'[0-9A-Za-z.+-]{1,40}', ver):
+        flags = flags + ['-DSSBU_VERSION="%s"' % ver]
     r = subprocess.run([CLANG, '-c'] + flags + [src, '-o', obj], capture_output=True, text=True)
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 

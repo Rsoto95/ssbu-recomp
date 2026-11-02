@@ -1,12 +1,25 @@
 # Contributing
 
-Thanks for wanting to help. This project is a static recompilation of *Super Smash Bros. Ultimate* 13.0.4 / 13.0.5 to
+Thanks for wanting to help. This project is a static recompilation of *Super Smash Bros. Ultimate* 13.0.5 to
 a native PC program: the tools that translate the game, the runtime that replaces the console, and the
 tooling that turns fighter code back into editable source. It is early, it moves fast, and there is a lot
 that one person cannot test alone.
 
 Please read the three rules below before anything else. They are not style preferences; a contribution that
 breaks one of them cannot be merged, however good the code is.
+
+## Game version: 13.0.5
+
+This fork plays and tests **game version 13.0.5 (update v2031616) only**. 13.0.4 is no longer played or tested here.
+
+- A pull request must work on 13.0.5 and must have been **tested on 13.0.5**. Say in the PR what you ran on 13.0.5.
+- A change that works only on 13.0.4 ("13.0.4 only", "on 13.0.5 it does nothing") is not accepted.
+- Game addresses are still written as their 13.0.4 values and passed through `GA()`: that is how the runtime is organised.
+  Every **code** address you add (a function, a call site, a return address) needs its 13.0.5 counterpart in
+  `g_code_13_0_5` in `runtime/hostrt.c`, kept sorted, with a comment saying what it is and how it was matched (same size,
+  every word equal with PC-relative fields masked). Without it the game stops on 13.0.5 the first time the address is used.
+  Data addresses need nothing: `GA()` moves them by the page.
+- `hook_install()` takes the running build's address: pass `GA(addr)`, not the 13.0.4 value.
 
 ## The three rules
 
@@ -78,7 +91,7 @@ is being rewritten.
 
 ## Building
 
-See [BUILDING.md](BUILDING.md). You need your own dump of version 13.0.4 or 13.0.5; the build takes about 45 minutes
+See [BUILDING.md](BUILDING.md). You need your own dump of version 13.0.5; the build takes about 45 minutes
 the first time and generates several gigabytes of files that git ignores.
 
 ## Reporting a problem

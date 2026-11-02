@@ -66,7 +66,8 @@ static Dev g_dev[MAXDEV];
 static struct { char guid[40]; int slot; } g_mem[32];
 static int g_mem_n;
 static int g_kb_slot = -3;                  /* resolved lazily */
-static ULONGLONG g_init_ms;
+static int g_kb_shared;                     /* "auto": the keyboard plays on the first player together with its pad (assign_slot does not keep the slot free) */
+#define KB_KEPT(p) ((p) == g_kb_slot && !g_kb_shared)
 static LARGE_INTEGER g_qpf, g_last_poll;
 static ULONGLONG g_last_cfg_check;
 
@@ -160,8 +161,8 @@ static const char *const g_default_ini =
 "player1 = auto\r\nplayer2 = auto\r\nplayer3 = auto\r\nplayer4 = auto\r\nplayer5 = auto\r\nplayer6 = auto\r\nplayer7 = auto\r\nplayer8 = auto\r\n"
 "\r\n"
 "[keyboard]\r\n"
-"; auto = the first free player slot after the pads found at start (so a machine with one pad has pad = player 1, keyboard = player 2,\r\n"
-"; and without any pad the keyboard is player 1); 1..8 = that player (merged with the pad of that player); none = no keyboard.\r\n"
+"; auto = player 1, together with the pad of player 1 (either one plays it, whenever the pad connects; for a second player on the\r\n"
+"; keyboard choose 2); 1..8 = that player (the pads leave that slot to the keyboard); none = no keyboard.\r\n"
 "; The environment variable SSBU_KEYBOARD_PLAYER (0 = none, 1..8) overrides this line. The keyboard counts only while the game window has the focus.\r\n"
 "player = auto\r\n"
 "; Keys: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT F1..F12, NUM0..NUM9, or 0x<virtual key code>; none = unbound.\r\n"
@@ -398,13 +399,13 @@ static int assign_slot(const Dev *d) {
     for (int p = 0; p < 8; p++) if (g_cfg.pguid[p][0] && !_stricmp(g_cfg.pguid[p], d->guid) && !slot_taken(p)) return p;
     for (int i = 0; i < g_mem_n; i++) {
         int p = g_mem[i].slot;
-        if (!_stricmp(g_mem[i].guid, d->guid) && !slot_taken(p) && slot_usable(p, d->guid) && p != g_kb_slot) return p;
+        if (!_stricmp(g_mem[i].guid, d->guid) && !slot_taken(p) && slot_usable(p, d->guid) && !KB_KEPT(p)) return p;
     }
     if (d->gca) {      /* adapter port N is player N when that slot is free */
         int p = gca_port_from_name(d->name);
-        if (p >= 0 && !slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != g_kb_slot) return p;
+        if (p >= 0 && !slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && !KB_KEPT(p)) return p;
     }
-    for (int p = 0; p < 8; p++) if (!slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != g_kb_slot) return p;
+    for (int p = 0; p < 8; p++) if (!slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && !KB_KEPT(p)) return p;
     return -1;
 }
 static void remember(const char *guid, int slot) {
@@ -508,7 +509,6 @@ int nnpad_init(void) {
     lock();
     if (g_inited) { unlock(); return g_sdl_ok; }
     g_inited = 1;
-    g_init_ms = GetTickCount64();
     QueryPerformanceFrequency(&g_qpf);
     cfg_load(1);
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");     /* the game's own focus rule decides (nnhid.c devices_live) */
@@ -767,21 +767,18 @@ void nnpad_rumble(int player, float low, float high) {
 static int env_kb(void) { const char *k = getenv("SSBU_KEYBOARD_PLAYER"); return k && k[0] ? atoi(k) : -1; }   /* -1 unset; 0 none; 1..8 */
 int nnpad_keyboard_player(void) {
     int r;
-    if (g_kb_slot == -3 && g_sdl_ok && !getenv("SSBU_SEQ") && !getenv("SSBU_PLAY") && !getenv("SSBU_SCRIPT") && !getenv("SSBU_PRESS") && env_kb() < 0 && g_cfg.kb_player == -2) {
-        /* pads on Windows can show up a moment after SDL starts: give them up to 1.5 s before the keyboard takes a slot */
-        ULONGLONG el = GetTickCount64() - g_init_ms;
-        if (el < 1500) Sleep((DWORD)(1500 - el));
-        nnpad_poll(1);
-    }
     lock();
     if (g_kb_slot == -3) {
         int e = env_kb();
+        g_kb_shared = 0;
         if (e >= 0) g_kb_slot = e == 0 ? -1 : e <= 8 ? e - 1 : -1;
         else if (g_cfg.kb_player == -1) g_kb_slot = -1;
         else if (g_cfg.kb_player >= 0) g_kb_slot = g_cfg.kb_player;
-        else {
+        else {      /* auto: the first player, together with whatever pad is or becomes that player (a pad turned on late, a
+                     * wireless one still waking up, no pad at all: player 1 is played either way) */
             g_kb_slot = -1;
-            for (int p = 0; p < 8 && g_kb_slot < 0; p++) if (!slot_taken(p) && slot_usable(p, "") && !g_cfg.pguid[p][0]) g_kb_slot = p;
+            for (int p = 0; p < 8 && g_kb_slot < 0; p++) if (slot_usable(p, "") && !g_cfg.pguid[p][0]) g_kb_slot = p;
+            g_kb_shared = g_kb_slot >= 0;
         }
         if (g_kb_slot >= 0) say("nn::pad: keyboard = player %d\n", g_kb_slot + 1); else say("nn::pad: keyboard = nobody\n");
     }
@@ -1356,6 +1353,20 @@ int nnpad_selftest(const NnHidHooks *h) {
     for (int i = 0; i < 8; i++) { if (id[i] && js[i]) { SDL_CloseJoystick(js[i]); SDL_DetachVirtualJoystick(id[i]); } }
     settle();
     check(h->style(0) == 0 && h->style(7) == 0, "all pads detached: no player present");
+
+    /* ---- keyboard "auto" resolved with no pad: player 1; a pad that connects later is player 1 as well */
+    {
+        Sleep(1100); write_text(path, "[keyboard]\r\nplayer = auto\r\n"); Sleep(1100); nnpad_poll(1);
+        _putenv_s("SSBU_KEYBOARD_PLAYER", "");
+        lock(); g_kb_slot = -3; unlock();
+        int kb = nnpad_keyboard_player();
+        id[0] = vj_make(13, 0x700, 1, 0); settle(); js[0] = SDL_OpenJoystick(id[0]);      /* a pad not seen before: no old slot to return to */
+        lock(); Dev *d = dev_of(0); int pad1 = d && d->id == id[0]; unlock();
+        check(kb == 0 && pad1 && nnpad_keyboard_player() == 0, "keyboard auto with no pad: player 1; a pad that connects later is player 1 too (both play it)");
+        SDL_CloseJoystick(js[0]); SDL_DetachVirtualJoystick(id[0]); js[0] = NULL; id[0] = 0; settle();
+        lock(); g_kb_slot = -1; g_kb_shared = 0; unlock();
+        _putenv_s("SSBU_KEYBOARD_PLAYER", "0");
+    }
     h->test_mode(0);
     printf("pad self-test: %d passed, %d failed\n", g_t_pass, g_t_fail);
     printf("PAD SELFTEST %s (%d/%d)\n", g_t_fail ? "FAILED" : "PASSED", g_t_pass, g_t_pass + g_t_fail);
@@ -1405,8 +1416,9 @@ void nnpad_kb_player_set(int p) {                     /* -2 auto, -1 none, 0..7:
     g_cfg.kb_player = p < -2 ? -2 : p > 7 ? 7 : p;
     kb_write();
     if (g_kb_slot != -3 && !getenv("SSBU_KEYBOARD_PLAYER")) {
+        g_kb_shared = 0;
         if (g_cfg.kb_player >= -1) g_kb_slot = g_cfg.kb_player;
-        else { g_kb_slot = -1; for (int q = 0; q < 8 && g_kb_slot < 0; q++) if (!slot_taken(q) && slot_usable(q, "") && !g_cfg.pguid[q][0]) g_kb_slot = q; }
+        else { g_kb_slot = -1; for (int q = 0; q < 8 && g_kb_slot < 0; q++) if (slot_usable(q, "") && !g_cfg.pguid[q][0]) g_kb_slot = q; g_kb_shared = g_kb_slot >= 0; }
         say("nn::pad: keyboard = player %d (settings menu)\n", g_kb_slot + 1);
     }
     unlock();

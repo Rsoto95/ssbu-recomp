@@ -20,6 +20,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAY_NAME = 'SSBU native.lnk'
 INSTALL_NAME = 'SSBU native - Installer.lnk'
+LAUNCHER_NAME = 'SSBU native - Launcher.lnk'
 
 _PS = r"""
 $ErrorActionPreference = 'Stop'
@@ -58,10 +59,13 @@ def plan(repo=REPO):
             'desc': 'Super Smash Bros. Ultimate, native PC build', 'icon': icon}
     inst = {'name': INSTALL_NAME, 'target': os.path.join(repo, 'Install SSBU.bat'), 'cwd': repo,
             'desc': 'Install, repair or update SSBU native', 'icon': logo + ',0' if os.path.isfile(logo) else ''}
+    launch = {'name': LAUNCHER_NAME, 'target': os.path.join(repo, 'SSBU Launcher.bat'), 'cwd': repo,
+              'desc': 'Play, settings, setup guide and troubleshooting for SSBU native', 'icon': icon}
     over = [d for d in (os.environ.get('SSBU_SHORTCUT_DIRS') or '').split(os.pathsep) if d]
     if over:
-        return [dict(it, dir=d) for d in over for it in (play, inst)]
-    return [dict(play, dir='@desktop'), dict(play, dir='@programs'), dict(inst, dir='@programs')]
+        return [dict(it, dir=d) for d in over for it in (play, inst, launch)]
+    return [dict(play, dir='@desktop'), dict(play, dir='@programs'), dict(inst, dir='@programs'),
+            dict(launch, dir='@desktop'), dict(launch, dir='@programs')]
 
 
 def create_all(repo=REPO, dry=False):

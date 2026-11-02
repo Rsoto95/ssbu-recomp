@@ -578,6 +578,13 @@ function Find-Item($list, [string]$path) {
     foreach ($it in @($list)) { if ([string]$it.path -ieq $path) { return $it } }
     return $null
 }
+function Kind-ByName([string]$p) {   # the title id in the file name (find_inputs reads the package itself at the start)
+    $n = [IO.Path]::GetFileName($p)
+    if ($n -match '\[01006A800016E000\]') { return 'base' }
+    if ($n -match '\[01006A800016E800\]') { return 'update' }
+    if ($n -match '\[01006A800016F[0-9A-Fa-f]{3}\]') { return 'dlc' }
+    return ''
+}
 function Is-Dir([string]$p) { return ($p -and (Test-Path -LiteralPath $p -PathType Container -ErrorAction SilentlyContinue)) }
 function Is-File([string]$p) { return ($p -and (Test-Path -LiteralPath $p -PathType Leaf -ErrorAction SilentlyContinue)) }
 
@@ -603,7 +610,11 @@ function Update-FieldStatus {
         else { Set-FieldStatus 'base' 'This folder has no exefs\ and romfs\ inside: choose the game file instead, or the right folder.' $cFail }
     } elseif (Is-File $v) {
         $it = if ($fd) { Find-Item $fd.base $v } else { $null }
-        if ($it) {
+        if (-not $it -and (Kind-ByName $v) -eq 'update') {
+            Set-FieldStatus 'base' 'This is the UPDATE, not the base game. Here goes the base game: the file with [01006A800016E000] (about 14-17 GB).' $cFail
+        } elseif (-not $it -and (Kind-ByName $v) -eq 'dlc') {
+            Set-FieldStatus 'base' 'This is a DLC, not the base game. Here goes the base game: the file with [01006A800016E000] (about 14-17 GB).' $cFail
+        } elseif ($it) {
             $c = $(if ($it.supported -eq $false) { $cFail } else { $cOk })
             Set-FieldStatus 'base' (Strip-Desc $it) $c
         } else {
@@ -617,6 +628,7 @@ function Update-FieldStatus {
     elseif (Is-File $v) {
         $it = if ($fd) { Find-Item $fd.updates $v } else { $null }
         if ($it) { Set-FieldStatus 'update' (Strip-Desc $it) $(if ($it.supported -eq $false) { $cFail } else { $cOk }) }
+        elseif ((Kind-ByName $v) -eq 'base') { Set-FieldStatus 'update' 'This is the BASE game, not the update. Here goes the update 13.0.4 or 13.0.5: the file with [01006A800016E800] (about 3.7 GB).' $cFail }
         else { Set-FieldStatus 'update' 'File chosen (not checked yet; the installer reads it).' $cInfo }
     } else { Set-FieldStatus 'update' 'This file does not exist.' $cFail }
 

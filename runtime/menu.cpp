@@ -64,7 +64,8 @@ const char *nnpad_kb_label(int idx); void nnpad_vk_name(int vk, char *o, int n);
 int nnaoc_owned(const int **list);                                   /* nnmisc.c */
 long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c */
 const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
-int osk_active(void);                                                /* osk.c */
+const char *ssbu_version(void);                                      /* boot.c */
+int osk_active(void);                                               /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
@@ -116,6 +117,18 @@ extern "C" void menu_popup(const char *title, const char *text) {
     ReleaseSRWLockExclusive(&g_popup_lock);
 }
 static int popup_on(void) { return (ULONGLONG)g_popup_until > GetTickCount64(); }
+/* A short note at the bottom of the picture that goes by itself after ms (the screenshot key, nvn_vk_draw.c), any thread;
+ * its own slot, so it never replaces the online notice or popup above. Takes no input. */
+static SRWLOCK g_toast_lock = SRWLOCK_INIT;
+static char g_toast[256];
+static volatile LONG64 g_toast_until;
+extern "C" void menu_toast(const char *text, int ms) {
+    AcquireSRWLockExclusive(&g_toast_lock);
+    snprintf(g_toast, sizeof g_toast, "%s", text ? text : "");
+    InterlockedExchange64(&g_toast_until, (LONG64)GetTickCount64() + (ms > 0 ? ms : 3000));
+    ReleaseSRWLockExclusive(&g_toast_lock);
+}
+static int toast_on(void) { return (ULONGLONG)g_toast_until > GetTickCount64(); }
 /* net_stats.h: the default answer until the online code defines net_stats_get itself */
 extern "C" void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLINE; o->ping_ms = -1; }
 #ifdef _WIN32
@@ -344,7 +357,7 @@ static void utf8_cut(char *s, int max_bytes) {        /* at most max_bytes bytes
 
 /* ------------------------------------------------------------------ the settings */
 static const char *const k_window[] = {"windowed", "borderless", "fullscreen"};
-static const char *const k_vsync[] = {"clock", "on", "off", "mailbox", "display", "auto"};      /* GfxOptions.present */
+static const char *const k_vsync[] = {"clock", "on", "off", "mailbox", "display", "auto", "vrr"};      /* GfxOptions.present */
 static const char *const k_latency[] = {"normal", "low", "lowest"};
 static const char *const k_renderer[] = {"vulkan", "opengl"};
 static const int k_aniso_v[] = {0, 2, 4, 8, 16};
@@ -352,7 +365,7 @@ static const char *const k_aniso[] = {"game", "2", "4", "8", "16"};
 static const char *const k_profile[] = {"custom", "low"};
 static const char *const k_wait[] = {"hold", "skip"};
 static const char *const k_prepare[] = {"first_run", "background", "off"};
-static const char *const k_load[] = {"start", "loading"};
+static const char *const k_load[] = {"start", "loading", "background", "auto"};      /* GfxOptions.shader_load 0, 1, 2; 3 = shader_load_auto (2026-11-02) */
 static const char *const k_console[] = {"docked", "handheld"};
 static const char *const k_onoff[] = {"off", "on"};
 static const char *const k_lang[] = {"auto", "ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl", "ru"};
@@ -363,7 +376,7 @@ static const char *const k_size_name[] = {"1280 x 720", "1600 x 900", "1920 x 10
 #define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 struct Settings {
-    int window, size, vsync, latency, renderer, aniso, profile, wait, prepare, load, console, overlay, volume, runahead, lang, kb_player, stats;
+    int window, size, vsync, latency, renderer, aniso, profile, wait, prepare, load, console, overlay, volume, runahead, lang, kb_player, stats, unlock;
     float scale;
     char gpu[64];
 };
@@ -377,7 +390,7 @@ static void settings_init(int cw, int ch) {
     memset(&S, 0, sizeof S);
     S.window = o->window_mode; S.vsync = o->present >= 0 && o->present < N(k_vsync) ? o->present : 5; S.latency = gfx_latency(); S.renderer = o->renderer;
     S.aniso = 0; for (int i = 0; i < N(k_aniso_v); i++) if (k_aniso_v[i] == o->aniso) S.aniso = i;
-    S.profile = o->profile; S.wait = o->shader_skip; S.prepare = o->shader_prepare; S.load = o->shader_load; S.console = o->handheld; S.overlay = o->overlay;
+    S.profile = o->profile; S.wait = o->shader_skip; S.prepare = o->shader_prepare; S.load = o->shader_load_auto ? 3 : o->shader_load; S.console = o->handheld; S.overlay = o->overlay;
     S.volume = gfx_volume(); S.runahead = gfx_runahead(); S.scale = o->scale;
     snprintf(S.gpu, sizeof S.gpu, "%s", o->gpu[0] ? o->gpu : "auto");
     S.lang = idx_of(k_lang, N(k_lang), gfx_language()[0] ? gfx_language() : "auto");
@@ -385,13 +398,14 @@ static void settings_init(int cw, int ch) {
     S.size = -1; for (int i = 0; i < N(k_sizes); i++) if (k_sizes[i][0] == o->width && k_sizes[i][1] == o->height) S.size = i;
     S.kb_player = nnpad_kb_player_cfg();
     S.stats = gfx_stats_overlay();
+    S.unlock = gfx_unlock_all();
     S0 = S;
     (void)cw; (void)ch;
 }
 static void ini(const char *key, const char *value) { gfx_ini_set(key, value); }
 static int restart_pending(void) {
     return S.vsync != S0.vsync || S.latency != S0.latency || S.renderer != S0.renderer || S.aniso != S0.aniso || S.profile != S0.profile || S.wait != S0.wait ||
-           S.prepare != S0.prepare || S.load != S0.load || S.console != S0.console || S.runahead != S0.runahead || S.lang != S0.lang ||
+           S.prepare != S0.prepare || S.load != S0.load || S.console != S0.console || S.runahead != S0.runahead || S.lang != S0.lang || S.unlock != S0.unlock ||
            fabsf(S.scale - S0.scale) > 0.001f || strcmp(S.gpu, S0.gpu);
 }
 static void apply_stats(int on) {            /* live: the stats box (F2) */
@@ -476,8 +490,8 @@ static uint64_t g_pad_prev;
 static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
-enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_ARENA, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Online", "Arena", "Add-on content", "Language", "Log", "About"};
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_GAMEPLAY, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_ARENA, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Gameplay", "Experimental", "Online", "Arena", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -623,6 +637,10 @@ static void sec_graphics(void) {
     tag(1, S.prepare != S0.prepare);
     if (combo("Shader loading", &S.load, k_load, N(k_load))) ini("shader_load", k_load[S.load]);
     tag(1, S.load != S0.load);
+    {   const GfxOptions *go = gfx_options();      /* (2026-11-02) what auto chose, and why: the memory a 16 GB PC lacks */
+        if (go->shader_load_auto) ImGui::TextDisabled("auto: this PC has %d GB of RAM, so %s. loading uses ~4 GB less memory (16 GB PCs).", go->ram_gb, go->shader_load == 1 ? "loading" : "start");
+        else ImGui::TextDisabled("auto (recommended) = loading with 16 GB of RAM or less (~4 GB less memory), start with more");
+    }
     if (combo("Console mode", &S.console, k_console, N(k_console))) ini("console_mode", k_console[S.console]);
     tag(1, S.console != S0.console);
     bool ov = S.overlay != 0;
@@ -1173,6 +1191,55 @@ static int online_differs(void) {
 }
 
 
+/* Gameplay: the input delay of online fights (graphics.ini input_delay; net_session.c reads it at each match's handshake, both
+ * games take the larger of the two players' values) and every fighter and stage unlocked (unlock_all, unlock_all.c; read at start) */
+static void sec_gameplay(void) {
+    static int dl = -1;
+    if (dl < 0) dl = gfx_input_delay();
+    ImGui::Text("Input delay of online fights (frames)");
+    ImGui::SetWindowFontScale(1.2f);
+    for (int d = 1; d <= 7; d++) {
+        int v = d == 7 ? 0 : d;                     /* (the last one: auto) */
+        char l[16];
+        if (v) snprintf(l, sizeof l, "%d##dl%d", d, d); else snprintf(l, sizeof l, "Auto##dl%d", d);
+        if (d > 1) ImGui::SameLine();
+        if (ImGui::RadioButton(l, dl == v)) {
+            char t[8]; dl = v; gfx_set_input_delay(v); snprintf(t, sizeof t, "%d", v); ini("input_delay", v ? t : "auto");
+            printf("menu: input delay of online fights: %s\n", v ? t : "auto"); fflush(stdout);
+        }
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    tag(0, 0);
+    help("The time between pressing a button and your fighter moving, in online fights. 3 is the usual. Lower: quicker to respond, "
+         "but with a slow connection fighters jump around more. Higher: smoother, but slower to respond. "
+         "You and the other player do not need the same number: each match uses the larger of the two. Used from your next match.");
+    if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, e.g. \"Play SSBU (delay 4).bat\"): it wins over this setting. Start the game with \"Play SSBU.bat\" to use it.", getenv("SSBU_RB_NET_DELAY"));
+    ImGui::Separator();
+    static int fs = -1;
+    if (fs < 0) fs = gfx_fight_sound();
+    if (onoff("fsnd", fs != 0, true)) {
+        fs = !fs; gfx_set_fight_sound(fs); ini("fight_sound", k_onoff[fs]);
+        printf("menu: sound in online fights: %s (from the next match)\n", k_onoff[fs]); fflush(stdout);
+    }
+    ImGui::SameLine(); ImGui::Text("Sound in online fights (music and effects)");
+    help("OFF (recommended): online rollback fights are silent, and the smoothest. ON: you hear the music and the sound effects, "
+         "but the game may stutter a little and, rarely, crash. Only your game: the other player can choose differently. "
+         "Used from your next match. Music and effects volume apart: the game's own Options > Sound.");
+    ImGui::Separator();
+    if (onoff("unlock", S.unlock != 0, true)) { S.unlock = !S.unlock; ini("unlock_all", k_onoff[S.unlock]); printf("menu: unlock all fighters and stages: %s (at the next start)\n", k_onoff[S.unlock]); fflush(stdout); }
+    ImGui::SameLine(); ImGui::Text("Unlock all fighters and stages");
+    tag(1, S.unlock != S0.unlock);
+    help("ON: every fighter of the base game and every stage can be picked at once, and no \"Challenger approaching\" fights. "
+         "Your save is not changed: turn it OFF again and the game is as before. Downloadable (DLC) fighters appear when their files are installed (Add-on content). "
+         "Spirits, music and other rewards stay as in the game.");
+    if (getenv("SSBU_UNLOCK_ALL")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "SSBU_UNLOCK_ALL=%s is set for this run: it wins over this setting.", getenv("SSBU_UNLOCK_ALL"));
+    if (S.unlock != S0.unlock) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. Restart the game to apply it.");
+        if (ImGui::Button("Restart the game now##unlock")) restart_game();
+        ImGui::SameLine(); ImGui::TextDisabled("(progress not saved by the game is lost)");
+    }
+}
+
 static void sec_dlc(void) {
     const int *own = NULL;
     int n = nnaoc_owned(&own);
@@ -1448,41 +1515,71 @@ static void sec_arena(void) {
     NetStats ns;
     net_stats_get(&ns);
     if (ns.state != NET_CONNECTED) { help("Not connected to a lobby. Online play: F1 > Online (the arena needs a lobby: a lobby server or Same network)."); return; }
-    if (!a.known) { ImGui::TextDisabled("Asking the lobby..."); help("No answer after a few seconds: the lobby server is an older version without the arena (lobby 1.6 or newer)."); return; }
+    if (!a.known && !a.making) { ImGui::TextDisabled("Asking the lobby..."); help("No answer after a few seconds: the lobby is an older version without rooms. Everyone: close the game and open Play SSBU.bat (it updates by itself)."); return; }
     float bw = ImGui::GetFontSize() * 12;
+    const ImVec4 head(1.0f, 0.55f, 0.35f, 1.0f);
+    /* (room, 2026-10-30) the steps, always on top: the players must manage alone (owner) */
+    ImGui::TextColored(head, "How it works (take turns, the winner stays)");
+    ImGui::TextWrapped("1. One player presses Create a room below (the one with the best internet: their PC carries everyone's connection).");
+    ImGui::TextWrapped("2. Everyone else presses Join the queue.");
+    ImGui::TextWrapped("3. Close F1 (press F1), go to Smash, choose your fighter and press start.");
+    ImGui::TextWrapped("4. Wait on that screen: your match starts by itself when it is your turn.");
+    ImGui::TextWrapped("5. Win: you stay and play the next one. Lose: you go to the back. Either way, press start again at the character select.");
+    ImGui::TextWrapped("6. To stop playing: Leave the queue. Only the host can close the room or remove someone.");
+    ImGui::Separator();
+    if (a.making && !a.has_room) {
+        ImGui::SetWindowFontScale(1.3f); ImGui::TextColored(amber, "Making your room..."); ImGui::SetWindowFontScale(1.0f);
+        help("A few seconds: your PC becomes the connection of everyone in the room, and the other players' games move to it.");
+        return;
+    }
+    if (!a.has_room) {
+        ImGui::SetWindowFontScale(1.3f); ImGui::Text("No room is open."); ImGui::SetWindowFontScale(1.0f);
+        if (ImGui::Button("Create a room##arena", ImVec2(bw, 0))) net_arena_create();
+        help("You become its host: your PC carries everyone's connection, the room has your name, and you can close it or remove a player. Only one room at a time.");
+        return;
+    }
     ImGui::SetWindowFontScale(1.3f);
+    ImGui::TextColored(head, "%s's room", a.is_host ? "Your" : a.host);
     switch (a.in ? a.status : NET_ARENA_OUT) {
-    case NET_ARENA_WAITING: ImGui::TextColored(amber, a.place == 1 ? "You are next." : "In the queue: place %d.", a.place); break;
+    case NET_ARENA_WAITING: ImGui::TextColored(amber, a.place == 1 ? "YOU ARE NEXT." : "In the queue: place %d of %d.", a.place, a.room_players); break;
     case NET_ARENA_TURN: ImGui::TextColored(green, "YOUR TURN against %s!", a.opponent); break;
     case NET_ARENA_PLAYING: ImGui::TextColored(green, "Playing against %s.", a.opponent); break;
-    default: ImGui::Text("You are not in the arena."); break;
+    default: ImGui::Text("You are not in the queue."); break;
     }
     ImGui::SetWindowFontScale(1.0f);
-    if (a.in && a.status == NET_ARENA_TURN) help("Go to Smash (versus), choose your fighter and start: the game finds your opponent by itself (a box over the game shows it). Rollback on.");
-    else if (a.in && a.status == NET_ARENA_WAITING) help("Wait for your turn: a message appears over the game when it comes. Do not start a Smash (versus) match before it.");
+    if (a.in && a.status == NET_ARENA_TURN) help("Close F1, go to Smash, choose your fighter and press start (within 2 minutes): the match starts by itself.");
+    else if (a.in && a.status == NET_ARENA_WAITING) help("Close F1, go to Smash, choose your fighter and press start, then wait on that screen: your match starts by itself when your turn comes.");
     if (a.in && a.streak) ImGui::TextColored(gold, "%d win%s in a row", a.streak, a.streak == 1 ? "" : "s");
     if (!a.in) { if (ImGui::Button("Join the queue##arena", ImVec2(bw, 0))) net_arena_join(1); }
-    else if (ImGui::Button("Leave the arena##arena", ImVec2(bw, 0))) net_arena_join(0);
+    else if (ImGui::Button("Leave the queue##arena", ImVec2(bw, 0))) net_arena_join(0);
+    if (a.is_host) { ImGui::SameLine(); if (ImGui::Button("Close the room##arena", ImVec2(bw, 0))) net_arena_close(); }
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "Match");
+    ImGui::TextColored(head, "Match");
     if (a.has_match) {
         ImGui::Text("%s", a.match[0].name);
         if (a.match[0].streak) { ImGui::SameLine(); ImGui::TextColored(gold, "(%d)", a.match[0].streak); }
         ImGui::SameLine(); ImGui::TextDisabled("vs"); ImGui::SameLine(); ImGui::Text("%s", a.match[1].name);
         if (a.match[1].streak) { ImGui::SameLine(); ImGui::TextColored(gold, "(%d)", a.match[1].streak); }
         ImGui::SameLine(); ImGui::TextDisabled(a.match_state == NET_ARENA_PLAYING ? "  playing" : "  starting");
-    } else ImGui::TextDisabled("No match: two players in the queue are needed.");
+        if (a.is_host) for (int k = 0; k < 2; k++) {
+            ImGui::PushID(100 + k);
+            if (ImGui::SmallButton("Remove")) net_arena_kick(a.match[k].name);
+            ImGui::SameLine(); ImGui::TextDisabled("%s", a.match[k].name);
+            ImGui::PopID();
+        }
+    } else ImGui::TextDisabled("No match yet: two players in the queue are needed.");
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "Queue (%d)", a.nqueue);
+    ImGui::TextColored(head, "Queue (%d)", a.nqueue);
     for (int i = 0; i < a.nqueue; i++) {
         ImGui::Text("%2d. %s", i + 1, a.queue[i].name);
         if (a.queue[i].streak) { ImGui::SameLine(); ImGui::TextColored(gold, "(%d)", a.queue[i].streak); }
+        if (a.is_host) { ImGui::SameLine(); ImGui::PushID(i); if (ImGui::SmallButton("Remove")) net_arena_kick(a.queue[i].name); ImGui::PopID(); }
     }
     if (!a.nqueue) ImGui::TextDisabled("Nobody waiting.");
     ImGui::Separator();
     char rule[200];
     if (a.streak_limit) snprintf(rule, sizeof rule, "The winner stays and plays the next in the queue; after %d wins in a row the winner goes to the back of the queue too. The loser goes to the back.", a.streak_limit);
-    else snprintf(rule, sizeof rule, "The winner stays and plays the next in the queue; the loser goes to the back.");
+    else snprintf(rule, sizeof rule, "The winner stays and plays the next in the queue (no limit); the loser goes to the back.");
     help(rule);
 }
 
@@ -1563,7 +1660,7 @@ static void sec_about(void) {
 #else
     ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Linux");
 #endif
-    ImGui::Text("Runtime built %s %s (study tree)", __DATE__, __TIME__);
+    ImGui::Text("Version %s (runtime built %s %s)", ssbu_version(), __DATE__, __TIME__);
     ImGui::Text("Renderer: Vulkan on %s", nvn_vk_device_name());
     ImGui::Text("Settings menu: Dear ImGui %s (MIT licence, Omar Cornut and contributors)", ImGui::GetVersion());
     ImGui::Text("graphics.ini: %s", gfx_options()->path);
@@ -1594,6 +1691,68 @@ static void exit_game(void) {                              /* F1 -> Exit game: t
     CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(4000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
 }
+#ifdef _WIN32
+/* (fork, 2026-11-01) a newer version found while playing: "Play SSBU.bat" (run.py update_watch) asks GitHub every 10 minutes
+ * and writes SSBU_UPDATE_FLAG (the new commit's first 7 characters). Here: a message (again every 20 minutes) and, at the top
+ * of F1, "Update and restart": the launcher (SSBU_UPDATE_CMD) starts in a new window, waits for this game to close
+ * (SSBU_UPDATE_WAIT_PID), installs the update (auto_update) and opens the game again. Nothing without the variables (a git
+ * checkout, auto_update = off, a test run). */
+static char g_upd[16];
+static void update_check(void) {                           /* render thread, every frame: the file is read every 10 s */
+    static int on = -1; static ULONGLONG next_read, next_say;
+    if (on < 0) on = getenv("SSBU_UPDATE_FLAG") && getenv("SSBU_UPDATE_CMD");
+    if (!on) return;
+    ULONGLONG t = GetTickCount64();
+    if (!g_upd[0] && t >= next_read) {
+        next_read = t + 10000;
+        FILE *f = fopen(getenv("SSBU_UPDATE_FLAG"), "r");
+        if (f) {
+            char b[16] = "";
+            if (fgets(b, sizeof b, f)) b[strcspn(b, "\r\n")] = 0;
+            fclose(f);
+            snprintf(g_upd, sizeof g_upd, "%s", b[0] ? b : "new");
+            printf("menu: a new version of the game is ready (%s): F1 > Update and restart\n", g_upd); fflush(stdout);
+        }
+    }
+    if (g_upd[0] && t >= next_say) {
+        next_say = t + 20 * 60000;
+        menu_popup("New version", "A new version of the game is ready.\nPress F1 (or Home on the controller) and choose \"Update and restart\".\n"
+                   "The game closes, installs it (about a minute) and opens again by itself.");
+    }
+}
+static void update_and_restart(void) {
+    wchar_t pid[16], *cmd = _wcsdup(_wgetenv(L"SSBU_UPDATE_CMD") ? _wgetenv(L"SSBU_UPDATE_CMD") : L"");
+    const wchar_t *dir = _wgetenv(L"SSBU_UPDATE_DIR");
+    swprintf(pid, 16, L"%lu", GetCurrentProcessId());
+    SetEnvironmentVariableW(L"SSBU_UPDATE_WAIT_PID", pid);  /* (the new launcher waits for this game to close) */
+    STARTUPINFOW si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si); si.cb = sizeof si;
+    printf("menu: update and restart: %ls\n", cmd); fflush(stdout);
+    if (cmd[0] && CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, dir, &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        exit_game();
+    } else { printf("menu: update and restart FAILED (error %lu): close the game and open Play SSBU.bat\n", GetLastError()); fflush(stdout); }
+    free(cmd);
+}
+static void update_banner(void) {                          /* the top of every F1 section */
+    if (!g_upd[0]) return;
+    ImGui::TextColored(ImVec4(0.45f, 1.0f, 0.55f, 1.0f), "A new version of the game is ready.");
+    ImGui::SameLine();
+    if (ImGui::Button("Update and restart")) ImGui::OpenPopup("Update the game?");
+    if (ImGui::BeginPopupModal("Update the game?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("The game closes now. A window installs the new version (about a minute: do not close it),\n"
+                    "then the game opens again by itself. Finish your match first: it is not saved.");
+        if (ImGui::Button("Yes, update now")) { update_and_restart(); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Not now") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::Separator();
+}
+#else
+static void update_check(void) {}
+static void update_banner(void) {}
+#endif
 static void draw_menu(int cw, int ch) {
     if (ImGui::BeginMainMenuBar()) {
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "SSBU native");
@@ -1610,6 +1769,7 @@ static void draw_menu(int cw, int ch) {
     if (g_section_req >= 0) ImGui::SetNextWindowFocus();
     ImGui::Begin(title, NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
     g_section_req = -1;
+    update_banner();
     ImGui::BeginChild("body", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * (restart_pending() ? 2.2f : 1.2f)), ImGuiChildFlags_NavFlattened);
     ImGui::PushItemWidth(ImGui::GetFontSize() * 14);
     switch (g_section) {
@@ -1617,6 +1777,7 @@ static void draw_menu(int cw, int ch) {
     case SEC_GRAPHICS: sec_graphics(); break;
     case SEC_AUDIO: sec_audio(); break;
     case SEC_CONTROLS: sec_controls(); break;
+    case SEC_GAMEPLAY: sec_gameplay(); break;
     case SEC_EXPERIMENTAL: sec_experimental(); break;
     case SEC_ROOMS: sec_rooms(); break;
     case SEC_ARENA: sec_arena(); break;
@@ -1818,10 +1979,11 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
+    update_check();
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -1894,6 +2056,16 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
         if (!InterlockedExchange(&g_popup_drawn, 1)) { printf("menu: online popup drawn (presented frame %lld): %s: %s\n", g_frame, title, text); fflush(stdout); }
+    }
+    if (toast_on()) {                                    /* the short note (menu_toast), bottom centre */
+        char text[256];
+        AcquireSRWLockShared(&g_toast_lock); snprintf(text, sizeof text, "%s", g_toast); ReleaseSRWLockShared(&g_toast_lock);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.94f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.75f);
+        ImGui::Begin("##toast", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextUnformatted(text);
+        ImGui::End();
     }
     if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();

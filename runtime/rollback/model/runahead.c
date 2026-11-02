@@ -163,6 +163,16 @@ void ra_hold_restore(void) {
                     { static int said_a; if (said_a++ < 200) LOG("r1: hold for a load: sound thread %s taken at ANOTHER wait after %.1f ms: saved at %s @%llx, now %s @%llx (loads like this so far: %lld)\n", t->name ? t->name : "?",
                         now_ms() - t0, t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, g_guest_threads.audio_other); }
                     break; } }
+            /* (2026-10-30) the same for the game's network threads (NetSystem, Pia...): at a load in a room's match NetSystem was
+             * blocked on a mutex a held thread owns, saved at another wait (SleepThread), and never came back: 9 loads of a
+             * match waited the whole 500 ms, 1-3 s freezes for both players (testers' logs, the third match). Taken as it is
+             * after 5 ms, which the 500 ms limit did anyway. SSBU_RB_NET_THREAD_WAIT=0: the old way. */
+            {   static int nw = -1; if (nw < 0) { const char *e = getenv("SSBU_RB_NET_THREAD_WAIT"); nw = !(e && e[0] == '0'); }
+                if (nw && t->name && (strstr(t->name, "NetSystem") || strstr(t->name, "Pia")) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) {
+                    t->held = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; g_guest_threads.mismatch++;
+                    { static int said_n; if (said_n++ < 50) LOG("r1: hold for a load: network thread %s taken at ANOTHER wait after %.1f ms: saved at %s @%llx, now %s @%llx\n", t->name,
+                        now_ms() - t0, t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from); }
+                    break; } }
             if (now_ms() - t0 > 500) { t->held = 1; g_guest_threads.mismatch++; if (!(waiting_import(t->c->in_import) && th_blocked(t->h))) g_guest_threads.running++;
                 static int said; if (said++ < 20) LOG("r1: hold for a load: thread %s not back at its wait after 500 ms: held at %s @%llx then, now %s @%llx, blocked %d\n", t->name ? t->name : "?",
                     t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, th_blocked(t->h));

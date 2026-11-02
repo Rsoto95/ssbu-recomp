@@ -25,6 +25,20 @@ static int g_gfx_stats;                              /* U1: stats_overlay = off 
 int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
 int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
 const char *gfx_language(void) { gfx_options(); return g_gfx_language; }
+static int g_gfx_unlock_all;                         /* unlock_all = off | on (unlock_all.c) */
+int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
+static volatile int g_gfx_input_delay = 3;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
+int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
+void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
+static volatile int g_gfx_fight_sound;                /* fight_sound = off | on (snapshot_ring.c); the F1 menu changes it while running */
+int gfx_fight_sound(void) { gfx_options(); return g_gfx_fight_sound; }
+void gfx_set_fight_sound(int on) { gfx_options(); g_gfx_fight_sound = on; }
+static int g_gfx_sharpening;                         /* sharpening = 0 .. 100 */
+int gfx_sharpening(void) { gfx_options(); return g_gfx_sharpening; }
+static char g_gfx_shot_dir[400];                     /* screenshot_dir = a folder (UTF-8) | empty: <install>\screenshots */
+const char *gfx_screenshot_dir(void) { gfx_options(); return g_gfx_shot_dir; }
+static int g_gfx_shot_key = 0x7b;                    /* screenshot_key = F12 (VK_F12) by default; F1..F24, off = 0 */
+int gfx_screenshot_key(void) { gfx_options(); return g_gfx_shot_key; }
 
 static const char *const k_default_ini =
 "; graphics.ini: display and rendering options of the native build (read once at start by gfx_options.c).\r\n"
@@ -45,7 +59,11 @@ static const char *const k_default_ini =
 "width = 1280\r\n"
 "height = 720\r\n"
 "\r\n"
-"; vsync = auto | display | clock | off | on | mailbox      (Vulkan)\r\n"
+"; vsync = auto | display | clock | off | on | mailbox | vrr      (Vulkan)\r\n"
+";   vrr:     for a G-Sync / FreeSync (variable refresh rate) monitor: the program's own 60.000 Hz clock and immediate\r\n"
+";            presentation, so the monitor refreshes when each frame arrives: every frame on screen equally long at any\r\n"
+";            maximum refresh rate (100, 144, 165 Hz ...). Turn variable refresh on in the GPU's control panel; most\r\n"
+";            drivers apply it only to a fullscreen or borderless window. Without it: as 'off'.\r\n"
 ";   auto:    the refresh rate of the monitor is measured at start. 60, 120, 240 Hz (within 1.1 %: 59.94, 119.88 too):\r\n"
 ";            as 'display'. Any other rate (75, 100, 144, 165 Hz): as 'clock'. The log says which ('display:' lines).\r\n"
 ";   display: the game's frame clock IS the display's refresh (every refresh at 60 Hz, every second one at 120 Hz):\r\n"
@@ -112,11 +130,14 @@ static const char *const k_default_ini =
 ";   off:        nothing is prepared ahead; shaders are built when the game first needs them.\r\n"
 "shader_prepare = first_run\r\n"
 "\r\n"
-"; shader_load = start | loading      (Vulkan, on a PC where the preparation above is done)\r\n"
+"; shader_load = auto | start | background | loading      (Vulkan, on a PC where the preparation above is done)\r\n"
+";   auto:    loading on a PC with 16 GB of RAM or less, start on a PC with more (the log says which and why).\r\n"
 ";   start:   every shader of the game is loaded into memory at the start, behind a 'LOADING SHADERS NN %' screen (a few\r\n"
 ";            seconds, more on a CPU with few cores): the loading screens before a fight do no shader work. Uses more memory.\r\n"
+";   background: the same loading, but the game starts at once: intro, title and menus run while it finishes (the\r\n"
+";            menus may be a little less smooth meanwhile; a fight's loading screen waits for what is left).\r\n"
 ";   loading: as before: the shaders of a fighter or stage are loaded at its loading screen (less memory).\r\n"
-"shader_load = start\r\n"
+"shader_load = auto\r\n"
 "\r\n"
 "; profile = custom | low\r\n"
 ";   custom: every key of this file as written. low: the set measured for a weak or integrated GPU (2026-10-12, Intel\r\n"
@@ -147,7 +168,39 @@ static const char *const k_default_ini =
 "\r\n"
 "; language = auto | ja | en-US | en-GB | fr | fr-CA | de | it | es | es-419 | zh-Hans | zh-Hant | ko | nl | ru\r\n"
 ";   auto: the Windows display language. SSBU_LANGUAGE=<code> wins. Read at start.\r\n"
-"language = auto\r\n";
+"language = auto\r\n"
+"\r\n"
+"; unlock_all = off | on\r\n"
+";   on: every fighter of the base roster and every stage is available at once, for going straight to competitive\r\n"
+";   play, and no challenger fights interrupt. Nothing is written into the save; off again = as before. Downloadable\r\n"
+";   fighters are not touched (owning them unlocks them). Spirits, music and other rewards stay as in the game.\r\n"
+";   13.0.4 and 13.0.5. SSBU_UNLOCK_ALL=1 / 0 wins. Read at start.\r\n"
+"unlock_all = off\r\n"
+"\r\n"
+"; input_delay = 1 .. 8 | auto\r\n"
+";   The input delay of online rollback fights, in frames (F1 > Gameplay). Both games of a match use the larger of the\r\n"
+";   two players' values. auto: from the measured round trip. SSBU_RB_NET_DELAY=<n> wins.\r\n"
+"input_delay = 3\r\n"
+"\r\n"
+"; fight_sound = off | on\r\n"
+";   Music and sound effects in online rollback fights (F1 > Gameplay). off: silent fights, the smoothest (the game's\r\n"
+";   audio threads are held for the fight). on: the sound plays, but the game may stutter and, rarely, crash. Only this\r\n"
+";   game. Used from the next match.\r\n"
+"fight_sound = off\r\n"
+"\r\n"
+"; sharpening = 0 .. 100      (Vulkan)\r\n"
+";   0 = off. Sharpens the picture on its way to the window, without halos (kept inside each pixel's neighbours).\r\n"
+";   Try 30 to 50. Costs one small GPU pass per frame. Read at start.\r\n"
+"sharpening = 0\r\n"
+"\r\n"
+"; screenshot_key = F12 | F1 .. F24 | off\r\n"
+";   One press while the game window has the focus saves the picture as a PNG in the screenshots folder next to saves.\r\n"
+";   Avoid F1 (menu), F2 (stats) and F11 (fullscreen). Read at start.\r\n"
+"screenshot_key = F12\r\n"
+"\r\n"
+"; screenshot_dir = <a folder> | empty\r\n"
+";   Where the screenshot key saves its pictures. Empty: the screenshots folder next to saves. Made when missing.\r\n"
+"screenshot_dir =\r\n";
 
 #define GFX_LOW_SCALE 0.5f
 #define GFX_LOW_SCALE_TEXT "0.50"
@@ -178,13 +231,61 @@ static void opt_path(char *out) {
     snprintf(tmp, sizeof tmp, "%s\\..\\config\\graphics.ini", exe);
     if (!_fullpath(out, tmp, MAX_PATH)) snprintf(out, MAX_PATH, "%s", tmp);
 }
+/* (2026-11-02) a graphics.ini written before shader_load = auto existed: its comment header lists "start | background |
+ * loading" and the template wrote "shader_load = start", which nearly every player kept. On a PC with 16 GB of RAM that
+ * start (~4 GB more: every shader of the game in memory) plus the rollback's state went to the page file (the owner's
+ * tests Test_F/G_mem: 12.0 GB in RAM in a fight with start, 8.7 GB with loading). Once per file: the header is replaced by
+ * the new one, and shader_load = start becomes auto; any other value (a player's own choice) stays. The new header is the
+ * mark that this was done: a later "start" chosen in the F1 menu stays start. */
+static void ini_migrate_shader_load(const char *path) {
+    static const char old_hdr[] = "; shader_load = start |";      /* both older headers: "start | loading" (2026-10-16) and "start | background | loading" */
+    static const char new_hdr[] = "; shader_load = auto | start | background | loading      (Vulkan, on a PC where the preparation above is done)\r\n"
+                                  ";   auto:    loading on a PC with 16 GB of RAM or less, start on a PC with more (the log says which and why).\r\n";
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *old = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (old) { n = (long)fread(old, 1, (size_t)n, f); old[n] = 0; }
+    fclose(f);
+    if (!old || !strstr(old, old_hdr)) { free(old); return; }
+    char *out = malloc((size_t)n + sizeof new_hdr + 64);
+    if (!out) { free(old); return; }
+    size_t o2 = 0; int hdr = 0, val = 0;
+    for (char *p = old; *p; ) {
+        char *e = strchr(p, '\n');
+        size_t l = e ? (size_t)(e - p) + 1 : strlen(p);
+        char line[512]; size_t ll = l < sizeof line - 1 ? l : sizeof line - 1;
+        memcpy(line, p, ll); line[ll] = 0; trim(line);
+        if (!hdr && !strncmp(line, old_hdr, sizeof old_hdr - 1)) { memcpy(out + o2, new_hdr, sizeof new_hdr - 1); o2 += sizeof new_hdr - 1; hdr = 1; }
+        else if (!val && line[0] != ';' && !_strnicmp(line, "shader_load", 11)) {
+            char *q = line + 11; while (*q == ' ' || *q == '\t') q++;
+            if (*q == '=') { q++; while (*q == ' ' || *q == '\t') q++; }
+            if (!_stricmp(q, "start")) { o2 += (size_t)sprintf(out + o2, "shader_load = auto\r\n"); val = 1; }
+            else { memcpy(out + o2, p, l); o2 += l; }
+        }
+        else { memcpy(out + o2, p, l); o2 += l; }
+        p += l;
+    }
+    char tmp[MAX_PATH + 8]; int ok = 0;
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if ((f = fopen(tmp, "wb")) != NULL) {
+        ok = fwrite(out, 1, o2, f) == o2;
+        ok = !fclose(f) && ok;
+        ok = ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    }
+    printf("graphics options: %s: the shader_load comment updated (new value auto)%s%s\n", path, val ? "; shader_load = start (the old default) became auto" : "; shader_load kept as written",
+           ok ? "" : " - could NOT be written: the file is read as it is");
+    free(old); free(out);
+}
 static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     (void)once; (void)arg; (void)ctx;
     GfxOptions *o = &g_opt;
     int written = 0, unknown = 0;
     memset(o, 0, sizeof *o);
     o->width = 1280; o->height = 720; o->scale = 1.0f; o->present = 5;      /* vsync = auto when the key is missing (track V session 14) */
+    o->shader_load_auto = 1;                                                  /* shader_load = auto when the key is missing (2026-11-02) */
     opt_path(o->path);
+    ini_migrate_shader_load(o->path);                                         /* (a file of an older version: once) */
     FILE *f = fopen(o->path, "rb");
     if (!f) {
         char b[MAX_PATH];
@@ -204,7 +305,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "window")) o->window_mode = !_stricmp(val, "borderless") ? 1 : !_stricmp(val, "fullscreen") ? 2 : 0;
         else if (!_stricmp(key, "width")) { int v = atoi(val); if (v >= 320 && v <= 16384) o->width = v; }
         else if (!_stricmp(key, "height")) { int v = atoi(val); if (v >= 180 && v <= 16384) o->height = v; }
-        else if (!_stricmp(key, "vsync")) o->present = !_stricmp(val, "on") ? 1 : !_stricmp(val, "off") ? 2 : !_stricmp(val, "mailbox") ? 3 : !_stricmp(val, "display") ? 4 : !_stricmp(val, "auto") ? 5 : 0;
+        else if (!_stricmp(key, "vsync")) o->present = !_stricmp(val, "on") ? 1 : !_stricmp(val, "off") ? 2 : !_stricmp(val, "mailbox") ? 3 : !_stricmp(val, "display") ? 4 : !_stricmp(val, "auto") ? 5 : !_stricmp(val, "vrr") ? 6 : 0;
         else if (!_stricmp(key, "gpu")) { if (_stricmp(val, "auto")) snprintf(o->gpu, sizeof o->gpu, "%s", val); }
         else if (!_stricmp(key, "console_mode")) o->handheld = !_stricmp(val, "handheld");
         else if (!_stricmp(key, "resolution_scale")) { float v = (float)atof(val); if (v > 0) o->scale = v; }
@@ -215,20 +316,37 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "runahead")) g_gfx_runahead = !_stricmp(val, "on") || !_stricmp(val, "1");      /* track R1 round 5 (r1_state.c) */
         else if (!_stricmp(key, "latency")) g_gfx_latency = !_stricmp(val, "lowest") ? 2 : !_stricmp(val, "low") ? 1 : 0;      /* track L1 (display.c latency_mode) */
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
-        else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
+        else if (!_stricmp(key, "shader_load")) { o->shader_load_auto = !_stricmp(val, "auto"); o->shader_load = !_stricmp(val, "loading") ? 1 : !_stricmp(val, "background") ? 2 : 0; }
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
         else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */
         else if (!_stricmp(key, "volume")) { g_gfx_volume = -1; if (_stricmp(val, "auto")) { int v = atoi(val); g_gfx_volume = v < 0 ? 0 : v > 100 ? 100 : v; } }
         else if (!_stricmp(key, "language")) { g_gfx_language[0] = 0; if (_stricmp(val, "auto")) snprintf(g_gfx_language, sizeof g_gfx_language, "%s", val); }
+        else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
+        else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
+        else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
+        else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
+        else if (!_stricmp(key, "screenshot_dir")) snprintf(g_gfx_shot_dir, sizeof g_gfx_shot_dir, "%s", val);      /* nvn_vk_draw.c */
+        else if (!_stricmp(key, "screenshot_key")) { int n = (val[0] == 'F' || val[0] == 'f') ? atoi(val + 1) : 0; g_gfx_shot_key = n >= 1 && n <= 24 ? 0x70 + n - 1 : 0; }      /* VK_F1 = 0x70 */
         else unknown++;
     }
     if (f) fclose(f);
+    {   /* shader_load = auto (2026-11-02): loading with 16 GB of RAM or less (a "16 GB" PC reports ~15.8 GB; under 20 GB counts),
+         * start with more. Measured on the owner's PC (Test_F/G_mem): in a rollback fight 12.0 GB in RAM with start, 8.7 GB with loading */
+        MEMORYSTATUSEX ms; memset(&ms, 0, sizeof ms); ms.dwLength = sizeof ms;
+        double gb = GlobalMemoryStatusEx(&ms) ? (double)ms.ullTotalPhys / 1073741824.0 : 0.0;
+        { const char *t = getenv("SSBU_TEST_RAM_GB"); if (t && atof(t) > 0) { gb = atof(t); printf("graphics options: SSBU_TEST_RAM_GB=%s: TEST, this PC's RAM taken as %.1f GB\n", t, gb); } }
+        o->ram_gb = (int)(gb + 0.5);
+        if (o->shader_load_auto) {
+            o->shader_load = gb > 0.0 && gb < 20.0 ? 1 : 0;
+            printf("graphics options: shader_load = auto: %s (this PC has %.1f GB of RAM; 16 GB or less: loading, which uses ~4 GB less memory)\n", o->shader_load ? "loading" : "start", gb);
+        }
+    }
     if (o->profile == 1) {       /* the low-end profile wins over the three keys it sets, wherever they stand in the file (values: O1_options.md, session 9) */
         o->scale = GFX_LOW_SCALE; o->aniso = 0; o->present = 0;
     }
     printf("graphics profile: %s\n", o->profile == 1 ? "low (weak or integrated GPU): resolution_scale=" GFX_LOW_SCALE_TEXT ", anisotropic_filtering=game, vsync=clock; these three keys of the file are not used"
                                                      : "custom (every key of graphics.ini as written; 'profile = low' is the set for a weak or integrated GPU)");
-    static const char *const k_win[3] = {"windowed", "borderless", "fullscreen"}, *const k_vs[6] = {"clock", "on", "off", "mailbox", "display", "auto"};
+    static const char *const k_win[3] = {"windowed", "borderless", "fullscreen"}, *const k_vs[7] = {"clock", "on", "off", "mailbox", "display", "auto", "vrr"};
     printf("graphics options: %s (%s): renderer=%s window=%s %dx%d vsync=%s gpu=%s console_mode=%s resolution_scale=%.2f anisotropic_filtering=%d frame_time_overlay=%s%s\n", o->path,
            written ? "written with the defaults" : f ? "read" : "NOT readable, defaults used", o->renderer ? "opengl" : "vulkan", k_win[o->window_mode], o->width, o->height, k_vs[o->present],
            o->gpu[0] ? o->gpu : "auto", o->handheld ? "handheld" : "docked", o->scale, o->aniso, o->overlay ? "on" : "off", unknown ? " (lines with an unknown key were ignored)" : "");

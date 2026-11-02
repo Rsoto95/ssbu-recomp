@@ -257,6 +257,10 @@ def main():
     cx.work = work
     setup.step_stage(cx)
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_'))}
+    # the version the game shows and compares with the lobby's (boot.c ssbu_version): the commit's UTC time, later = newer
+    ct = git('log', '-1', '--format=%ct')
+    when = time.strftime('%Y%m%d.%H%M', time.gmtime(int(ct))) if ct.isdigit() else 'local'
+    env['RECOMP_VERSION'] = '%s-%s%s' % (when, commit[:7] or 'local', '+dirty' if dirty else '')
     env.update(PYTHONIOENCODING='utf-8', RECOMP_CLANG=clang, SDL3_ROOT=tools['sdl3'], VULKAN_HEADERS=tools['vulkan'],
                GLSLANG_ROOT=tools['glslang'], SUYU_ROOT=tools['suyu'], RECOMP_EXE=EXE)
     env['IMGUI_ROOT'] = imgui or os.path.join(build, 'no-imgui')     # build.py would otherwise look beside the study tree

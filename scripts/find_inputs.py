@@ -209,6 +209,18 @@ def firmware_at(d):
     return None
 
 
+def user_folders():
+    """Downloads, Desktop, Documents: in the profile and in OneDrive (Windows moves Desktop and Documents there when backup is on)."""
+    bases = [os.path.expanduser('~')] + [v for v in (_env('OneDrive'), _env('OneDriveConsumer'), _env('OneDriveCommercial')) if v]
+    out = []
+    for b in bases:
+        for x in ('Downloads', 'Desktop', 'Documents'):
+            p = os.path.join(b, x)
+            if os.path.normcase(p) not in [os.path.normcase(q) for q in out]:
+                out.append(p)
+    return out
+
+
 def firmware_candidates(emus, extra_dirs):
     out = []
     for name, d in emus + portable_dirs(extra_dirs):
@@ -216,8 +228,7 @@ def firmware_candidates(emus, extra_dirs):
                     ('nand', 'system', 'contents', 'registered'), ('system', 'Contents', 'registered'),
                     ('sysdata', 'fonts'), ('fonts',)):
             out.append(os.path.join(d, *sub))
-    out += [os.path.join(os.path.expanduser('~'), 'Downloads'), os.path.join(os.path.expanduser('~'), 'Desktop'),
-            os.path.join(os.path.expanduser('~'), 'Documents')]
+    out += user_folders()
     out += list(extra_dirs)
     return out
 
@@ -236,8 +247,7 @@ def find_firmware(emus, extra_dirs):
         if it:
             add(it)
         # one level below the "obvious" folders: Downloads\Firmware.22.5.0, a firmware unzipped in a named folder
-        for sub in _listdir(d) if _isdir(d) and d in [os.path.join(os.path.expanduser('~'), x) for x in
-                                                      ('Downloads', 'Desktop', 'Documents')] + list(extra_dirs) else []:
+        for sub in _listdir(d) if _isdir(d) and d in user_folders() + list(extra_dirs) else []:
             p = os.path.join(d, sub)
             if _isdir(p) and (re.search(r'firmware|fw|sysdata|fonts', sub, re.I) or d in extra_dirs):
                 it = firmware_at(p)
@@ -499,8 +509,7 @@ def scan(extra=()):
     keys = find_keys(keys_dirs(emus + port))
     firmware = find_firmware(emus, extra_dirs)
 
-    home = os.path.expanduser('~')
-    roots = [os.path.join(home, x) for x in ('Downloads', 'Desktop', 'Documents')]
+    roots = user_folders()
     deep = game_dirs_from_configs(emus) + extra_dirs
     games, dumps = find_games(roots, deep)
     for p in extra_files:

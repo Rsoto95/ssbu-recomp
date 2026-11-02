@@ -9,10 +9,10 @@ One-click installer, Vulkan renderer, in-game settings, fighters as readable C++
 
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/RyZpx3u2t4)
 [![Website](https://img.shields.io/badge/website-denkishi.github.io-informational)](https://denkishi.github.io/opensmash-site/)
-[![Download](https://img.shields.io/badge/download-ZIP-brightgreen?logo=github)](https://github.com/Denkishi/ssbu-recomp/archive/refs/heads/main.zip)
+[![Download](https://img.shields.io/badge/download-ZIP-brightgreen?logo=github)](https://github.com/Rsoto95/ssbu-recomp/archive/refs/heads/main.zip)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-lightgrey)
-![Game versions](https://img.shields.io/badge/game-13.0.4%20%7C%2013.0.5-green)
+![Game version](https://img.shields.io/badge/game-13.0.5-green)
 
 ### [Install](#install-in-3-steps) &nbsp;|&nbsp; [Website](https://denkishi.github.io/opensmash-site/) &nbsp;|&nbsp; [Discord](https://discord.gg/RyZpx3u2t4)
 
@@ -21,14 +21,25 @@ One-click installer, Vulkan renderer, in-game settings, fighters as readable C++
 > The project is called **OpenSmash-Ultimate**. The repository is still named `Denkishi/ssbu-recomp`.
 
 > **This repository contains no game code, no game assets, no keys and no firmware.**
-> You need your own legally obtained copy of the game (13.0.4 or 13.0.5). Everything derived from it is generated on
+> You need your own legally obtained copy of the game, **version 13.0.5**. Everything derived from it is generated on
 > your PC, from your dump, and never leaves it. The only game-related text in the tree is names: a list of
 > system-library function names chosen for translation, and function names used by the tools.
+
+## Game version: 13.0.5 only
+
+**This fork plays and is tested on game version 13.0.5 (update v2031616) only.** Everyone in the group plays 13.0.5, and
+online play needs every player on the same version. 13.0.4 is no longer played or tested here.
+
+**Pull requests:** a change must work on 13.0.5 and be tested on 13.0.5 (say how in the PR). A change that works only on
+13.0.4, or that was tested only on 13.0.4, is not accepted. In the code, game addresses are still written as their 13.0.4
+values and passed through `GA()` (that is how the runtime is organised); every code address you add needs its 13.0.5
+counterpart in `g_code_13_0_5` in `runtime/hostrt.c`, or the game stops on 13.0.5 when it is used. Details:
+[CONTRIBUTING.md](CONTRIBUTING.md#game-version-1305).
 
 ## What is it?
 
 OpenSmash-Ultimate is a **native Windows port made by static recompilation** of *Super Smash Bros. Ultimate*
-(Nintendo Switch, version 13.0.4 or 13.0.5). The game's AArch64 machine code is translated to C ahead of time and
+(Nintendo Switch, version 13.0.5). The game's AArch64 machine code is translated to C ahead of time and
 compiled for your PC. There is no CPU interpreter and no JIT while you play. The console's system libraries, graphics
 API, audio, video, input and file system are re-implemented by this project's own runtime, and the picture is drawn
 with **Vulkan**.
@@ -55,7 +66,7 @@ We learned from many open-source projects (see [Credits](#credits)) and respect 
 
 You need **your own game dump and keys**. That is all: the installer fetches everything else.
 
-1. **Download** the game's ZIP: **[ssbu-recomp-main.zip](https://github.com/Denkishi/ssbu-recomp/archive/refs/heads/main.zip)** (the same as the green
+1. **Download** the game's ZIP: **[ssbu-recomp-main.zip](https://github.com/Rsoto95/ssbu-recomp/archive/refs/heads/main.zip)** (the same as the green
    *Code* button > *Download ZIP*), and unpack it, or `git clone` it. **Not** the files under *Releases*: those are build
    tools the installer downloads by itself.
 2. **Double-click `Install SSBU.bat`.** It sets up a private Python inside the folder (nothing is installed on your
@@ -202,7 +213,8 @@ Extensions (free, Microsoft Store) when they work, otherwise with FFmpeg, which 
 **Can I play online?** Experimental. The game's Local Wireless mode works over a LAN, a room code or a lobby server:
 [docs/ONLINE.md](docs/ONLINE.md). Rollback netcode is in progress and is not available yet.
 
-**Which game versions?** 13.0.4 and 13.0.5 ([docs/VERSIONS.md](docs/VERSIONS.md)).
+**Which game version?** 13.0.5 ([docs/VERSIONS.md](docs/VERSIONS.md)). The code can still run 13.0.4, but this fork
+no longer plays or tests it, and pull requests must target 13.0.5.
 
 **How do I use my own save file?** With the game closed: the game keeps its saves in `build\saves\save\` (or
 `<your install location>\saves\save\` if you chose one in the installer), as a `save_data` folder holding

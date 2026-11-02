@@ -53,6 +53,7 @@ typedef struct Obj {
     DWORD rw_owner;                          /* reader/writer locks: host thread holding the write lock, 0 = none */
     int rw_readers, rw_wcount, rw_wreads;    /* reader/writer locks: readers, write recursion, reads taken by the writer */
     volatile LONG switch_outs;               /* fibers: times it switched away (rollback/debug/call_trace.c job trace: a job that suspends in the middle) */
+    int fib_dead;                            /* fibers: finalized by the game while g_r1_keep_fibers kept its host fiber (os_r1_fibers_reap) */
 } Obj;
 
 #define BUCKETS 65536
@@ -800,10 +801,91 @@ static void CALLBACK fiber_main(void *arg) {
         SwitchToFiber(next ? obj(next)->fiber : thread_fiber());
     }
 }
+/* (2026-10-30) THE MEMORY THAT GREW WITH EVERY ONLINE MATCH (5-7 GB a match, 30 GB after three: two PCs, the per-match
+ * memory report of rollback_controller.c: ~5000 new allocations of ~1 MB each per match). With rollback on
+ * (g_r1_keep_fibers) a host fiber the game is done with is kept, because a ring load may bring its guest fiber back; but
+ * nothing ever freed one, and the game initialises the same FiberType objects again thousands of times a match, each time
+ * with a new host fiber (1 MB committed) over the kept one. Now such a host fiber goes to the graveyard (an Obj's own
+ * finalized one is marked fib_dead) and os_r1_fibers_reap deletes those that no Obj, no running thread and no state the
+ * ring still holds uses any more. */
+static SRWLOCK g_fib_lock = SRWLOCK_INIT;              /* fib_init / fib_finalize against os_r1_fibers_reap */
+static void **g_fib_grave; static size_t g_fib_ngrave, g_fib_cgrave;
+static void fib_grave_add(void *f) {                   /* g_fib_lock held */
+    if (!f) return;
+    if (g_fib_ngrave == g_fib_cgrave) { size_t nc = g_fib_cgrave ? g_fib_cgrave * 2 : 4096; void **n = realloc(g_fib_grave, nc * sizeof *n); if (!n) return; g_fib_grave = n; g_fib_cgrave = nc; }
+    g_fib_grave[g_fib_ngrave++] = f;
+}
+static void fib_delete_list(void **v) {               /* v[0] = count, v[1..]: host fibers; v freed */
+    for (size_t i = 1; i <= (size_t)(uintptr_t)v[0]; i++) DeleteFiber(v[i]);
+    free(v);
+}
+#ifdef _WIN32
+static VOID CALLBACK fib_delete_batch(PTP_CALLBACK_INSTANCE inst, PVOID arg) { (void)inst; fib_delete_list(arg); }      /* off the main thread: a DeleteFiber frees 256 MB of address space */
+#endif
+static int ptr_cmp(const void *a, const void *b) { uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b; return x < y ? -1 : x > y; }
+/* Deletes the kept host fibers nothing can use any more; in_use(fiber) says whether a state the ring holds names it (NULL:
+ * none can, the ring is empty). From the main thread at a safe point; if a guest thread is inside fib_init / fib_finalize
+ * right now, nothing is done this time. Returns how many were deleted. */
+int os_r1_fibers_reap(int (*in_use)(void *fiber)) {
+    if (!TryAcquireSRWLockExclusive(&g_fib_lock)) return 0;
+    size_t nlive = 0, clive = 256, ndel = 0, cdel = 256, ndead = 0;
+    uintptr_t *live = malloc(clive * sizeof *live);
+    void **del = malloc((cdel + 1) * sizeof *del);
+    if (!live || !del) { free(live); free(del); ReleaseSRWLockExclusive(&g_fib_lock); return 0; }
+    void *me = GetCurrentFiber();
+    for (int h = 0; h < BUCKETS; h++)                  /* the host fibers of the fibers the game still has */
+        for (Obj *o = g_table[h]; o; o = o->next) {
+            if (!o->fiber || o->fib_dead) continue;
+            if (nlive == clive) { uintptr_t *n = realloc(live, (clive *= 2) * sizeof *live); if (!n) { free(live); free(del); ReleaseSRWLockExclusive(&g_fib_lock); return 0; } live = n; }
+            live[nlive++] = (uintptr_t)o->fiber;
+        }
+    qsort(live, nlive, sizeof *live, ptr_cmp);
+    for (int h = 0; h < BUCKETS; h++)                  /* the finalized ones nothing uses */
+        for (Obj *o = g_table[h]; o; o = o->next) {
+            if (!o->fiber || !o->fib_dead || o->run_tid || o->fiber == me) continue;
+            uintptr_t k = (uintptr_t)o->fiber;
+            if (bsearch(&k, live, nlive, sizeof *live, ptr_cmp) || (in_use && in_use(o->fiber))) continue;
+            int dup = 0; for (size_t j = 1; j <= ndel && !dup; j++) dup = del[j] == o->fiber;      /* (two finalized objects, one host fiber: rare, few) */
+            if (dup) { o->fiber = NULL; o->fctx = NULL; o->fib_dead = 0; continue; }
+            if (ndel == cdel) { void **n = realloc(del, ((cdel *= 2) + 1) * sizeof *del); if (!n) continue; del = n; }
+            del[++ndel] = o->fiber; o->fiber = NULL; o->fctx = NULL; o->fib_dead = 0; ndead++;
+        }
+    qsort(del + 1, ndead, sizeof *del, ptr_cmp);       /* (the finalized ones, to find them in the graveyard too) */
+    qsort(g_fib_grave, g_fib_ngrave, sizeof *g_fib_grave, ptr_cmp);
+    size_t keep = 0;
+    for (size_t i = 0; i < g_fib_ngrave; i++) {
+        void *f = g_fib_grave[i];
+        uintptr_t k = (uintptr_t)f;
+        if (i && g_fib_grave[i - 1] == f) continue;     /* (the same host fiber noted twice: a ring load put it back, replaced again) */
+        if (bsearch(&k, live, nlive, sizeof *live, ptr_cmp)) continue;         /* an Obj has it again (a ring load put it back): the Obj's */
+        if (ndead && bsearch(&k, del + 1, ndead, sizeof *del, ptr_cmp)) continue;   /* deleted above as a finalized Obj's */
+        if (f == me || (in_use && in_use(f))) { g_fib_grave[keep++] = f; continue; }
+        if (ndel == cdel) { void **n = realloc(del, ((cdel *= 2) + 1) * sizeof *del); if (!n) { g_fib_grave[keep++] = f; continue; } del = n; }
+        del[++ndel] = f;
+    }
+    g_fib_ngrave = keep;
+    if (ndel) InterlockedIncrement(&g_fib_gen);
+    ReleaseSRWLockExclusive(&g_fib_lock);
+    free(live);
+    del[0] = (void *)(uintptr_t)ndel;
+    if (!ndel) free(del);
+#ifdef _WIN32
+    else if (!TrySubmitThreadpoolCallback(fib_delete_batch, del, NULL)) fib_delete_list(del);
+#else
+    else fib_delete_list(del);
+#endif
+    static long long total; total += (long long)ndel;
+    if (ndel) printf("nn::os: %zu kept host fibers deleted (%zu finalized, %zu replaced; %lld in all, %zu still kept)\n", ndel, ndead, ndel - ndead, total, keep);
+    return (int)ndel;
+}
 static void fib_init(Ctx *c) {                        /* (FiberType*, fn, arg, stack, stackSize, flags) */
     Obj *o = obj(A0);
+    AcquireSRWLockExclusive(&g_fib_lock);
+    if (g_r1_keep_fibers) fib_grave_add(o->fiber);    /* (a kept host fiber this one replaces) */
     o->fn = A1; o->arg = A2; o->stack = A3; o->stack_size = A4;
     o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o);
+    o->fib_dead = 0;
+    ReleaseSRWLockExclusive(&g_fib_lock);
     InterlockedIncrement(&g_fib_gen);
     if (g_r1_fiber_born) g_r1_fiber_born(o->fiber);
     if (g_r1_keep_fibers) { o->fctx = NULL; o->fls = NULL; o->fls_fiber = NULL; o->run_tid = 0; }      /* (R2) a new host fiber: no context, no block yet */
@@ -850,18 +932,29 @@ long long g_r1_fls_stale;                              /* (R2) notes of a block 
 void *os_r1_fiber_fls(uint64_t key) { Obj *o = obj_peek(key); if (!o) return NULL; if (o->fls && o->fls_fiber != o->fiber) { g_r1_fls_stale++; return NULL; } return o->fls; }
 void os_r1_fiber_put_fls(uint64_t key, void *fiber, void *fls) { Obj *o = obj_peek(key); if (o) { o->fls = fls; o->fls_fiber = fls ? fiber : NULL; } }      /* (R2) ring load: the note goes back with the host fiber */
 void os_r1_fiber_get(uint64_t key, uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; v[0] = (uint64_t)(uintptr_t)o->fiber; v[1] = (uint64_t)(uintptr_t)o->fctx; v[2] = o->fn; v[3] = o->arg; v[4] = o->stack; v[5] = o->stack_size; }
-void os_r1_fiber_put(uint64_t key, const uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; o->fiber = (void *)(uintptr_t)v[0]; o->fctx = (Ctx *)(uintptr_t)v[1]; o->fn = v[2]; o->arg = v[3]; o->stack = v[4]; o->stack_size = v[5]; InterlockedIncrement(&g_fib_gen); }
+static void fib_replaced(Obj *o, void *now) {          /* a ring load gives the Obj another host fiber: the one it had goes to the graveyard
+                                                        * (main thread, guest threads held at their waits: never inside fib_init; a busy lock: left kept) */
+    if (o->fiber && o->fiber != now && g_r1_keep_fibers && TryAcquireSRWLockExclusive(&g_fib_lock)) { fib_grave_add(o->fiber); ReleaseSRWLockExclusive(&g_fib_lock); }
+    o->fib_dead = 0;                                   /* (alive again in the loaded state) */
+}
+void os_r1_fiber_put(uint64_t key, const uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; fib_replaced(o, (void *)(uintptr_t)v[0]); o->fiber = (void *)(uintptr_t)v[0]; o->fctx = (Ctx *)(uintptr_t)v[1]; o->fn = v[2]; o->arg = v[3]; o->stack = v[4]; o->stack_size = v[5]; InterlockedIncrement(&g_fib_gen); }
 /* R1 restore: give a guest fiber back the host fiber it had at the save (kept alive by g_r1_keep_fibers), or a fresh one */
 void os_r1_fiber_set(uint64_t key, void *fiber, Ctx *fctx, int fresh) {
     Obj *o = obj_peek(key); if (!o) return;
-    if (fresh) { o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o); o->fctx = NULL; if (g_r1_fiber_born) g_r1_fiber_born(o->fiber); }
-    else { o->fiber = fiber; o->fctx = fctx; }
+    if (fresh) { fib_replaced(o, NULL); o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o); o->fctx = NULL; if (g_r1_fiber_born) g_r1_fiber_born(o->fiber); }
+    else { fib_replaced(o, fiber); o->fiber = fiber; o->fctx = fctx; }
     InterlockedIncrement(&g_fib_gen);
 }
 static void fib_current(Ctx *c) { RET(fiber_cur()); }
 int g_r1_keep_fibers;                                  /* R1 (r1_state.c, SSBU_R1 only): a finalized fiber's host fiber is kept, so a
                                                         * restore that brings the guest fiber back finds it (resumed, it starts over) */
-static void fib_finalize(Ctx *c) { Obj *o = obj(A0); if (o->fiber && !g_r1_keep_fibers) { DeleteFiber(o->fiber); o->fiber = NULL; InterlockedIncrement(&g_fib_gen); } }
+static void fib_finalize(Ctx *c) {
+    Obj *o = obj(A0);
+    AcquireSRWLockExclusive(&g_fib_lock);
+    if (o->fiber && !g_r1_keep_fibers) { DeleteFiber(o->fiber); o->fiber = NULL; InterlockedIncrement(&g_fib_gen); }
+    else if (o->fiber) o->fib_dead = 1;               /* kept for a ring load; os_r1_fibers_reap deletes it once nothing can use it */
+    ReleaseSRWLockExclusive(&g_fib_lock);
+}
 
 /* ---------------------------------------------------------------- reader/writer locks (nn::os::ReaderWriterLockType)
  * The plugins (smashline, stage_alts) only acquire / release / finalize: their locks are statically initialised (all zero

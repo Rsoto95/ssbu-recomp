@@ -45,13 +45,14 @@ void rgs_step(Ctx *c) {
             dm_audio_queue_report(on ? "fight start" : "fight over, before the audio threads are let go");
             if (!on && !rbg_on()) g_rgs_newfight = 1;     /* (the simulation: the next fight makes the ring's base again) */
             if (!on && g_rb_audio_off) {                  /* (the audio threads were held for the fight: its backlog is dropped while they still are) */
-                int rb_audio_wait_parked(double max_ms); void dm_audio_queue_drop(void);
-                if (rb_audio_wait_parked(50)) dm_audio_queue_drop(); else LOG("r1: AUDIO QUEUE: an audio thread still runs at the end of the fight: the backlog is left as it is\n");
+                int rb_audio_wait_parked(double max_ms); void dm_audio_queue_drop(void); void dm_audio_pump(Ctx *c, int force);
+                if (rb_audio_wait_parked(50)) { dm_audio_pump(c, 1); dm_audio_queue_drop(); }     /* (2026-10-29) the pump runs only when the queue is filling: what is left is emptied here */
+                else LOG("r1: AUDIO QUEUE: an audio thread still runs at the end of the fight: the backlog is left as it is\n");
             }
             was_on = on;
         }
-        if (on && g_rb_audio_off) { void dm_audio_pump(Ctx *c); dm_audio_pump(c); } }   /* (the audio threads are held: the main thread empties the sound engine's queue at every pass) */
-    if (g_ra_off || !ra_fight_on()) { void rb_audio_fight_over(void); ls_fight_over(); InterlockedExchange(&g_rb_audio_off, 0); rb_audio_fight_over(); if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on()) rbg_fight_off(); return; }   /* (R3: the report once at the end of each match; hs12: the session reset for the next match) */
+        if (on && g_rb_audio_off) { void dm_audio_pump(Ctx *c, int force); dm_audio_pump(c, 0); } }   /* (the audio threads are held: the main thread empties the sound engine's queue once it is filling) */
+    if (g_ra_off || !ra_fight_on()) { void rb_audio_fight_over(void); void nnaudio_gate(int on); nnaudio_gate(0); ls_fight_over(); InterlockedExchange(&g_rb_audio_off, 0); rb_audio_fight_over(); if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on()) rbg_fight_off(); { void rb_fibers_reap_tick(void); rb_fibers_reap_tick(); } return; }   /* (R3: the report once at the end of each match; hs12: the session reset for the next match) */
     if (rbg_on()) { rbg_step(c); g_rgs_pass_t0 = now_ms(); g_rgs_cyc0 = rgs_cyc_now(); g_ra_t_mark = g_rgs_pass_t0; return; }      /* R3: online rollback */
     long long i = g_rgs_next;                             /* the pass that ended here */
     if (g_rg_keep_on < 0) { const char *e = getenv("SSBU_RB_KEEP"); g_rg_keep_on = !e || atoi(e) != 0; }
@@ -99,6 +100,7 @@ void rgs_step(Ctx *c) {
         }
     }
     r1_ring_let_go();                                     /* (no load after a kept capture) */
+    { void rb_fibers_reap_tick(void); rb_fibers_reap_tick(); }      /* (2026-11-02) the simulation's fights reap the kept host fibers too (rollback_controller.c) */
     g_rgs_pass_t0 = now_ms(); g_ra_t_mark = g_rgs_pass_t0;
 }
 /* ---- logic-only re-run (R2_logic_only_study.md section 6): presentation-side callees of the main loop skipped in re-run passes

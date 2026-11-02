@@ -106,8 +106,8 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
 # The prebuilt runtime package of the GitHub Release of this version (scripts/make_release.py): (URL, SHA-256 of the zip).
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = ('https://github.com/Rsoto95/ssbu-recomp/releases/download/runtime-f4a5164/ssbu-runtime-f4a5164c82.zip',   # (fork: this fork's runtime)
-                   'fef8e5acda067add0eded99a9987e3ce4774d0f63c35ac74c06a90faf7de7a21')
+RUNTIME_RELEASE = ('https://github.com/Rsoto95/ssbu-recomp/releases/download/runtime-7a0a54a/ssbu-runtime-7a0a54af70.zip',
+                   'b4227498b0f541b2694963755b6b8496e94c7e01740042d9f66da26235edb285')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
 # expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
@@ -451,6 +451,15 @@ def step_inputs(cx):
             pick = (near or ups or [None])[0]
             if pick:
                 upd, why_u = pick['path'], 'game %s, the newest found%s' % (pick['build'], ' next to the base game' if near else '')
+        # the update (or a DLC) given as the base game, or the base as the update: unpacked, it only ends in an
+        # "incomplete data.arc" error much later (a tester, 2026-10-31)
+        for slot, v, want in (('Base game', base, 'base'), ('Update', upd, 'update')):
+            it = find_inputs.classify_game_file(v) if v and os.path.isfile(v) else None
+            if it and it['kind'] != want:
+                raise Stop('the %s file is %s, not the %s: %s' % (slot, {'base': 'the base game', 'update': 'the update',
+                           'dlc': 'a DLC'}[it['kind']], 'base game' if want == 'base' else 'update', v),
+                           'Base game: the file with [01006A800016E000] (about 14-17 GB). Update: the one with '
+                           '[01006A800016E800] (13.0.4 or 13.0.5, about 3.7 GB). Choose them again and start again.')
         keys = a.keys or best.get('prod_keys')
         for what, v in (('the base game (.xci / .nsp / .nsz)', base), ('the update 13.0.4 or 13.0.5', upd), ('prod.keys', keys)):
             if not v:

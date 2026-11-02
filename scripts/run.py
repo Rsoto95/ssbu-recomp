@@ -21,6 +21,7 @@ Options go to the game as environment variables (listed in BUILDING.md); --env N
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,12 +59,13 @@ def ini_get(path, key):
 
 
 # (fork Rsoto95/ssbu-recomp, 2026-10-28) "Play SSBU.bat" plays as the group plays, with nothing to set up: online play
-# through Roberto's lobby over the Radmin network (the game's Local Wireless rooms: 1-on-1 rooms play with rollback) with rollback on and
-# the settings the tests of 2026-10-28 used. In config\graphics.ini, rollback = off turns all of it off and group_lobby = off
-# keeps the rest but connects as F1 > Online says; an --env given to run.py wins over all of them.
-PLAY_LOBBY = '26.190.211.56:39500'
+# in the "same network" mode over the Radmin network (the first game started is the lobby by itself, no program to run;
+# the game's Local Wireless rooms: 1-on-1 rooms play with rollback) with rollback on and the settings the tests of
+# 2026-10-28 used. In config\graphics.ini, rollback = off turns all of it off and group_lobby = off keeps the rest but
+# connects as F1 > Online says; an --env given to run.py wins over all of them.
+PLAY_LOBBY = 'lan'
 PLAY_DEFAULTS = {
-    'SSBU_RB_NET_DELAY': '3',        # input delay in frames, the same on every PC
+    # (the input delay: graphics.ini input_delay, F1 > Gameplay, default 3; each match uses the larger of the two players')
     'SSBU_LATENCY': 'low',
     'SSBU_LS_X_WW': '1',             # the ring tracks the writes to the big extras ranges with GetWriteWatch
     'SSBU_RB_AUDIO_OFF': '1',        # the audio threads held in a fight (the main thread empties their queue: SSBU_RB_AUDIO_PUMP)
@@ -71,6 +73,212 @@ PLAY_DEFAULTS = {
     'SSBU_RB_SIM_LITE': '0',
     'SSBU_RB_NET_LASTLITE': '0',
 }
+
+
+def auto_update(gini):
+    """(fork, 2026-10-30) "Play SSBU.bat" brings the game up to date by itself: when GitHub's main branch has a newer commit
+    than the one update.py last installed (build\\update_manifest.json), the installer runs as its Resume does (update.py,
+    the new prebuilt runtime, the build steps that changed) and run.py starts again with the new code. True when it ran
+    (the caller starts run.py again). One API call of a few hundred ms when nothing is new; no internet or a GitHub error:
+    the installed game is played. Not in a git checkout (a developer's own copy: update.py by hand), not after a restart
+    (SSBU_PLAY_UPDATED), and graphics.ini auto_update = off turns it off. Play SSBU.bat itself is never changed by it while it
+    runs: cmd.exe reads a .bat at its byte offset, so a rewritten launcher would run broken lines."""
+    if os.environ.get('SSBU_PLAY_UPDATED') or ini_get(gini, 'auto_update') in ('off', '0', 'no', 'false'):
+        return False
+    if os.path.exists(os.path.join(REPO, '.git')):
+        return False
+    import update
+    have = (update.read_manifest() or {}).get('commit')
+    try:
+        want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.DEFAULT_BRANCH),
+                           'application/vnd.github.sha', timeout=8).decode().strip()
+    except Exception as e:                            # no internet, GitHub down or its rate limit: play what is installed
+        print('Update check skipped (%s): playing the installed version.' % e)
+        return False
+    # the code may be new already ("Update only" in the installer window runs update.py alone) while the prebuilt runtime
+    # it names was never downloaded and installed: install.py keeps the package in deps\ once it used it
+    pending = None
+    try:
+        with open(os.path.join(REPO, 'scripts', 'install.py'), encoding='utf-8') as f:
+            m = re.search(r"RUNTIME_RELEASE = \('([^']+)'", f.read())
+        if m and not os.path.isfile(os.path.join(REPO, 'deps', m.group(1).rsplit('/', 1)[-1])):
+            pending = m.group(1).rsplit('/', 1)[-1]
+    except OSError:
+        pass
+    if not re.fullmatch(r'[0-9a-f]{40}', want) or (want == have and not pending):
+        return False
+    print('=' * 78)
+    if want != have:
+        print('A new version of the game is on GitHub (%s): installing it before the game starts.' % want[:7])
+    else:
+        print('The new game program (%s) is not installed yet: installing it before the game starts.' % pending)
+    print('This usually takes under a minute (longer when the game itself has to be built again). Do not close this window.')
+    print('=' * 78, flush=True)
+    rc = subprocess.run([sys.executable, '-u', os.path.join(REPO, 'scripts', 'install.py'), '--no-gui', '--no-shortcuts'],
+                        cwd=REPO).returncode
+    if rc and runtime_only_update(os.path.join(os.path.dirname(os.path.dirname(gini)), 'work')):
+        print('\nUpdate installed (the game program only).\n')
+    elif rc:
+        print('\nThe update did not finish (code %d). The game starts anyway; "Install SSBU.bat" > Resume finishes it.\n' % rc)
+    else:
+        print('\nUpdate installed.\n')
+    return True
+
+
+def update_watch_wanted(gini):
+    """(fork, 2026-11-01) the same conditions as auto_update, minus the restart guard: a player's installed copy, not a git checkout."""
+    return not os.path.exists(os.path.join(REPO, '.git')) and ini_get(gini, 'auto_update') not in ('off', '0', 'no', 'false')
+
+
+def update_watch(flag):
+    """(fork, 2026-11-01) While the game runs: GitHub's main branch is asked every 10 minutes (one API call); a commit newer
+    than the installed one (build\\update_manifest.json) writes `flag` (its first 7 characters). The game reads that file
+    (menu.cpp update_check): a message, and F1 > "Update and restart", which starts this launcher again in a new window
+    (SSBU_UPDATE_CMD) and closes the game; auto_update then installs it before the game opens again."""
+    import threading
+    import update
+
+    def watch():
+        have = (update.read_manifest() or {}).get('commit')
+        while True:
+            time.sleep(600)
+            try:
+                want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.DEFAULT_BRANCH),
+                                   'application/vnd.github.sha', timeout=8).decode().strip()
+            except Exception:                         # no internet, GitHub down or its rate limit: next time
+                continue
+            if re.fullmatch(r'[0-9a-f]{40}', want) and want != have:
+                try:
+                    with open(flag, 'w') as f:
+                        f.write(want[:7])
+                    print('A new version of the game is on GitHub (%s): F1 > "Update and restart" installs it.' % want[:7], flush=True)
+                except OSError:
+                    pass
+                return
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def wait_for_old_game():
+    """(fork, 2026-11-01) started by the game's "Update and restart" (SSBU_UPDATE_WAIT_PID): the old game is let close before
+    the update replaces its files (at most 60 s)."""
+    pid = os.environ.pop('SSBU_UPDATE_WAIT_PID', '')
+    if os.name != 'nt' or not pid.isdigit():
+        return
+    import ctypes
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(0x00100000, False, int(pid))   # SYNCHRONIZE
+    if h:
+        print('Waiting for the game to close...', flush=True)
+        k.WaitForSingleObject(h, 60000)
+        k.CloseHandle(h)
+
+
+def runtime_only_update(work):
+    """(fork, 2026-10-30) The installer stopped (a tester's copy had no extracted dump left and the game files had moved: its
+    "Find your game files" step cannot pass), but a new prebuilt runtime changes only the exe and its DLLs, which need no
+    game files. The package install.py names is downloaded and checked (its SHA-256; it fits this copy of the project; its
+    game-data interface is the one of the game DLL built here, build\\work\\game_data.h) and its .exe / .dll files are copied
+    into build\\work, the old exe kept as ssbu_native_previous.exe. True when done; on any doubt False (nothing changed)."""
+    import hashlib
+    import zipfile
+    import setup
+    import update
+    try:
+        with open(os.path.join(REPO, 'scripts', 'install.py'), encoding='utf-8') as f:
+            m = re.search(r"RUNTIME_RELEASE = \('([^']+)',\s*'([0-9a-f]{64})'\)", f.read())
+        if not m or not os.path.isfile(os.path.join(work, 'ssbu_game_eh_o1.dll')):
+            return False
+        url, sha = m.group(1), m.group(2)
+        dst = os.path.join(REPO, 'deps', url.rsplit('/', 1)[-1])
+        if not (os.path.isfile(dst) and hashlib.sha256(open(dst, 'rb').read()).hexdigest() == sha):
+            print('Downloading the game program only: %s' % url, flush=True)
+            data = update.http(url, timeout=300)
+            if hashlib.sha256(data).hexdigest() != sha:
+                print('The download does not match its SHA-256: not used.')
+                return False
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst + '.part', 'wb') as f:
+                f.write(data)
+            os.replace(dst + '.part', dst)
+        man = setup.read_manifest(dst)
+        why = setup.runtime_mismatch(man) if man else 'not a runtime package'
+        if why:
+            print('The game program cannot be installed alone: %s' % why)
+            return False
+        with open(os.path.join(work, 'game_data.h'), encoding='utf-8', errors='replace') as f:
+            built = re.search(r'#define GAME_DATA_VERSION (\d+)', f.read())
+        if not built or int(built.group(1)) != man.get('game_data_version'):
+            print('The game program cannot be installed alone: the game here was built for another game-data interface '
+                  '(%s, the package %s): "Install SSBU.bat" > Resume is needed.' % (built.group(1) if built else '?', man.get('game_data_version')))
+            return False
+        files = {n: v for n, v in man['files'].items() if n.lower().endswith(('.exe', '.dll'))}
+        exe = os.path.join(work, 'ssbu_native.exe')
+        with zipfile.ZipFile(dst) as z:
+            for n, v in files.items():
+                data = z.read(n)
+                if hashlib.sha256(data).hexdigest() != v['sha256']:
+                    print('%s in the package does not match its manifest: not installed.' % n)
+                    return False
+            if os.path.isfile(exe):
+                shutil.copy2(exe, os.path.join(work, 'ssbu_native_previous.exe'))
+            for n in files:
+                with open(os.path.join(work, n + '.new'), 'wb') as f:
+                    f.write(z.read(n))
+                os.replace(os.path.join(work, n + '.new'), os.path.join(work, n))
+        print('Installed %s from %s (the previous exe is ssbu_native_previous.exe).' % (', '.join(sorted(files)), os.path.basename(dst)))
+        return True
+    except Exception as e:                            # a download, a locked file, a bad zip: the installed game is played
+        print('The game program could not be installed alone (%s).' % e)
+        return False
+
+
+def ensure_firewall(exe, build, gini):
+    """(fork, 2026-10-30) An inbound Windows Firewall rule for the game, made once with one administrator prompt. Without it
+    a friend's Windows drops the lobby's beacon and the other games' packets on the Radmin network (usually a Public network):
+    their game makes a lobby of its own, the others move to it, everything is relayed through that PC (ping 150 ms, ten
+    times the rollbacks; testers' logs 2026-10-29). The rule is named "SSBU native" like the one of "Instalar fix 60fps.bat";
+    a refused prompt is remembered in <build>\\firewall_refused.txt and not asked again (delete the file to be asked again).
+    graphics.ini firewall = off turns the check off."""
+    if ini_get(gini, 'firewall') in ('off', '0', 'no', 'false'):
+        return
+    refused = os.path.join(build, 'firewall_refused.txt')
+
+    def has_rule():
+        try:
+            out = subprocess.run(['netsh', 'advfirewall', 'firewall', 'show', 'rule', 'name=SSBU native', 'verbose'],
+                                 capture_output=True, timeout=15).stdout.decode('mbcs', 'replace')
+        except (OSError, subprocess.SubprocessError):
+            return None                               # netsh missing or stuck: nothing is asked
+        return os.path.normcase(exe) in os.path.normcase(out)
+
+    have = has_rule()
+    if have is None or have:
+        return
+    try:
+        with open(refused, encoding='utf-8') as f:
+            if os.path.normcase(f.read().strip()) == os.path.normcase(exe):
+                return
+    except OSError:
+        pass
+    print('The Windows Firewall has no rule for the game yet: without it the other players may not reach you (disconnects,\n'
+          'high ping, error 2618). Windows now asks for administrator permission ONCE to add it. Press "Yes".')
+    inner = ("New-NetFirewallRule -DisplayName 'SSBU native' -Direction Inbound -Program '%s' -Action Allow -Profile Any | Out-Null"
+             % exe.replace("'", "''"))
+    outer = ("Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','%s'"
+             % inner.replace("'", "''"))
+    try:
+        subprocess.run(['powershell', '-NoProfile', '-Command', outer], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if has_rule():
+        print('Firewall rule added.')
+        return
+    print('The firewall rule was not added (the permission was refused). Not asked again; to be asked again delete\n  %s' % refused)
+    try:
+        with open(refused, 'w', encoding='utf-8') as f:
+            f.write(exe)
+    except OSError:
+        pass
 
 
 def main():
@@ -91,6 +299,12 @@ def main():
     ap.add_argument('--mac', action='store_true', help='the native macOS build (default build folder build-macos, exe ssbu_native, '
                                                       'saves in ~/Library/Application Support/ssbu-recomp/userdata unless --userdata)')
     a = ap.parse_args()
+    wait_for_old_game()
+    if a.play and os.name == 'nt' and not (a.linux or a.mac or a.build) and \
+            auto_update(os.path.join(os.path.abspath(build_location.get()), 'config', 'graphics.ini')):
+        # the new run.py (and the rest) runs from here on; the launcher's own arguments again
+        return subprocess.run([sys.executable, os.path.abspath(__file__)] + sys.argv[1:],
+                              env=dict(os.environ, SSBU_PLAY_UPDATED='1')).returncode
     if sys.platform.startswith('linux') and not a.linux and not a.build and not os.path.exists(os.path.join(REPO, 'build', 'state.json')):
         a.linux = True
     if sys.platform == 'darwin' and not a.mac and not a.linux and not a.build and os.path.exists(os.path.join(REPO, 'build-macos', 'state.json')):
@@ -214,7 +428,9 @@ def main():
             env.setdefault(k, v)
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)
-        print('Online: lobby %s (play in Local Wireless rooms: 1-on-1 rooms use rollback), rollback on, input delay %s' % (env.get('SSBU_ONLINE', 'from graphics.ini'), env['SSBU_RB_NET_DELAY']))
+        print('Online: %s (play in Local Wireless rooms: 1-on-1 rooms use rollback), rollback on, input delay %s' % (
+            'same network (Radmin): the first game started is the lobby' if env.get('SSBU_ONLINE') == 'lan' else 'lobby %s' % env.get('SSBU_ONLINE', 'from graphics.ini'),
+            env.get('SSBU_RB_NET_DELAY') or '%s (F1 > Gameplay)' % (ini_get(gini, 'input_delay') or '3')))
     if a.mac and not (env.get('VK_DRIVER_FILES') or env.get('VK_ICD_FILENAMES')):
         # MoltenVK (the Vulkan driver on Metal) named for Homebrew's Vulkan loader, as play_mac.sh does: run.py started by hand
         icd = next((p for p in ('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json', '/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json',
@@ -222,9 +438,21 @@ def main():
                     if os.path.isfile(p)), None)
         if icd:
             env['VK_DRIVER_FILES'] = icd
+    if a.play and os.name == 'nt' and not (a.linux or a.mac) and a.exe == main_exe and update_watch_wanted(gini):
+        flag = os.path.join(a.build, 'update_ready.txt')    # (fork) a newer version found while playing (update_watch)
+        try:
+            os.remove(flag)
+        except OSError:
+            pass
+        env['SSBU_UPDATE_FLAG'] = flag
+        env['SSBU_UPDATE_CMD'] = subprocess.list2cmdline([sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+        env['SSBU_UPDATE_DIR'] = REPO                  # (where "Play SSBU.bat" runs it)
+        update_watch(flag)
     for kv in a.env:
         k, _, v = kv.partition('=')
         env[k] = v
+    if a.play and os.name == 'nt' and not (a.linux or a.mac) and env.get('SSBU_ONLINE', '') not in ('off', '0', 'no', 'false'):
+        ensure_firewall(os.path.abspath(exe), a.build, gini)
     os.makedirs(a.userdata, exist_ok=True)
     os.makedirs(os.path.join(a.build, 'cache'), exist_ok=True)      # the runtime creates ..\cache\vk below it but not the folder itself (found 2026-10-13: with SSBU_VK_PREP=0 on a clean build nothing was saved)
     cmd = [exe, os.path.join(a.build, 'binaries', state.get('game_version', '13.0.4'), 'main.elf'), str(a.seconds)]

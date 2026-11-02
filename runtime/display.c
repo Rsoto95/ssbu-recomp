@@ -228,11 +228,14 @@ static DWORD WINAPI vblank_thread(LPVOID arg) {
 static void pace_options(void) {
     if (g_pace_want >= 0) return;
     const char *e = getenv("SSBU_PACE"), *h = getenv("SSBU_PACE_HOLD"), *p = getenv("SSBU_PACE_PHASE");
-    int opt = gfx_options()->present;                                  /* 0 clock, 1 on (fifo), 2 off, 3 mailbox, 4 display, 5 auto */
+    int opt = gfx_options()->present;                                  /* 0 clock, 1 on (fifo), 2 off, 3 mailbox, 4 display, 5 auto, 6 vrr */
     g_pace_want = e ? !_stricmp(e, "display") || !_stricmp(e, "auto") : opt == 4 || opt == 5;
     g_hold_on = h ? atoi(h) != 0 : opt != 1 && opt != 2;               /* fifo: the swapchain holds the presents itself; off: at once, by request */
     { int latency_mode(void); if (!h && latency_mode() >= 2) g_hold_on = 0; }      /* L1: latency = lowest: the frame goes to the window as soon as it is ready */
     if (p && atof(p) > 0.02 && atof(p) < 0.98) g_lock_phase = atof(p);
+    if (opt == 6 && !e)      /* vsync = vrr: the clock below, frames held to their tick and presented immediately (nvn_vk.c) */
+        printf("display: vsync = vrr: a variable-refresh monitor follows the 60.000 Hz clock%s%c", gfx_options()->window_mode ? "" :
+               " (the window is 'windowed': most drivers use variable refresh only in a fullscreen or borderless window)", 10);
     printf("display: pacing: %s; a finished frame is presented %s%c", g_pace_want ? "locked to the display when its refresh rate is k x 60 Hz within 1.1 % (vsync = display / auto)" : "our own 60.000 Hz clock (vsync = clock)",
            g_hold_on ? "at the next tick (steady cadence)" : "as soon as it is ready", 10);
 }

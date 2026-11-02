@@ -171,7 +171,8 @@ static int ls_open_page(size_t id, EXCEPTION_POINTERS *e) {
  * the base: it still holds its value in the flat base copy = in every state of the ring), 2 learned, 3 being opened. */
 #define XLS_MIN (1u << 20)
 typedef struct { uint8_t *a; size_t n, e0; int ww; } XlsR;
-static XlsR g_xr[512]; static int g_nxr; static size_t g_xn;
+#define XLS_MAXR 4096
+static XlsR g_xr[XLS_MAXR]; static int g_nxr; static size_t g_xn;
 static volatile uint8_t *g_xst; static size_t g_xst_cap;
 static uint8_t *g_xcnt; static size_t g_xcnt_cap;
 static int g_xww_on = -1, g_xww_act; static volatile uint8_t *g_xwd, *g_xnv; static size_t g_xw_cap;      /* LS-X-WW (below): mailboxes per extras page */
@@ -240,8 +241,17 @@ static void xls_protect(void) {                          /* threads held, the ba
     xls_off();                                           /* (a base made again inside a fight: the old protection is given back first) */
     double t0 = now_ms();
     g_nxr = 0; size_t e0 = 0;
+    if (g_xww_on < 0) { const char *e = getenv("SSBU_LS_X_WW"); g_xww_on = e && e[0] && e[0] != '0'; }
+    /* (2026-10-30) the smaller ranges too when they lie in a write-watched reservation (the OS tracks them; no page is made
+     * read-only): the game's arena breaks up from match to match (98 extras ranges at the first base, 187 / 264 / 306 at the
+     * next ones) and every page of a range under XLS_MIN was compared in every capture: 3000 -> 7000 -> 10000 pages, captures
+     * p99 4 -> 12 ms, the 1% low 43 -> 35 fps, the second match and the later ones stuttered. SSBU_LS_X_SMALLWW=0: as before. */
+    static int smallww = -1; if (smallww < 0) { const char *e = getenv("SSBU_LS_X_SMALLWW"); smallww = !(e && e[0] == '0'); }
+    int nsmall = 0;
     for (int i = 0; i < g_nx; i++) {
-        if (g_x[i].n >= XLS_MIN && g_nxr < 512) { g_xr[g_nxr].a = g_x[i].a; g_xr[g_nxr].n = g_x[i].n; g_xr[g_nxr].e0 = e0; g_xr[g_nxr].ww = 0; g_nxr++; }
+        int take = g_x[i].n >= XLS_MIN;
+        if (!take && smallww && g_xww_on && g_x[i].n >= 2 * PG) { PVOID tl[1]; ULONG_PTR tn = 1; DWORD gr; take = GetWriteWatch(0, g_x[i].a, g_x[i].n, tl, &tn, &gr) == 0; nsmall += take; }
+        if (take && g_nxr < XLS_MAXR) { g_xr[g_nxr].a = g_x[i].a; g_xr[g_nxr].n = g_x[i].n; g_xr[g_nxr].e0 = e0; g_xr[g_nxr].ww = 0; g_nxr++; }
         e0 += g_x[i].n / PG;
     }
     g_xn = e0;
@@ -274,7 +284,7 @@ static void xls_protect(void) {                          /* threads held, the ba
     g_xls_prot_pages += pages; g_xls_caps = g_xls_jobs = g_xls_loads = g_xls_loadpages = 0; g_xls_faults = 0;
     g_xls_active = 1;
     if (g_xww_on && nww) { g_xww_act = 1; xww_poll(); }       /* the pages written since the OS's last answer (also the texture code's) count as written */
-    if (g_xww_on) LOG("r1: LS-X-WW: %d of %d extras ranges are write-watched (no page made read-only there)\n", nww, g_nxr);
+    if (g_xww_on) LOG("r1: LS-X-WW: %d of %d extras ranges are write-watched (no page made read-only there; %d of them under %u KB)\n", nww, g_nxr, nsmall, XLS_MIN >> 10);
     LOG("r1: LS-X: %d extras ranges of %u KB or more tracked: %lld pages (%.1f MB) of %zu extras pages made read-only in %.1f ms\n", g_nxr, XLS_MIN >> 10, pages, pages * (double)PG / 1048576.0, g_xn, now_ms() - t0);
 }
 volatile LONG64 g_xls_out_commit, g_xls_out_write; static volatile LONG g_xls_out_lines;      /* pages outside everything the ring saves: committed / written by the game or the host during a fight */

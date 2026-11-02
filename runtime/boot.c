@@ -272,6 +272,7 @@ static DWORD WINAPI guest_main(LPVOID arg) {
     }
 
     { void debug_mode_init(void); debug_mode_init(); }       /* debug_mode.c: test-only fast mode, nothing without SSBU_* variables */
+    { void unlock_all_init(void); unlock_all_init(); }       /* unlock_all.c: graphics.ini unlock_all = on */
     printf("[phase 3] nnMain\n");
     trace_printf("=== phase 3: nnMain\n");
     call_guest(&c, NN_MAIN);
@@ -288,8 +289,17 @@ void plat_print_build_identity(const char *exe, size_t dir_len);     /* plat_pos
 /* The first lines of every log: which binaries these are (link time stamps of the exe and of the DLLs beside it, the values
  * a minidump also shows) and when the process started, so that a log from another PC names its build. File names only: logs
  * get posted, and the folders name the Windows user. */
+/* The version of this runtime: "<commit date>.<time>-<commit>" (UTC; later = newer), set by scripts/make_release.py through
+ * build.py (RECOMP_VERSION); a build of a working tree is "dev". Shown on screen (menu.cpp) and compared with the lobby's game
+ * (net_relay.c beacon). */
+#ifndef SSBU_VERSION
+#define SSBU_VERSION "dev"
+#endif
+const char *ssbu_version(void) { return SSBU_VERSION; }
+
 static void print_build_identity(void) {
     char exe[MAX_PATH], name[MAX_PATH];
+    printf("version: %s\n", ssbu_version());
     DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
     if (!n || n >= MAX_PATH) return;
     const char *slash = strrchr(exe, '\\');

@@ -62,8 +62,13 @@ GuestThreads g_guest_threads = { .park_ms = 500 };      /* the one thread table 
 int waiting_import(const char *s) { return s && (strstr(s, "Wait") || strstr(s, "wait") || strstr(s, "Sleep") || strstr(s, "Receive") || strstr(s, "Fiber") || strstr(s, "Timed")); }
 /* restore_mode 0: hold every guest thread (except this one) once it is inside a waiting import, note where;
  * restore_mode 1: hold each once it waits at the SAME guest return address as at the save (500 ms at most) */
-static struct { HANDLE h; int timeouts; } g_tmo[256]; static int g_ntmo;
-static int *tmo_of(HANDLE h) { for (int i = 0; i < g_ntmo; i++) if (g_tmo[i].h == h) return &g_tmo[i].timeouts; if (g_ntmo < 256) { g_tmo[g_ntmo].h = h; return &g_tmo[g_ntmo++].timeouts; } return NULL; }
+static struct { HANDLE h; DWORD tid; int timeouts; } g_tmo[256]; static int g_ntmo;      /* (by thread id too: a handle value can be reused, see live_teb_addr) */
+static int *tmo_of(HANDLE h) {
+    DWORD tid = GetThreadId(h);
+    for (int i = 0; i < g_ntmo; i++) if (g_tmo[i].h == h) { if (g_tmo[i].tid != tid) { g_tmo[i].tid = tid; g_tmo[i].timeouts = 0; } return &g_tmo[i].timeouts; }
+    if (g_ntmo < 256) { g_tmo[g_ntmo].h = h; g_tmo[g_ntmo].tid = tid; g_tmo[g_ntmo].timeouts = 0; return &g_tmo[g_ntmo++].timeouts; }
+    return NULL;
+}
 void park(int restore_mode) {
     DWORD me = GetCurrentThreadId();
     Ctx *tc; const char *nm; HANDLE h;
@@ -181,7 +186,7 @@ static int fib_host(void *fiber, uint64_t *rsp, uint64_t *base) {
  * holds one of them is not copied back (counted, logged). SSBU_R1_LIVESTK=0: copied anyway (the old way, test). */
 static int g_fib_live_on = -1;
 static uint64_t g_live_rip[512], g_live_fib[512]; static const char *g_live_nm[512]; static HANDLE g_live_h[512];
-static uint8_t *live_teb_addr(HANDLE h);
+static uint64_t live_teb_fiber(HANDLE h);
 int guest_thread_info(int i, Ctx **c, const char **name, HANDLE *h);
 static void live_rsps(void) {
     if (g_guest_fibers.live_cache < 0) { const char *e = getenv("SSBU_R1_LIVECACHE"); g_guest_fibers.live_cache = !(e && e[0] == '0'); }      /* (hs16) =0: every thread asked again (the old way) */
@@ -194,7 +199,7 @@ static void live_rsps(void) {
         int got = 0;
         if (g_guest_fibers.live_cache) for (int j = 0; j < g_guest_threads.count; j++) if (g_guest_threads.table[j].h == h) { if (g_guest_threads.table[j].held && g_guest_threads.table[j].cok) { x.Rsp = g_guest_threads.table[j].rsp; x.Rip = g_guest_threads.table[j].rip; got = 1; g_guest_fibers.live_cached++; } break; }
         if (!got) { got = GetThreadContext(h, &x) != 0; g_guest_fibers.live_asked++; }
-        if (got) { uint8_t *t = live_teb_addr(h); g_guest_fibers.live_rsp[g_guest_fibers.live_count] = x.Rsp; g_live_rip[g_guest_fibers.live_count] = x.Rip; g_live_nm[g_guest_fibers.live_count] = nm ? nm : "?"; g_live_h[g_guest_fibers.live_count] = h; g_live_fib[g_guest_fibers.live_count] = t ? *(volatile uint64_t *)(t + 0x20) : 0; g_guest_fibers.live_count++; }
+        if (got) { g_guest_fibers.live_rsp[g_guest_fibers.live_count] = x.Rsp; g_live_rip[g_guest_fibers.live_count] = x.Rip; g_live_nm[g_guest_fibers.live_count] = nm ? nm : "?"; g_live_h[g_guest_fibers.live_count] = h; g_live_fib[g_guest_fibers.live_count] = live_teb_fiber(h); g_guest_fibers.live_count++; }
     }
 }
 static void live_teb(HANDLE h, uint64_t *fd, uint64_t *sb, uint64_t *sl) {     /* (diagnosis) that thread's TEB: FiberData, StackBase, StackLimit */
@@ -206,20 +211,37 @@ static void live_teb(HANDLE h, uint64_t *fd, uint64_t *sb, uint64_t *sl) {     /
     if (!qit || qit(hh, 0, &tb, sizeof tb, NULL) < 0 || !tb.teb) return;
     uint8_t *t = tb.teb; *sb = *(uint64_t *)(t + 0x08); *sl = *(uint64_t *)(t + 0x10); *fd = *(uint64_t *)(t + 0x20);
 }
-static struct { HANDLE h; uint8_t *teb; } g_teb_cache[512]; static int g_nteb;
-static uint8_t *live_teb_addr(HANDLE h) {               /* a thread's TEB (cached: it never moves) */
-    for (int i = 0; i < g_nteb; i++) if (g_teb_cache[i].h == h) return g_teb_cache[i].teb;
+/* A thread's TEB, cached by handle AND thread id: (2026-10-30, two crashes of the room maker's game at the first match after a
+ * player left the room and came back) the game ends network threads there and starts new ones; a new thread can get the
+ * handle value of an ended one, whose TEB is freed: the cache by handle alone gave that TEB and reading it crashed. An entry
+ * of another thread id is made again, and the TEB is read with ReadProcessMemory (an ended thread's freed TEB: no fault). */
+static struct { HANDLE h; DWORD tid; uint8_t *teb; } g_teb_cache[512]; static int g_nteb;
+static uint8_t *live_teb_addr(HANDLE h) {
+    DWORD tid = GetThreadId(h);
+    if (!tid) return NULL;
+    int i;
+    for (i = 0; i < g_nteb; i++) if (g_teb_cache[i].h == h) { if (g_teb_cache[i].tid == tid) return g_teb_cache[i].teb; break; }
     typedef LONG (WINAPI *QitFn)(HANDLE, int, void *, ULONG, ULONG *);
     static QitFn qit; if (!qit) qit = (QitFn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
     struct { LONG st; void *teb; void *pid, *tid; ULONG_PTR mask; LONG pri, bpri; } tb; memset(&tb, 0, sizeof tb);
     if (!qit || qit(h, 0, &tb, sizeof tb, NULL) < 0) return NULL;
-    if (g_nteb < 512) { g_teb_cache[g_nteb].h = h; g_teb_cache[g_nteb].teb = tb.teb; g_nteb++; }
+    if (i == g_nteb && g_nteb < 512) g_nteb++;
+    if (i < g_nteb) { g_teb_cache[i].h = h; g_teb_cache[i].tid = tid; g_teb_cache[i].teb = tb.teb; }
     return tb.teb;
+}
+static uint64_t live_teb_fiber(HANDLE h) {               /* that thread's current fiber (TEB + 0x20), 0 if it cannot be read */
+    uint8_t *t = live_teb_addr(h);
+    uint64_t v = 0;
+    if (t && !ReadProcessMemory(GetCurrentProcess(), t + 0x20, &v, sizeof v, NULL)) v = 0;      /* (a thread ending right now: no fault) */
+    return v;
 }
 static int live_running(void *fiber) {                 /* the host fiber is the current fiber of a thread (its TEB says so) */
     for (int i = 0; i < g_guest_fibers.live_count; i++) if (g_live_fib[i] && g_live_fib[i] == (uint64_t)(uintptr_t)fiber) return i + 1;
     return 0;
 }
+/* (2026-10-30, os_r1_fibers_reap) the current host fiber of every guest thread read again now; then r1_fiber_running(f) */
+void r1_live_fibers_refresh(void) { live_rsps(); }
+int r1_fiber_running(void *fiber) { return live_running(fiber) != 0; }
 static int live_on_stack(const uint8_t *blk) {          /* a fiber block (saved copy): +0x20 DeallocationStack, +0x10 StackBase */
     uint64_t lo = *(const uint64_t *)(blk + 0x20), hi = *(const uint64_t *)(blk + 0x10);
     for (int i = 0; i < g_guest_fibers.live_count; i++) if (g_guest_fibers.live_rsp[i] >= lo && g_guest_fibers.live_rsp[i] < hi) return i + 1;

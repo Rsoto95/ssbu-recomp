@@ -101,17 +101,59 @@ void dm_audio_queue_drop(void) {
  * pass of the fight, at the ring's safe point: the queue never fills, and the engine's state it changes is guest memory the
  * ring saves and restores with the rest of the frame (nothing runs beside a load any more). The registers of the main thread
  * are put back after it. SSBU_RB_AUDIO_PUMP=0: off. */
-void dm_audio_pump(Ctx *c) {
-    static int on = -1; static long long runs, skipped;
-    if (on < 0) { const char *e = getenv("SSBU_RB_AUDIO_PUMP"); on = !(e && e[0] == '0'); printf("r1: AUDIO PUMP %s: the main thread empties the sound engine's command queue at every pass of a fight while the audio threads are held (SSBU_RB_AUDIO_PUMP)\n", on ? "on" : "OFF"); fflush(stdout); }
+/* (2026-10-29: the 30 fps after a minute of a rollback fight) the step updates every live sound object (0x71039803d0, once
+ * per object), and with the audio threads held no sound ever ends (the mixer that plays them to their end does not run): test
+ * C counted 1053 sounds started ("aply") and 114 released in 90 s, the step going from 0.4 to 13 ms a call, the main thread
+ * from 9 to 20 ms a frame, the game at 30 fps. So the step no longer runs at every pass: only once the queue is more than
+ * SSBU_RB_AUDIO_PUMP_FILL percent full (default 75; 0 = every pass, as before), which is once every few seconds; every
+ * command is still run, in order. force = 1 (the end of the fight, audio threads still held): the queue is emptied whatever
+ * it holds, so the game finds no backlog after the match (the black screen). */
+double now_ms(void);                                     /* game_state.c */
+void dm_audio_pump(Ctx *c, int force) {
+    static int on = -1, fill = 75; static long long runs, skipped, waited;
+    if (on < 0) {
+        const char *e = getenv("SSBU_RB_AUDIO_PUMP"), *f = getenv("SSBU_RB_AUDIO_PUMP_FILL");
+        on = !(e && e[0] == '0');
+        if (f && f[0]) { fill = atoi(f); if (fill < 0) fill = 0; if (fill > 95) fill = 95; }
+        printf("r1: AUDIO PUMP %s: the main thread empties the sound engine's command queue while the audio threads are held, once it is more than %d %% full and at the end of the fight (SSBU_RB_AUDIO_PUMP, SSBU_RB_AUDIO_PUMP_FILL)\n", on ? "on" : "OFF", fill);
+        fflush(stdout);
+    }
     if (!on) return;
     uint8_t ready = 0; uint64_t eng = 0; uint32_t fences = 0;
     if (!safe_read(GA(0x7106dd43a8ULL), &ready, 1) || ready != 1 || !safe_read(GA(0x7106dd4838ULL), &eng, 8) || !eng || !safe_read(GA(0x7106dd4520ULL), &fences, 4) || !fences) { skipped++; return; }
+    static uint32_t ids[48]; static long long counts[48]; static int nids; static double ms_sum, ms_max;
+    {   uint64_t hp = 0; uint8_t h[0x20];
+        if (safe_read(GA(0x7106dd4408ULL), &hp, 8) && hp && safe_read(hp, h, sizeof h)) {
+            uint64_t buf; uint32_t size, wr, rd;
+            memcpy(&buf, h + 8, 8); memcpy(&size, h + 0x10, 4); memcpy(&wr, h + 0x14, 4); memcpy(&rd, h + 0x18, 4);
+            uint32_t used = wr >= rd ? wr - rd : size - rd + wr;
+            if (!force && fill > 0 && size && (unsigned long long)used * 100 < (unsigned long long)size * (unsigned)fill) { waited++; return; }
+            for (uint32_t o = rd, n = 0; buf && size && o != wr && o < size && n < size / 0x20 + 2; n++) {
+                uint32_t w[2] = {0, 0}, id = 0;
+                if (!safe_read(buf + o, w, 8)) break;
+                if (w[0] == 0x64716e62u) { o = 0; continue; }   /* (the wrap marker) */
+                if (w[0] != 0x70716e62u) break;
+                safe_read(buf + o + 8, &id, 4);
+                int k = 0; while (k < nids && ids[k] != id) k++;
+                if (k == nids && nids < 48) ids[nids++] = id;
+                if (k < 48) counts[k]++;
+                o = (o + ((w[1] + 3) & ~3u) + 8) % size;
+            }
+        }
+    }
+    double t0 = now_ms();
     Ctx keep = *c;
     c->x[31] = (c->x[31] - 0x400) & ~15ull;              /* (below the live frames of the pass) */
     call_guest(c, GA(0x7103963010ULL));
     *c = keep;
-    if (++runs == 1 || runs % 3000 == 0) { printf("r1: AUDIO PUMP: %lld runs (%lld passes with nothing to do); after the last, fences pending %u\n", runs, skipped, rd32(GA(0x7106dd4520ULL))); fflush(stdout); }
+    {   double d = now_ms() - t0; ms_sum += d; if (d > ms_max) ms_max = d; }
+    if (++runs == 1 || runs % 10 == 0 || force) {
+        printf("r1: AUDIO PUMP: %lld runs%s (%lld passes with nothing to do, %lld waiting for the queue to fill); after the last, fences pending %u; the step took %.3f ms a run (max %.3f) since the last line; commands so far:",
+               runs, force ? " (the end of the fight)" : "", skipped, waited, rd32(GA(0x7106dd4520ULL)), ms_sum / (runs == 1 || force ? 1 : 10), ms_max);
+        for (int k = 0; k < nids; k++) { char t[5]; memcpy(t, &ids[k], 4); t[4] = 0; for (int j = 0; j < 4; j++) if (t[j] < 0x20 || t[j] > 0x7e) t[j] = '.'; printf(" %s %lld", t, counts[k]); }
+        printf("\n"); fflush(stdout);
+        ms_sum = ms_max = 0;
+    }
 }
 
 /* SSBU_DEBUG_SCAN=1: once, when entry 1's record exists, every other copy of the pattern in it (HP 999.0 followed by
@@ -736,6 +778,7 @@ static void panel_copy_hook(Ctx *c, void *user) {
     (void)user;
     uint64_t base = c->x[0]; uint32_t idx = (uint32_t)c->x[1];
     g_orig_panel_copy(c);
+    { void rbg_after_stop(void); if (idx == 0) rbg_after_stop(); }     /* the select screen opens: player 1's A is no longer given to port 2 (rollback_controller.c) */
     if (idx != 1) return;
     uint64_t e = base + 0x10 + 0x1c8ull;
     if (g_p2none > 0 && rd32(e + 0x30) != 3) {

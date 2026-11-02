@@ -33,12 +33,20 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x138534, 0x138534},       /* clock read return address (nnsdk.c, fixed seed) */
     {0x2c55e0, 0x2c55e0},       /* nninitStartup */
     {0x2c5620, 0x2c5620},       /* nnMain */
+    {0x556ad0, 0x556ad0},       /* save: "is this fighter unlocked?" (unlock_all.c), 364 bytes, 91 / 91 words */
+    {0x556c40, 0x556c40},       /* save: "is this stage unlocked?" (unlock_all.c), 91 / 91 words */
+    {0x556db0, 0x556db0},       /* save: kind 0x13 getter (unlock_all.c), 91 / 91 words */
+    {0x556f20, 0x556f20},       /* save: kind 0x5a getter (unlock_all.c), 91 / 91 words */
+    {0x557090, 0x557090},       /* save: kind 0xc4 getter (unlock_all.c), 91 / 91 words */
+    {0x557200, 0x557200},       /* save: kind 0x28 getter (unlock_all.c), 91 / 91 words */
     {0x653240, 0x653240},       /* entry set-up (debug_mode.c) */
     {0x147f330, 0x147f330},     /* path formatter (newmodule_host.c) */
     {0x1519430, 0x1519430},     /* hook self-test function (hook_host.c) */
+    {0x1779854, 0x17796b4},     /* milestone screen's call of the roster builder, return address (unlock_all.c; 2737 / 2737 words of its function) */
     {0x1780440, 0x17802a0},     /* match controls set-up (debug_mode.c, room rollback: each player's own controls; 63 / 63 words) */
     {0x1788260, 0x17880c0},     /* player record builder (debug_mode.c) */
     {0x17911dc, 0x17910fc},     /* return address of the room's waiting-stage record build (debug_mode.c; 43 / 43 words) */
+    {0x1797640, 0x1797560},     /* select screens' "is this fighter available?" (unlock_all.c), 1,128 bytes, 282 / 282 words */
     {0x179e440, 0x179e400},     /* select screen table entry copy (debug_mode.c, R3 online: player 2's panel) */
     {0x17df5f0, 0x17df5b0},     /* path sub-builder (newmodule_host.c) */
     {0x17dfe50, 0x17dfe10},     /* path sub-builder 2 (newmodule_host.c) */
@@ -46,6 +54,8 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x22b67d4, 0x22b67d4},     /* worker return address (newmodule_host.c) */
     {0x32384c0, 0x3238a70}, /* fighter picture path (newmodule_host.c) */
     {0x3261d60, 0x3262310}, /* name_id getter (newmodule_host.c) */
+    {0x326f0f0, 0x326f6a0},     /* roster builder (unlock_all.c), 2,852 bytes, 713 / 713 words */
+    {0x353cf40, 0x353d4f0},     /* a job's run (call_trace.c, SSBU_TRACE_JOBS only), 112 bytes in both */
     {0x353e330, 0x353e8e0},     /* path -> file index (newmodule_host.c) */
     {0x35444c0, 0x3544a70},     /* resource service inflate thread: start (loose_files.c) */
     {0x3544d88, 0x3545338}, /* inflate thread call site (loose_files.c) */
@@ -117,6 +127,7 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x392dd80, 0x392e330},     /* jemalloc realloc (rb_learned.c) */
     {0x392e590, 0x392eb40},     /* free_default (the game's free) */
     {0x392e8a0, 0x392ee50},     /* jemalloc malloc_size (rb_learned.c) */
+    {0x3963010, 0x39635c0},     /* sound engine command queue step (debug_mode.c, the audio pump), 5,540 bytes in both */
     {0x39a3e70, 0x39a4420},     /* zstd: free stream (nvn_vk_store.c) */
     {0x39a4040, 0x39a45f0},     /* zstd: decompress stream (nvn_vk_store.c) */
     {0x39bfb30, 0x39c00e0}, /* raw copy of uncompressed files (loose_files.c) */
