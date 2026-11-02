@@ -10,7 +10,12 @@ This is the game's own Local Wireless mode, played over a network. You only open
 5. The host starts the match with L+R.
 
 Smash (versus) always stays a local fight (friends, CPUs), with rollback on or off.
-The game's own Online menu (Quickplay, Battle Arenas) on our servers is in progress.
+The game's own Online menu: **Battle Arenas** work on the project's server (experimental): F1 > Experimental > Battle
+Arenas (graphics.ini `online_menu = on`, used from the next start). Make an arena (it gets a 5-character code), friends
+enter it by that code or find it in the list; 1-on-1 fights use rollback and the other members watch them (fed by the
+fighters through the lobby). While it is on, Local Wireless rooms are not available. Server: `tools/net/nex_server.py`
+plus the lobby 1.7, installed by `tools/net/deploy_arenas.sh` (Oracle Cloud ports: `tools/net/oci_arenas_ports.sh`);
+reverse-engineering notes: [ONLINE_MENU_RE.md](ONLINE_MENU_RE.md). Quickplay is not done.
 
 Online play is experimental and ON by default: the game joins the project's public lobby
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
