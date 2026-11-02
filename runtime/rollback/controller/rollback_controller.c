@@ -21,6 +21,17 @@ static void rb_mem_report(const char *when); static int g_mem_nprev;      /* (be
 int os_r1_fibers_reap(int (*in_use)(void *fiber)); int r1_ring_fiber_in_use(void *fiber); void r1_live_fibers_refresh(void); int r1_fiber_running(void *fiber);
 static int rbg_fiber_in_use(void *f) { return r1_fiber_running(f) || r1_ring_fiber_in_use(f); }
 static void rbg_fibers_reap(void) { r1_live_fibers_refresh(); os_r1_fibers_reap(rbg_fiber_in_use); }
+/* (2026-11-02) the same reap OUTSIDE a fight and in the simulation (ring_simulation.c rgs_step, every safe point): before, it ran
+ * only in an online fight (every 2 s) and at a match end, so with rollback on the host fibers the game replaced in the menus,
+ * the room and the loading screens piled up (1 MB each): an online log of the owner's PC, 5 minutes in the room, private
+ * 11974 -> 16361 MB, then 4164 fibers deleted at once at the match end; a PC with 16 GB of RAM went to the page file. The
+ * simulation (SSBU_RB_SIM) never reaped: ~25 MB a second in its fights (Test_G_mem, 2026-11-02). Every 120 safe points. */
+void rb_fibers_reap_tick(void) {
+    static unsigned n;
+    extern int g_r1_keep_fibers;
+    if (!g_r1_keep_fibers || ++n % 120) return;
+    rbg_fibers_reap();
+}
 /* Functions and variables of other runtime files that only this file uses: */
 void rbn_start(long long f0);
 int rbn_started(void);

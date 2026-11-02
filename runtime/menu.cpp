@@ -365,7 +365,7 @@ static const char *const k_aniso[] = {"game", "2", "4", "8", "16"};
 static const char *const k_profile[] = {"custom", "low"};
 static const char *const k_wait[] = {"hold", "skip"};
 static const char *const k_prepare[] = {"first_run", "background", "off"};
-static const char *const k_load[] = {"start", "loading", "background"};      /* GfxOptions.shader_load 0, 1, 2 */
+static const char *const k_load[] = {"start", "loading", "background", "auto"};      /* GfxOptions.shader_load 0, 1, 2; 3 = shader_load_auto (2026-11-02) */
 static const char *const k_console[] = {"docked", "handheld"};
 static const char *const k_onoff[] = {"off", "on"};
 static const char *const k_lang[] = {"auto", "ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl", "ru"};
@@ -390,7 +390,7 @@ static void settings_init(int cw, int ch) {
     memset(&S, 0, sizeof S);
     S.window = o->window_mode; S.vsync = o->present >= 0 && o->present < N(k_vsync) ? o->present : 5; S.latency = gfx_latency(); S.renderer = o->renderer;
     S.aniso = 0; for (int i = 0; i < N(k_aniso_v); i++) if (k_aniso_v[i] == o->aniso) S.aniso = i;
-    S.profile = o->profile; S.wait = o->shader_skip; S.prepare = o->shader_prepare; S.load = o->shader_load; S.console = o->handheld; S.overlay = o->overlay;
+    S.profile = o->profile; S.wait = o->shader_skip; S.prepare = o->shader_prepare; S.load = o->shader_load_auto ? 3 : o->shader_load; S.console = o->handheld; S.overlay = o->overlay;
     S.volume = gfx_volume(); S.runahead = gfx_runahead(); S.scale = o->scale;
     snprintf(S.gpu, sizeof S.gpu, "%s", o->gpu[0] ? o->gpu : "auto");
     S.lang = idx_of(k_lang, N(k_lang), gfx_language()[0] ? gfx_language() : "auto");
@@ -637,6 +637,10 @@ static void sec_graphics(void) {
     tag(1, S.prepare != S0.prepare);
     if (combo("Shader loading", &S.load, k_load, N(k_load))) ini("shader_load", k_load[S.load]);
     tag(1, S.load != S0.load);
+    {   const GfxOptions *go = gfx_options();      /* (2026-11-02) what auto chose, and why: the memory a 16 GB PC lacks */
+        if (go->shader_load_auto) ImGui::TextDisabled("auto: this PC has %d GB of RAM, so %s. loading uses ~4 GB less memory (16 GB PCs).", go->ram_gb, go->shader_load == 1 ? "loading" : "start");
+        else ImGui::TextDisabled("auto (recommended) = loading with 16 GB of RAM or less (~4 GB less memory), start with more");
+    }
     if (combo("Console mode", &S.console, k_console, N(k_console))) ini("console_mode", k_console[S.console]);
     tag(1, S.console != S0.console);
     bool ov = S.overlay != 0;
