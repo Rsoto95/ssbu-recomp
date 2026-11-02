@@ -348,19 +348,30 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * match): played like a Local Wireless room's (R3 lwr below: the arena's set-up on both PCs, only the seed new, made a
      * local versus match with rollback), the opponent found in the lobby by the arena (our NEX server says which one this
      * player is in: online_menu.inc), 1-on-1 only. Anything not agreed: the game's own online netcode plays it, unchanged. */
-    {   int dm_melee_mode(void), online_menu_arena(uint32_t *gid, int *players); const char *rr = getenv("SSBU_RB_NET_ARENA");
+    {   int dm_melee_mode(void), online_menu_arena(uint32_t *gid, int *players, int *own_seat), dm_arena_fighters(int seat_of_rank[2]);
+        const char *rr = getenv("SSBU_RB_NET_ARENA"), *sp = getenv("SSBU_RB_NET_ARENA_SPEC");
         int mode = dm_melee_mode();
         if (mode == 0x14) {
-            int players = 0, ok = online_menu_arena(&agid, &players);
-            if (!(rr && rr[0] == '0') && ok && agid && players == 2) {
+            /* (2026-11-02, second round) the fighters are any two seats (debug_mode.c: the select table + 0x30); this game's own
+             * seat is its place in the arena's join order (our NEX server); a member whose seat does not fight is a spectator.
+             * Spectators are not driven by rollback yet (step 3): with any of them in the arena the game's own netcode plays the
+             * match for everyone (its own spectating works), unless SSBU_RB_NET_ARENA_SPEC=0 (test: the fighters play with
+             * rollback, the spectators see nothing). Every member decides the same from the same table and member list. */
+            int players = 0, seat = -1, sor[2] = {0, 1}, ok = online_menu_arena(&agid, &players, &seat), nfight = dm_arena_fighters(sor);
+            int rank = seat == sor[0] ? 0 : seat == sor[1] ? 1 : -1, spectators = players - 2, spec_test = sp && sp[0] == '0';
+            const char *why = rr && rr[0] == '0' ? "arena rollback off (SSBU_RB_NET_ARENA=0)" : !ok ? "our NEX server did not say which arena" : !agid ? "the server knows no arena of this player"
+                            : nfight != 2 ? "not a 1-on-1 match" : seat < 0 ? "this player's seat is not known" : spectators > 0 && !spec_test ? "spectators in the arena (not driven by rollback yet)"
+                            : rank < 0 ? "this player watches (spectator)" : NULL;
+            if (!why) {
                 arena = lwr = 1;
-                AcquireSRWLockExclusive(&g_hs_lock); g_local = g_arena_p1_net ? 1 : 0; ReleaseSRWLockExclusive(&g_hs_lock);
-                printf("[rbnet] handshake %ld: a Battle Arena's match (arena %u, 2 players; this game is player %d): agreeing on a rollback match with its other player (found in the lobby by the arena)\n", (long)round, agid, g_local + 1);
+                AcquireSRWLockExclusive(&g_hs_lock); g_local = rank; ReleaseSRWLockExclusive(&g_hs_lock);
+                printf("[rbnet] handshake %ld: a Battle Arena's match (arena %u, %d members, fighting seats %d and %d; this game is seat %d = player %d%s): agreeing on a rollback match with its other fighter (found in the lobby by the arena)\n",
+                       (long)round, agid, players, sor[0], sor[1], seat, g_local + 1, spectators > 0 ? "; TEST: the spectators are not fed" : "");
                 fflush(stdout);
             } else {
                 InterlockedExchange(&g_hs_room, 1);
-                printf("[rbnet] handshake %ld: a Battle Arena's match (%s): the game's own online netcode plays it; no rollback, nothing changed\n", (long)round,
-                       rr && rr[0] == '0' ? "arena rollback off (SSBU_RB_NET_ARENA=0)" : !ok ? "our NEX server did not say which arena" : !agid ? "the server knows no arena of this player" : "not 2 players in the arena");
+                printf("[rbnet] handshake %ld: a Battle Arena's match (arena %u, %d members, %d fighting; this game's seat %d): %s: the game's own online netcode plays it; no rollback, nothing changed\n",
+                       (long)round, agid, players, nfight, seat, why);
                 fflush(stdout);
                 return 0;
             }

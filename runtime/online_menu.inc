@@ -190,8 +190,8 @@ static void om_nsd_ResolveEx(Ctx *c) {
  * rollback of an arena's match (net_session.c): the opponent is looked for in the lobby with the arena as the key. 1 = asked
  * and answered (gid 0: in none); 0 = the Online menu is off or the server did not answer (3 tries, 300 ms each). */
 static int g_om_on;
-int online_menu_arena(uint32_t *gid, int *players) {
-    *gid = 0; *players = 0;
+int online_menu_arena(uint32_t *gid, int *players, int *own_seat) {
+    *gid = 0; *players = 0; *own_seat = -1;
     if (!g_om_on) return 0;
     SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (u == INVALID_SOCKET) return 0;
@@ -203,10 +203,13 @@ int online_menu_arena(uint32_t *gid, int *players) {
     for (int k = 0; k < 3 && !ok; k++) {
         sendto(u, (const char *)q, sizeof q, 0, (struct sockaddr *)&a, sizeof a);
         uint8_t b[256]; int n = recv(u, (char *)b, sizeof b, 0);
-        if (n >= 11 && !memcmp(b, "ARENA!", 6)) { memcpy(gid, b + 6, 4); *players = b[10]; ok = 1; }
+        if (n >= 11 && !memcmp(b, "ARENA!", 6)) {
+            memcpy(gid, b + 6, 4); *players = b[10]; ok = 1;
+            for (int i = 0; i < *players && 11 + 8 * i + 8 <= n; i++) { uint64_t p; memcpy(&p, b + 11 + 8 * i, 8); if (p == me) *own_seat = i; }     /* (the arena's seats: its members in join order, measured) */
+        }
     }
     closesocket(u);
-    om_log("arena of this player (pid %llu): %s, arena %u, %d players", (unsigned long long)me, ok ? "answered" : "NO ANSWER from our NEX server", *gid, *players);
+    om_log("arena of this player (pid %llu): %s, arena %u, %d players, this player's seat %d", (unsigned long long)me, ok ? "answered" : "NO ANSWER from our NEX server", *gid, *players, *own_seat);
     return ok;
 }
 

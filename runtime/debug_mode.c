@@ -490,7 +490,28 @@ static int hs_layout(uint64_t st, uint16_t out[11]) {
     return 0;
 }
 int dm_melee_mode(void) { return rd8(MELEE_INFO); }      /* (2026-11-02) the match block's melee mode: 0 local versus, 1 Local Wireless room, 0x14 Battle Arena */
+/* (2026-11-02) a Battle Arena's match: its records are indexed by ARENA SEAT and the two fighters can be any two seats (the
+ * others are empty records, type 3); the select screens' per-player table (0x7105307770 + 0x1c8 * seat) + 0x30 is 0 for a
+ * seat that fights this match, 3 for one that does not (runs sp3: the winner stays, the next of the queue comes in). A
+ * fighter's rollback player number is its RANK among the fighting seats (the lower seat is player 1). Outside an arena:
+ * rank = record index. Read at player 1's record, before the handshake. */
+static int g_arena_on, g_arena_nfight, g_rank_of_seat[8], g_seat_of_rank[2] = {0, 1};
+int dm_arena_fighters(int seat_of_rank[2]) { seat_of_rank[0] = g_seat_of_rank[0]; seat_of_rank[1] = g_seat_of_rank[1]; return g_arena_on ? g_arena_nfight : -1; }
+static void arena_seats_read(void) {
+    g_arena_on = rd8(MELEE_INFO) == 0x14; g_arena_nfight = 0;
+    for (int i = 0; i < 8; i++) {
+        g_rank_of_seat[i] = i < 2 ? i : -1;
+        if (!g_arena_on) continue;
+        uint32_t type = rd32(GA(0x7105307770ULL) + 0x1c8ull * (uint64_t)i + 0x30);
+        g_rank_of_seat[i] = -1;
+        if (type == 0) { if (g_arena_nfight < 2) g_seat_of_rank[g_arena_nfight] = i; g_rank_of_seat[i] = g_arena_nfight < 2 ? g_arena_nfight : -1; g_arena_nfight++; }
+    }
+    if (!g_arena_on) { g_seat_of_rank[0] = 0; g_seat_of_rank[1] = 1; }
+    else { printf("[arena] set-up: %d fighting seat(s)%s: seats %d and %d are players 1 and 2 of the rollback match\n", g_arena_nfight, g_arena_nfight == 2 ? "" : " (not 1-on-1)", g_seat_of_rank[0], g_seat_of_rank[1]); fflush(stdout); }
+}
+static int rank_of(int idx) { return idx >= 0 && idx < 8 ? g_rank_of_seat[idx] : -1; }
 static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
+    if (idx == 0) arena_seats_read();
     if (idx == 0) {
         RbhMatch me; memset(&me, 0, sizeof me);
         uint32_t cur = rd32(GA(0x7105309968ULL)); uint64_t sel = GA(0x71053097c0ULL) + 0x20ull * (cur < 3 ? cur : 0);
@@ -547,7 +568,8 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
             }
         }
     }
-    if (!g_hs_ok || idx < 0 || idx > 1) return;
+    int rank = rank_of(idx);                            /* (2026-11-02) arenas: the fighter's rollback number, -1 = a seat that does not fight */
+    if (!g_hs_ok || idx < 0 || (g_hs_lwr ? rank < 0 : idx > 1)) return;
     if (g_hs_lwr) {                                     /* (R3 lwr) the players' fighters, colours, rules are the room's own (the same on both PCs) */
         /* Which controller drives a player: state + 0x210 = the controller slot (the record builder reads the controller object
          * 0x7105338860[state + 0x210]). In the room's records this game's own player has slot 0 (its name tag, + 0x450) and the
@@ -564,9 +586,9 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         if (norm) {
             int rbn_local_player(void); int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[LWR_CTL + 2], uint16_t other[11], int *other_has, uint8_t other_ctl[LWR_CTL + 2]);
             int local = rbn_local_player(), has = 0; uint16_t lay[11]; memset(lay, 0, sizeof lay);
-            if (idx == 0) { g_lwr_ctl_ok = 0; g_lwr_ctl_applied = 0; }
-            if (idx == local) lwr_own_controls(st, g_lwr_ctl[idx]);      /* (before the state is changed below: its own profile and controller) */
-            if (idx == 0) { if (local == 0) has = hs_layout(st, lay); else { has = g_hs_m.has_layout[0]; memcpy(lay, g_hs_m.layout[0], sizeof lay); } }
+            if (rank == 0) { g_lwr_ctl_ok = 0; g_lwr_ctl_applied = 0; }
+            if (rank == local) lwr_own_controls(st, g_lwr_ctl[rank]);      /* (before the state is changed below: its own profile and controller) */
+            if (rank == 0) { if (local == 0) has = hs_layout(st, lay); else { has = g_hs_m.has_layout[0]; memcpy(lay, g_hs_m.layout[0], sizeof lay); } }
             else {
                 uint16_t own[11], other[11]; int own_has, other_has = 0;
                 if (local == 1) own_has = hs_layout(st, own); else { own_has = g_hs_m.has_layout[0]; memcpy(own, g_hs_m.layout[0], sizeof own); }
@@ -578,9 +600,9 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
                 if (local == 1) { has = own_has; memcpy(lay, own, sizeof lay); } else if (got) { has = other_has; memcpy(lay, other, sizeof lay); }
             }
             if (!has) { uint64_t p = GA(0x7105313518ULL); for (int k = 0; k < 11; k++) lay[k] = rd16(p + 0xc + 2ull * k); }      /* (the game's default profile) */
-            printf("[rbnet] room match: player %d (%s): ui_chara %016llx colour %u; panel state: name tag %d, network player %d, controller slot %d, profile %d -> controller slot %d, a local human\n", idx + 1,
-                   idx == local ? "this game's player" : "the other game's player", (unsigned long long)rd64(st + 0x88), rd8(st + 0x90), rd8(st + 0x450), rd8(st + 0x451), (int)rd32(st + 0x210), (int)rd32(st + 0x214), idx);
-            wr8(st + 0x450, 1); wr8(st + 0x451, 0); wr32(st + 0x210, (uint32_t)idx); wr32(st + 0x214, 0xffffffffu);
+            printf("[rbnet] room match: player %d (seat %d, %s): ui_chara %016llx colour %u; panel state: name tag %d, network player %d, controller slot %d, profile %d -> controller slot %d, a local human\n", rank + 1, idx,
+                   rank == local ? "this game's player" : "the other game's player", (unsigned long long)rd64(st + 0x88), rd8(st + 0x90), rd8(st + 0x450), rd8(st + 0x451), (int)rd32(st + 0x210), (int)rd32(st + 0x214), rank);
+            wr8(st + 0x450, 1); wr8(st + 0x451, 0); wr32(st + 0x210, (uint32_t)rank); wr32(st + 0x214, 0xffffffffu);
             wr8(st + 0x454, 1); for (int k = 0; k < 11; k++) wr16(st + 0x54 + 2ull * k, lay[k]);
             fflush(stdout);
         }
@@ -665,7 +687,7 @@ static void match_player_hook(Ctx *c, void *user) {
     if (g_hs_wanted) hs_apply(st, idx, type_was);       /* R3: the match both online games agreed (rb_net.c handshake) */
     if (idx == 1) g_dm_state1_ok = safe_read(st, g_dm_state1, sizeof g_dm_state1);
     g_orig_player_record(c);
-    if (idx == 1 && g_hs_lwr && g_lwr_ctl_ok) for (int i = 0; i < 2; i++) wr8(MI_PLAYER(i) - 8 + 0x48, g_lwr_ctl[i][LWR_CTL]);      /* (R3 lwr) each player's own option byte (record + 0x48, see lwr_own_controls) */
+    if (rank_of(idx) == 1 && g_hs_lwr && g_lwr_ctl_ok) for (int i = 0; i < 2; i++) wr8(MI_PLAYER(g_seat_of_rank[i]) - 8 + 0x48, g_lwr_ctl[i][LWR_CTL]);      /* (R3 lwr) each player's own option byte (record + 0x48, see lwr_own_controls) */
     if (idx == 1 && rd32(st + 0x78) == 0) { void input_mark(const char *what); input_mark("setup-2p"); }      /* (R3 pub2, test aid) a match set up with a human player 2 (SSBU_SEQ @untilmark:setup-2p) */
     if (getenv("SSBU_DEBUG_P1PROFILE") && idx == 0) {     /* (R3 lwr, research) player 1's name-tag profile index forced (=<n>), or (=c<n>) profile n's
                                                            * control bytes + 0x24 .. + 0x50 copied over player 1's own profile's (in memory only, this run) */
