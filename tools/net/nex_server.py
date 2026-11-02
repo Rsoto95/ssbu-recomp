@@ -1035,7 +1035,7 @@ class Client:
 
 
 NAT_PORTS = (10025, 10125)  # Pia's NAT check servers (nncs1 / nncs2): primary and secondary port (the game sends to 10025)
-NAT_HOSTS = ("127.0.0.1", "127.0.0.2")   # nncs1, nncs2 (runtime/online_menu.inc resolves them to these)
+NAT_HOSTS = ["127.0.0.1", "127.0.0.2"]   # nncs1, nncs2 (runtime/online_menu.inc resolves them to these); --nat-ip
 
 # The NAT check (Kinnay's NintendoClients wiki, "NAT Check Server"): UDP, big-endian, 16 bytes both ways:
 #   +0 type u32 (the game's), +4 external port u32, +8 external IP u32, +0xC the answering server's own IP u32 (the server's).
@@ -1064,7 +1064,7 @@ def nat_answer(data, addr, here, socks):
         return None, None
     kind = struct.unpack(">I", data[:4])[0]
     host, port = here
-    if kind in NAT_OTHER_IP:
+    if kind in NAT_OTHER_IP and len(NAT_HOSTS) > 1:       # (one address: nncs1 and nncs2 are the same server; the game asks 101-103 only)
         host = NAT_HOSTS[1] if host == NAT_HOSTS[0] else NAT_HOSTS[0]
     if kind in NAT_OTHER_PORT:
         port = NAT_PORTS[1] if port == NAT_PORTS[0] else NAT_PORTS[0]
@@ -1100,11 +1100,16 @@ def main():
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=443)
     ap.add_argument("--log", default="")
+    ap.add_argument("--nat-ip", default="127.0.0.1,127.0.0.2",
+                    help="the address(es) of the NAT check (nncs1[,nncs2]) as the players reach this PC: one address for a "
+                         "server the players reach over a network (Radmin, a VPS: the game is told nncs2 = nncs1); two "
+                         "loopback ones for copies on this PC (default)")
     ap.add_argument("--fake-ip", default="", help="the address games on this PC are told they have (two copies on one PC; "
                     "the same as their SSBU_ONLINE_MENU_FAKEIP, default there 10.200.0.1)")
     a = ap.parse_args()
     log = Log(a.log)
     FAKE_IP[0] = a.fake_ip
+    NAT_HOSTS[:] = [h.strip() for h in a.nat_ip.split(",") if h.strip()][:2]
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((a.bind, a.port))

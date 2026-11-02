@@ -279,6 +279,18 @@ static int so_dup(int fd) {                               /* bsd DuplicateSocket
 }
 static void so_nonblock(SoObj *o, int on) { u_long v = on ? 1 : 0; ioctlsocket(o->s, FIONBIO, &v); }
 static int so_is_loopback(uint32_t be_addr) { return (be_addr & 0xff) == 127; }      /* first byte in memory */
+/* (2026-11-02) the game's own Online menu on a server of the network (SSBU_ONLINE_MENU=1 and SSBU_ONLINE_MENU_SERVER not a
+ * loopback address: our NEX server over Radmin or on a VPS): Pia talks to the other players' PCs, so the sockets reach the
+ * real network: Bind 0.0.0.0 = every interface, Connect / SendTo to any address. Otherwise loopback only, as above. */
+static int so_open_net(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *m = getenv("SSBU_ONLINE_MENU"), *sv = getenv("SSBU_ONLINE_MENU_SERVER"); struct in_addr a;
+        on = m && m[0] == '1' && sv && *sv && InetPtonA(AF_INET, sv, &a) == 1 && !so_is_loopback(a.s_addr);
+        if (on) { printf("[online-menu] sockets open to the network (the Online menu's server %s is not on this PC)\n", sv); fflush(stdout); }
+    }
+    return on;
+}
 static int so_addr_in(uint64_t p, struct sockaddr_in *out) {                          /* guest BSD sockaddr_in -> host; 0 when not AF_INET */
     memset(out, 0, sizeof *out);
     if (M8(p + 1) != 2) return 0;
@@ -340,10 +352,10 @@ static void so_bind(Ctx *c, int len_check) {              /* (fd, const sockaddr
     struct sockaddr_in a;
     int e = 0;
     if (!so_addr_in(A1, &a)) e = 97;
-    else if (a.sin_addr.s_addr != 0 && !so_is_loopback(a.sin_addr.s_addr)) e = 99;
+    else if (a.sin_addr.s_addr != 0 && !so_is_loopback(a.sin_addr.s_addr) && !so_open_net()) e = 99;
     else {
         int any = a.sin_addr.s_addr == 0;
-        if (any) a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (any && !so_open_net()) a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         if (bind(o->s, (struct sockaddr *)&a, sizeof a) != 0) e = so_wsa_errno(WSAGetLastError(), 0);
         else o->bound_any = any;
     }
@@ -360,7 +372,7 @@ static void socket_Connect(Ctx *c) {                      /* (fd, const sockaddr
     if (!o) { so_fail(c, 9); return; }
     struct sockaddr_in a;
     if (!so_addr_in(A1, &a)) e = 97;
-    else if (!so_is_loopback(a.sin_addr.s_addr)) e = 101;                        /* no network: nothing but loopback is reachable */
+    else if (!so_is_loopback(a.sin_addr.s_addr) && !so_open_net()) e = 101;      /* no network: nothing but loopback is reachable */
     else if (connect(o->s, (struct sockaddr *)&a, sizeof a) != 0) {
         int w = WSAGetLastError();
         e = w == WSAEWOULDBLOCK ? 115 : w == WSAEISCONN ? 0 : so_wsa_errno(w, 0);     /* [suyu] ConnectImpl: "already connected" is success */
@@ -471,7 +483,7 @@ static void so_send(Ctx *c, uint64_t addr) {              /* (fd, buf, size, fla
     int temp = (gf & 0x80) && !(flags & SO_O_NONBLOCK), n = -1, e = 0;
     struct sockaddr_in a;
     if (addr && !so_addr_in(addr, &a)) e = 97;
-    else if (addr && !so_is_loopback(a.sin_addr.s_addr)) e = 101;                 /* no network */
+    else if (addr && !so_is_loopback(a.sin_addr.s_addr) && !so_open_net()) e = 101;   /* no network */
     else {
         if (temp) so_nonblock(o, 1);
         if (addr) n = sendto(o->s, (const char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf) & MSG_OOB, (struct sockaddr *)&a, sizeof a);

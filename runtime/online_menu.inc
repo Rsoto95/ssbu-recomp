@@ -95,7 +95,16 @@ static void om_nifm_GetCurrentPrimaryIpAddress(Ctx *c) {
     g_om_prev_primary_ip(c);
     if ((uint32_t)c->x[0] == 0) {
         if (g_om_fake) { uint64_t id = om_nsa_id(); uint8_t b[4] = {10, 201, (uint8_t)(id >> 16), (uint8_t)(id >> 8) | 1}; uint32_t a; memcpy(&a, b, 4); M32(out) = a; }
-        else M32(out) = htonl(INADDR_LOOPBACK);
+        else {                                             /* (2026-11-02) this PC's address toward our server (its Radmin / LAN address), else loopback */
+            static uint32_t mine;
+            if (!mine) { SOCKET u = socket(AF_INET, SOCK_DGRAM, 0); struct sockaddr_in t = {0}, l = {0}; int ln = sizeof l;
+                t.sin_family = AF_INET; t.sin_port = htons(443); InetPtonA(AF_INET, g_om_server, &t.sin_addr);
+                if (u != INVALID_SOCKET && connect(u, (struct sockaddr *)&t, sizeof t) == 0 && getsockname(u, (struct sockaddr *)&l, &ln) == 0) mine = l.sin_addr.s_addr;
+                if (u != INVALID_SOCKET) closesocket(u);
+                if (!mine) mine = htonl(INADDR_LOOPBACK);
+                { char ip[32]; InetNtopA(AF_INET, &mine, ip, sizeof ip); om_log("this PC's address for the other players: %s (toward our server %s)", ip, g_om_server); } }
+            M32(out) = mine;
+        }
     }
 }
 
@@ -395,10 +404,13 @@ static void online_menu_register(void) {
         if (InetPtonA(AF_INET, e, &a) != 1) { printf("[online-menu] SSBU_ONLINE_MENU_SERVER=%s is not an IPv4 address: the Online menu stays off\n", e); return; }
         snprintf(g_om_server, sizeof g_om_server, "%s", e);
     }
+    int remote = 0;                                        /* (2026-11-02) our server on another PC (Radmin, a VPS) */
+    {   struct in_addr a; remote = InetPtonA(AF_INET, g_om_server, &a) == 1 && (a.s_addr & 0xff) != 127; }
     if ((e = getenv("SSBU_ONLINE_MENU_SERVER2")) && *e) snprintf(g_om_server2, sizeof g_om_server2, "%s", e);
+    else if (remote) snprintf(g_om_server2, sizeof g_om_server2, "%s", g_om_server);   /* (one server: nncs2 = nncs1) */
     {   const char *f = getenv("SSBU_ONLINE_MENU_FAKEIP");
         struct in_addr a;
-        if (!f || !*f) f = "10.200.0.1";
+        if (!f || !*f) f = remote ? "off" : "10.200.0.1";     /* (the fake addresses are for copies on ONE PC only) */
         if (_stricmp(f, "off") && InetPtonA(AF_INET, f, &a) == 1) g_om_fake = a.s_addr;
         if (g_om_fake) printf("[online-menu] fake addresses on (SSBU_ONLINE_MENU_FAKEIP=%s): each socket is 10.200.<port/256>.<port%%256>, this game's own IP 10.201.x.y; sent to 127.0.0.1 (one-PC tests)\n", f); }
     g_om_prev_gai2 = om_prev(OM_SOK("11GetAddrInfoEPKcS2_PK8addrinfoPPS3_"));
