@@ -81,7 +81,13 @@ static int th_blocked(HANDLE h) {
     return r[-2] == 0x0f && r[-1] == 0x05;
 }
 static int ra_audio(const char *n) { return strstr(n, "nus3::audio") || strstr(n, "sindou") || strstr(n, "AudioDevice"); }
-static int ra_free(const char *n) { return strstr(n, "nopus") != NULL; }      /* never in a waiting import; its pages (decoder state, output) are not simulation */
+static int ra_free(const char *n) {      /* never in a waiting import; its pages (decoder state, output) are not simulation */
+    /* (2026-11-02, Battle Arenas) the game's own online session lives on during an arena's fight played with rollback: the
+     * NEX client's transport threads ("NEX TransportBufferThread(recv / (send") sit in a blocking read of our NEX server's
+     * connection (nn::ssl, not a waiting import: 90 captures skipped, rollback off at frame 81) and Pia's own threads
+     * ("Pia ...") keep the arena's session alive. Neither is the fight's simulation: never held. */
+    return strstr(n, "nopus") != NULL || !strncmp(n, "NEX ", 4) || !strncmp(n, "Pia ", 4);
+}
 /* save: every other guest thread held inside a waiting import (its place and registers noted); 0 = one was not there in time */
 /* (R3 hs16, TEST ONLY) SSBU_RB_HOLD_PROF=1: where a hold's time goes, per thread (suspend + context + retries), and the
  * fiber check; printed in the rollback report */

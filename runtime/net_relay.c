@@ -1148,7 +1148,9 @@ static void mm_find(int kind) {
     say("match: searching for an opponent%s (build %s, code %s)", kind == 2 ? " for a rollback match (Smash versus)" : "", g_build, g_code);
 }
 void net_match_find(void) { mm_find(1); }
-void net_match_find_rb(void) { mm_find(2); }
+static volatile LONG64 g_mm_key;                       /* (2026-11-02) a Battle Arena's key (its gathering id): sent with MATCH op 2 */
+void net_match_find_rb(void) { InterlockedExchange64(&g_mm_key, 0); mm_find(2); }
+void net_match_find_rb_key(uint64_t key) { InterlockedExchange64(&g_mm_key, (LONG64)key); mm_find(2); say("match: the search carries the key %llu (a Battle Arena of the game's Online menu: paired only with its other player)", (unsigned long long)key); }
 void net_match_cancel(void) {
     AcquireSRWLockExclusive(&g_mm_lock);
     int was = g_mm.state;
@@ -1173,12 +1175,14 @@ void net_match_get(NetMatch *o) {
     } else o->code_players = (int)g_code_players;
 }
 static void mm_send(int op) {                           /* (client thread) */
-    uint8_t p[4 + 8 + 1 + 4];
+    uint8_t p[4 + 8 + 1 + 4 + 8];
     hdr(p, T_MATCH);
     s64(p + 4, g_cookie);
     p[12] = (uint8_t)op;
     s32(p + 13, g_mm_id);
-    tx(p, sizeof p, &g_lobby);
+    uint64_t key = op == 2 ? (uint64_t)g_mm_key : 0;      /* (a key only with a rollback search; older lobbies read 17 bytes and pair as before) */
+    s64(p + 17, key);
+    tx(p, key ? sizeof p : 17, &g_lobby);
 }
 static void mm_tick(uint64_t t) {                       /* (client thread, joined) */
     static int test = -1;

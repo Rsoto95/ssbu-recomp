@@ -50,7 +50,15 @@ static void om_log(const char *fmt, ...) {
     va_end(ap);
     fflush(stdout);
 }
+static int om_packet_log(void) {                           /* SSBU_ONLINE_MENU_LOG=1: every packet's bytes (slow: a printf + flush in Pia's threads) */
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_ONLINE_MENU_LOG"); on = e && e[0] == '1'; }
+    return on;
+}
 static void om_hex_n(volatile LONG *count, LONG most, const char *what, uint64_t buf, uint64_t len) {
+    /* (2026-11-02) off by default: in a Battle Arena's fight with rollback the log of every Pia packet (whole, in hex, one
+     * flush each) kept Pia's threads from reaching a wait in time: the ring's captures took ~85 ms and rollback gave up */
+    if (!om_packet_log() && count != &g_om_packets) return;
     if (InterlockedIncrement(count) > most || !buf) return;
     static __declspec(thread) char t[3 * 1500 + 1];
     const uint8_t *b0 = (const uint8_t *)(uintptr_t)buf;
@@ -175,6 +183,31 @@ static void om_nsd_ResolveEx(Ctx *c) {
     in[sizeof in - 1] = 0;
     g_om_prev_resolve(c);
     om_log("nsd::ResolveEx \"%s\" -> \"%s\"", in, (const char *)(uintptr_t)out);
+}
+
+/* ---------------------------------------------------------------- (2026-11-02) which Battle Arena this player is in
+ * tools/net/nex_server.py UDP 39599: "ARENA?" + pid u64 -> "ARENA!" + gid u32 + n u8 + n x pid u64 (little-endian). For the
+ * rollback of an arena's match (net_session.c): the opponent is looked for in the lobby with the arena as the key. 1 = asked
+ * and answered (gid 0: in none); 0 = the Online menu is off or the server did not answer (3 tries, 300 ms each). */
+static int g_om_on;
+int online_menu_arena(uint32_t *gid, int *players) {
+    *gid = 0; *players = 0;
+    if (!g_om_on) return 0;
+    SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (u == INVALID_SOCKET) return 0;
+    struct sockaddr_in a; memset(&a, 0, sizeof a); a.sin_family = AF_INET; a.sin_port = htons(39599);
+    InetPtonA(AF_INET, g_om_server, &a.sin_addr);
+    DWORD to = 300; setsockopt(u, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
+    uint8_t q[14] = {'A', 'R', 'E', 'N', 'A', '?'}; uint64_t me = om_nsa_id(); memcpy(q + 6, &me, 8);
+    int ok = 0;
+    for (int k = 0; k < 3 && !ok; k++) {
+        sendto(u, (const char *)q, sizeof q, 0, (struct sockaddr *)&a, sizeof a);
+        uint8_t b[256]; int n = recv(u, (char *)b, sizeof b, 0);
+        if (n >= 11 && !memcmp(b, "ARENA!", 6)) { memcpy(gid, b + 6, 4); *players = b[10]; ok = 1; }
+    }
+    closesocket(u);
+    om_log("arena of this player (pid %llu): %s, arena %u, %d players", (unsigned long long)me, ok ? "answered" : "NO ANSWER from our NEX server", *gid, *players);
+    return ok;
 }
 
 /* ---------------------------------------------------------------- sockets and nn::ssl: logged */
@@ -353,6 +386,7 @@ static ImportFn om_prev(const char *name) {
 static void online_menu_register(void) {
     const char *e = getenv("SSBU_ONLINE_MENU");
     if (!e || e[0] != '1') return;
+    g_om_on = 1;
     if ((e = getenv("SSBU_ONLINE_MENU_SERVER")) && *e) {
         struct in_addr a;
         if (InetPtonA(AF_INET, e, &a) != 1) { printf("[online-menu] SSBU_ONLINE_MENU_SERVER=%s is not an IPv4 address: the Online menu stays off\n", e); return; }

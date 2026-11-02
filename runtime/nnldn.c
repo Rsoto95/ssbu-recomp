@@ -951,9 +951,19 @@ void nnldn_register(void) {
         {SOK("10SetSockOptEiiiPKvj"), so_setsockopt}, {SOK("10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj"), so_setsockopt}, {"nnsocketSetSockOpt", so_setsockopt},
     };
     int n = (int)(sizeof defs / sizeof defs[0]), missing = 0;
-    for (int i = 0; i < n; i++) if (!import_data(defs[i].name)) { printf("[online] \"%s\" is not an import of the game\n", defs[i].name); missing++; }
-    register_imports(defs, n);
-    printf("[online] nn::ldn and nn::socket replaced by the virtual network (%d handlers, %d not imported)\n", n, missing);
+    /* (2026-11-02, arenas) with the game's own Online menu on our servers (SSBU_ONLINE_MENU=1: online_menu.inc) Pia and NEX
+     * need the PC's real sockets (our NEX server on TCP 443, the NAT check, the other players' Pia sockets): nn::socket is
+     * then left to nnnet_c4a.inc and only nn::ldn is the virtual network's (Local Wireless rooms do not work in this mode;
+     * the rollback messages still go through the lobby: net_relay.c has its own sockets). */
+    static ImportDef use[sizeof defs / sizeof defs[0]];
+    int kept = 0, sockets = 1;
+    { const char *om = getenv("SSBU_ONLINE_MENU"); if (om && om[0] == '1') sockets = 0; }
+    for (int i = 0; i < n; i++)
+        if (sockets || (strncmp(defs[i].name, SOK(""), sizeof SOK("") - 1) && strncmp(defs[i].name, "nnsocket", 8))) use[kept++] = defs[i];
+    for (int i = 0; i < kept; i++) if (!import_data(use[i].name)) { printf("[online] \"%s\" is not an import of the game\n", use[i].name); missing++; }
+    register_imports(use, kept);
+    if (sockets) printf("[online] nn::ldn and nn::socket replaced by the virtual network (%d handlers, %d not imported)\n", n, missing);
+    else printf("[online] nn::ldn replaced by the virtual network (%d handlers, %d not imported); nn::socket left to the PC's sockets (SSBU_ONLINE_MENU=1: the game's Online menu)\n", kept, missing);
     fflush(stdout);
     net_start();                          /* join the lobby during boot: the address is there when Local Wireless opens */
 }

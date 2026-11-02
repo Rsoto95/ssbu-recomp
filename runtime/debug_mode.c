@@ -489,6 +489,7 @@ static int hs_layout(uint64_t st, uint16_t out[11]) {
     }
     return 0;
 }
+int dm_melee_mode(void) { return rd8(MELEE_INFO); }      /* (2026-11-02) the match block's melee mode: 0 local versus, 1 Local Wireless room, 0x14 Battle Arena */
 static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
     if (idx == 0) {
         RbhMatch me; memset(&me, 0, sizeof me);
@@ -499,6 +500,7 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         me.ctx_seed = rd32(GA(0x710530d380ULL)); safe_read(GA(0x71050c5ad0ULL), me.ctx_hist, sizeof me.ctx_hist); safe_read(MELEE_INFO + 0x420, me.ctx_stage, sizeof me.ctx_stage);   /* (hs12) the stage set-up's inputs (rb_hs.h) */
         if (getenv("SSBU_RB_NET_WATCH")) { uint64_t off = strtoull(getenv("SSBU_RB_NET_WATCH"), NULL, 16); if (off <= 1) off = 0x98;      /* (hs12: =<hex offset in the match block>) */
             uint64_t w[1] = {MELEE_INFO + (off & ~7ull)}; printf("[rbnet] research: match block + 0x%llx at the handshake = %016llx\n", (unsigned long long)(off & ~7ull), (unsigned long long)rd64(w[0])); debug_watch(w, 1); }
+        {   void rbn_arena_hint(int p1_is_network); rbn_arena_hint(rd8(st + 0x451) != 0); }      /* (2026-11-02, arenas) */
         g_hs_ok = rbn_handshake(&me, &g_hs_m); g_hs_local = 0;
         {   int rbn_room_rollback(void); g_hs_lwr = g_hs_ok && rbn_room_rollback(); }
         {   int rbn_match_cancelled(void); if (!g_hs_ok && rbn_match_cancelled() == 2) return; }      /* (R3 pub2) a Local Wireless room fight: nothing changed */

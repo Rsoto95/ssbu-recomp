@@ -343,7 +343,8 @@ class Lobby:
         elif kind == ROOMS and len(p) >= 16 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.on_rooms(c, p[12:16], now)
         elif kind == MATCH and len(p) >= 17 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
-            self.on_match(c, p[12], struct.unpack_from(">I", p, 13)[0], now)
+            self.on_match(c, p[12], struct.unpack_from(">I", p, 13)[0], now,
+                          struct.unpack_from(">Q", p, 17)[0] if len(p) >= 25 else 0)
         elif kind == RB and 16 < len(p) <= 1500 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             # online rollback message: to one player of the same lobby code (destination 0 = all others, only with a private code)
             # (1.4) on the public code only to its matched rollback opponent or a player of its Local Wireless room
@@ -648,7 +649,7 @@ class Lobby:
         self.match_send(c, time.monotonic())
         self.say("match: %s: %s" % (c.name, why))
 
-    def on_match(self, c, op, sid, now):
+    def on_match(self, c, op, sid, now, key=0):
         """MATCH from a game: op 1 = search (sent again every 2 s while it waits: the answer says how it stands), 0 = cancel,
         2 = (1.4) search for a rollback match (paired only with another op 2 search; no room: the one that waited longer is
         player 1, ROLE_HOST)."""
@@ -670,8 +671,10 @@ class Lobby:
             c.match = None
             self.match_end(other, MS_PEER_LEFT, "%s searches again" % c.name)
         c.search_id, c.search_since, c.final, c.kind = sid, now, None, op
+        c.match_key = key                           # (2026-11-02) a Battle Arena's match: paired only with the same key
         self.say("match: %s searches an opponent%s (build %s)" % (c.name, " for a rollback match" if op == KIND_ROLLBACK else "", c.part[0].decode("ascii", "replace")))
-        waiting = [x for x in self.by_at.values() if x is not c and x.part == c.part and x.search_since is not None and x.match is None and x.kind == op]
+        waiting = [x for x in self.by_at.values() if x is not c and x.part == c.part and x.search_since is not None and x.match is None and x.kind == op
+                   and getattr(x, "match_key", 0) == key]   # (a key: the game's own Online menu, one Battle Arena: its two players only)
         a = self.arenas.get(c.part)
         pair = a.pair if a is not None and op == KIND_ROLLBACK else None
         if pair and c in pair:                      # 1.6 arena: a player taking its turn meets only its opponent of the turn

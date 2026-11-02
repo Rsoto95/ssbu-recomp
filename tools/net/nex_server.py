@@ -726,6 +726,35 @@ def pia_claim(client):
     return a
 
 
+ARENA_QUERY_PORT = 39599
+
+
+def arena_query_listener(host, log):
+    """(2026-11-02) The game asks which Battle Arena its player is in, to look for its opponent of a rollback match in the
+    lobby with that arena as the key (ssbu_lobby.py MATCH op 2 with a key; runtime net_session.c). UDP, little-endian:
+    "ARENA?" + pid u64 -> "ARENA!" + gid u32 (0: in none) + n u8 + n x pid u64 (the arena's players, its maker first)."""
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        u.bind((host, ARENA_QUERY_PORT))
+    except OSError as e:
+        log("arena query port %s:%d: %s" % (host, ARENA_QUERY_PORT, e))
+        return
+    log("arena queries on UDP %s:%d" % (host, ARENA_QUERY_PORT))
+    while True:
+        try:
+            data, addr = u.recvfrom(256)
+        except OSError:
+            continue
+        if len(data) < 14 or data[:6] != b"ARENA?":
+            continue
+        pid = struct.unpack_from("<Q", data, 6)[0]
+        with ARENAS_LOCK:
+            found = [(g, a.get("players", [a["owner"]])) for g, a in ARENAS.items() if pid in a.get("players", [a["owner"]])]
+        gid, players = found[-1] if found else (0, [])
+        u.sendto(b"ARENA!" + struct.pack("<IB", gid, len(players)) + b"".join(struct.pack("<Q", x) for x in players), addr)
+        log("arena query from %s:%d: pid %d -> arena %d, players %s" % (addr[0], addr[1], pid, gid, players))
+
+
 def sinkhole(host, port, log):
     """Pia's reachability check sends to the NAT check server on UDP 33334 / 33335 and expects NO answer: the ports
     only have to be open (on Windows a datagram to a closed loopback port comes back as an error on the game's socket:
@@ -1093,6 +1122,7 @@ def main():
             socks[(host, port)] = u
     for here in list(socks):
         threading.Thread(target=nat_listener, args=(here, socks, log), daemon=True).start()
+    threading.Thread(target=arena_query_listener, args=(a.bind, log), daemon=True).start()
     for host in NAT_HOSTS:
         for port in (33334, 33335):
             threading.Thread(target=sinkhole, args=(host, port, log), daemon=True).start()

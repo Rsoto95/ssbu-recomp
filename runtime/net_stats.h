@@ -58,6 +58,7 @@ void net_match_get(NetMatch *out);          /* never blocks */
  * a Local Wireless room): paired only with another such search; MM_MATCHED / MM_TOGETHER = the opponent is known, its
  * address is where the rollback messages go (net_rb_send) until the next search. */
 void net_match_find_rb(void);
+void net_match_find_rb_key(uint64_t key);    /* (2026-11-02) the same, paired only with a search of the same key (a Battle Arena: its gathering id) */
 
 /* Ranked ladder (lobby 1.5, tools/net/ladder.py): this player's standing as the lobby last said it (WELCOME, RESULT_ACK;
  * F1 > Online), and the result of a rollback match that ladder_report.c hands over at its end (sent until acknowledged). */
