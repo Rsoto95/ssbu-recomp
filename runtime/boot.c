@@ -466,6 +466,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     print_build_identity();
     launch_defaults();
+    {   void gfx_online_menu_env(void); gfx_online_menu_env(); }      /* (2026-11-02) graphics.ini online_menu = on: the Online menu's variables (gfx_options.c) */
     {   /* pad tools and their self-test (nnpad_sdl.c): no game is started */
         int nnhid_pad_selftest(void), nnpad_tool(int, char **);
         int tool;

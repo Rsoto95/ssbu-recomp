@@ -31,6 +31,9 @@ const char *gfx_language(void);           /* language = auto "" | a language cod
 int gfx_unlock_all(void);                 /* unlock_all = off 0 | on 1 (unlock_all.c) */
 int gfx_input_delay(void);                /* input_delay = auto 0 | 1..8 frames of online rollback fights (net_session.c), default 3 */
 void gfx_set_input_delay(int d);          /* (the F1 menu: used from the next match) */
+#define GFX_ONLINE_MENU_SERVER_DEFAULT "160.34.219.118"   /* (2026-11-02) the project's Battle Arenas server (Oracle Cloud, Mexico Central): tools/net/deploy_arenas.sh */
+int gfx_online_menu(void);               /* online_menu = off 0 | on 1: the game's own Online menu on our server (F1 > Experimental; from the next start) */
+void gfx_online_menu_env(void);          /* (boot.c, first thing) online_menu = on: SSBU_ONLINE_MENU / _SERVER / SSBU_ONLINE set unless given */
 int gfx_fight_sound(void);                /* fight_sound = off 0 | on 1: music and effects in online rollback fights (snapshot_ring.c) */
 void gfx_set_fight_sound(int on);         /* (the F1 menu: used from the next match) */
 int gfx_sharpening(void);                 /* sharpening = 0 (off, default) .. 100 (nvn_vk_draw.c sharpen_present) */

@@ -30,6 +30,23 @@ int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
 static volatile int g_gfx_input_delay = 3;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
 int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
 void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
+/* (2026-11-02) the game's own Online menu (Battle Arenas) on our server: online_menu = off | on, online_menu_server =
+ * <IPv4 address> (default the project's arena server). Turned into SSBU_ONLINE_MENU / _SERVER and SSBU_ONLINE (the lobby of
+ * the arenas' rollback, <server>:39500) at the start by gfx_online_menu_env (boot.c), when SSBU_ONLINE_MENU is not set. */
+static int g_gfx_online_menu; static char g_gfx_online_menu_server[64] = GFX_ONLINE_MENU_SERVER_DEFAULT;
+int gfx_online_menu(void) { gfx_options(); return g_gfx_online_menu; }
+static int gfx_ipv4(const char *v) { int a, b, c, d; char x; return sscanf(v, "%d.%d.%d.%d%c", &a, &b, &c, &d, &x) == 4 && a >= 0 && a < 256 && b >= 0 && b < 256 && c >= 0 && c < 256 && d >= 0 && d < 256; }
+void gfx_online_menu_env(void) {
+    gfx_options();
+    if (!g_gfx_online_menu || getenv("SSBU_ONLINE_MENU")) return;
+    char lobby[96]; snprintf(lobby, sizeof lobby, "%s:39500", g_gfx_online_menu_server);
+    _putenv_s("SSBU_ONLINE_MENU", "1");
+    _putenv_s("SSBU_ONLINE_MENU_SERVER", g_gfx_online_menu_server);
+    {   const char *was = getenv("SSBU_ONLINE"); _putenv_s("SSBU_ONLINE_MENU_PREV_ONLINE", was && *was ? was : "-"); }
+    _putenv_s("SSBU_ONLINE", lobby);                        /* (the arenas' lobby wins over Play SSBU.bat's group lobby: their rollback needs lobby 1.7) */
+    _putenv_s("SSBU_ONLINE_MENU_FROM_INI", "1");            /* (menu.cpp restart_game: the next copy reads graphics.ini again) */
+    printf("graphics.ini online_menu = on: the game's Online menu (Battle Arenas) on %s, lobby %s\n", g_gfx_online_menu_server, lobby);
+}
 static volatile int g_gfx_fight_sound;                /* fight_sound = off | on (snapshot_ring.c); the F1 menu changes it while running */
 int gfx_fight_sound(void) { gfx_options(); return g_gfx_fight_sound; }
 void gfx_set_fight_sound(int on) { gfx_options(); g_gfx_fight_sound = on; }
@@ -188,6 +205,12 @@ static const char *const k_default_ini =
 ";   game. Used from the next match.\r\n"
 "fight_sound = off\r\n"
 "\r\n"
+"; online_menu = off | on\r\n"
+";   The game's own Online menu (Online > Battle Arenas) on the project's server (F1 > Experimental). on: arenas with\r\n"
+";   rollback 1-on-1 fights and spectators; Local Wireless rooms are not available then. Used from the next start.\r\n"
+";   online_menu_server = <IPv4 address> changes the server (default " GFX_ONLINE_MENU_SERVER_DEFAULT ").\r\n"
+"online_menu = off\r\n"
+"\r\n"
 "; sharpening = 0 .. 100      (Vulkan)\r\n"
 ";   0 = off. Sharpens the picture on its way to the window, without halos (kept inside each pixel's neighbours).\r\n"
 ";   Try 30 to 50. Costs one small GPU pass per frame. Read at start.\r\n"
@@ -324,6 +347,8 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
         else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
+        else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
+        else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }
         else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
         else if (!_stricmp(key, "screenshot_dir")) snprintf(g_gfx_shot_dir, sizeof g_gfx_shot_dir, "%s", val);      /* nvn_vk_draw.c */
         else if (!_stricmp(key, "screenshot_key")) { int n = (val[0] == 'F' || val[0] == 'f') ? atoi(val + 1) : 0; g_gfx_shot_key = n >= 1 && n <= 24 ? 0x70 + n - 1 : 0; }      /* VK_F1 = 0x70 */

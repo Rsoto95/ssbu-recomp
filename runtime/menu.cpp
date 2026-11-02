@@ -946,6 +946,13 @@ static void restart_game(void) {
     HANDLE h[3] = {GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)};
     for (int i = 0; i < 3; i++) if (h[i] && h[i] != INVALID_HANDLE_VALUE) SetHandleInformation(h[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
     si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = h[0]; si.hStdOutput = h[1]; si.hStdError = h[2];
+    if (getenv("SSBU_ONLINE_MENU_FROM_INI")) {           /* (2026-11-02) the arenas' variables came from graphics.ini: the next copy reads it again */
+        const char *prev = getenv("SSBU_ONLINE_MENU_PREV_ONLINE");
+        char was[256]; snprintf(was, sizeof was, "%s", prev ? prev : "-");
+        SetEnvironmentVariableW(L"SSBU_ONLINE_MENU", NULL); SetEnvironmentVariableW(L"SSBU_ONLINE_MENU_SERVER", NULL);
+        SetEnvironmentVariableW(L"SSBU_ONLINE_MENU_FROM_INI", NULL); SetEnvironmentVariableW(L"SSBU_ONLINE_MENU_PREV_ONLINE", NULL);
+        if (strcmp(was, "-")) SetEnvironmentVariableA("SSBU_ONLINE", was); else SetEnvironmentVariableW(L"SSBU_ONLINE", NULL);
+    }
     wchar_t *cmd = _wcsdup(GetCommandLineW());
     printf("menu: restarting the game: %ls\n", cmd);
     fflush(stdout);
@@ -1108,7 +1115,19 @@ static void sec_experimental(void) {
         if (getenv("SSBU_RB_NET")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Rollback is active in this run (SSBU_RB_NET=%s).", getenv("SSBU_RB_NET"));
         sec_online();
     }
-    if (online_differs() || S.runahead != S0.runahead || strcmp(pname, pname0)) {
+    /* (2026-11-02) the game's own Online menu (Battle Arenas) on the project's server: graphics.ini online_menu, read at
+     * the start (gfx_options.c gfx_online_menu_env). [restart] */
+    static int om = -1, om0;
+    if (om < 0) { om = gfx_online_menu(); om0 = om; }
+    ImGui::Separator();
+    if (onoff("omenu", om != 0, true)) { om = !om; ini("online_menu", om ? "on" : "off"); printf("menu: Battle Arenas (the game's Online menu): %s (at the next start)\n", om ? "on" : "off"); fflush(stdout); }
+    ImGui::SameLine(); ImGui::Text("Battle Arenas (the game's Online menu)");
+    tag(1, om != om0);
+    help("ON: the game's own Online > Battle Arenas work, on the project's server: make an arena (it gets a 5-character code), "
+         "your friends find it by its code or in the list. 1-on-1 fights use rollback; the others in the arena watch them. "
+         "While it is ON the Local Wireless rooms are not available: turn it OFF to play in them again. Used when the game starts again.");
+    if (getenv("SSBU_ONLINE_MENU")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Battle Arenas are on in this run (server %s). In the game: Online > Battle Arenas.", getenv("SSBU_ONLINE_MENU_SERVER") ? getenv("SSBU_ONLINE_MENU_SERVER") : "127.0.0.1");
+    if (online_differs() || S.runahead != S0.runahead || strcmp(pname, pname0) || om != om0) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. These changes are used when the game starts again.");
         if (ImGui::Button("Restart the game now")) restart_game();
