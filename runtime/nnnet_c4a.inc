@@ -441,6 +441,15 @@ static void so_name(Ctx *c, int peer) {                   /* (fd, sockaddr *, so
 static void socket_GetSockName(Ctx *c) { so_name(c, 0); }
 static void socket_GetPeerName(Ctx *c) { so_name(c, 1); }
 static int so_host_flags(int f) { return (f & 2 ? MSG_PEEK : 0) | (f & 1 ? MSG_OOB : 0) | (f & 0x40 ? MSG_WAITALL : 0); }
+/* (2026-11-03) received bytes go to a buffer of ours first, then are COPIED into the game's buffer: Windows writing them
+ * straight into guest memory bypassed the rollback's write tracking (the page was not seen as changed: a capture missed it),
+ * and a page the tracking had made read-only made the receive fail; a Battle Arena friend's connection to our server was
+ * aborted (10053) right after a fight's first save. Our own copy is an ordinary write: tracked. */
+static char *so_bounce(size_t n) {
+    static __declspec(thread) char *b; static __declspec(thread) size_t cap;
+    if (n > cap) { free(b); b = (char *)malloc(n); cap = b ? n : 0; }
+    return b;
+}
 static void so_recv(Ctx *c, uint64_t addr, uint64_t lenp) {   /* (fd, buf, size, flags [, sockaddr *, socklen_t *]) */
     uint64_t buf = A1, size = A2;
     int gf = (int)A3, flags = 0;
@@ -455,13 +464,17 @@ static void so_recv(Ctx *c, uint64_t addr, uint64_t lenp) {   /* (fd, buf, size,
     int alen = sizeof a;
     memset(&a, 0, sizeof a);
     if (temp) so_nonblock(o, 1);
-    if (addr) n = recvfrom(o->s, (char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf), (struct sockaddr *)&a, &alen);
-    else n = recv(o->s, (char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf));
+    int want = (int)(size > (1u << 20) ? (1u << 20) : size);       /* (at most 1 MB per call: a stream gives the rest next time) */
+    char *tmp = so_bounce((size_t)want);
+    if (!tmp) { tmp = (char *)(uintptr_t)buf; want = (int)(size > 0x7fffffff ? 0x7fffffff : size); }
+    if (addr) n = recvfrom(o->s, tmp, want, so_host_flags(gf), (struct sockaddr *)&a, &alen);
+    else n = recv(o->s, tmp, want, so_host_flags(gf));
     if (n < 0) {
         int w = WSAGetLastError();
-        if (w == WSAEMSGSIZE) n = (int)size;              /* datagram longer than the buffer: BSD truncates silently */
+        if (w == WSAEMSGSIZE) n = want;                   /* datagram longer than the buffer: BSD truncates silently */
         else e = so_wsa_errno(w, 0);
     }
+    if (n > 0 && tmp != (char *)(uintptr_t)buf) memcpy((void *)(uintptr_t)buf, tmp, (size_t)n);
     if (temp) so_nonblock(o, 0);
     int stream = o->type == SOCK_STREAM;
     so_put(o);

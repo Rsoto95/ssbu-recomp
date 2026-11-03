@@ -401,7 +401,12 @@ static void om_ssl_io(Ctx *c, int write) {                 /* (connection, buffe
     if (!n) return;
     SoObj *o = n->fd >= 0 ? so_get(n->fd, NULL) : NULL;
     if (!o) { M32(self + 0x24) = 0xce7bu; RET(0xce7bu); return; }
-    k = write ? send(o->s, (const char *)(uintptr_t)buf, size, 0) : recv(o->s, (char *)(uintptr_t)buf, size, 0);
+    if (write) k = send(o->s, (const char *)(uintptr_t)buf, size, 0);
+    else {                                                 /* (2026-11-03) through our own buffer (nnnet_c4a.inc so_bounce: 10053) */
+        char *tmp = size > 0 ? so_bounce((size_t)size) : NULL;
+        k = recv(o->s, tmp ? tmp : (char *)(uintptr_t)buf, size, 0);
+        if (k > 0 && tmp) memcpy((void *)(uintptr_t)buf, tmp, (size_t)k);
+    }
     if (k < 0) {
         int w = WSAGetLastError();
         r = w == WSAEWOULDBLOCK ? OM_SSL_WOULD_BLOCK : OM_SSL_IO_ERROR;
