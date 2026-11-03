@@ -91,7 +91,10 @@ class Fake:
     def state(self, secs=2.0):
         """the next MATCH_STATE: (id, state, role, flags, peer, peer name, searching, players, waited)"""
         b = self.rx(L.MATCH_STATE, secs)
-        assert len(b) == 49, len(b)
+        assert len(b) in (49, 56), len(b)
+        if len(b) == 56:                                # (2026-11-03) a rollback match: 'A' + the opponent's address
+            assert b[49:50] == b"A", b[49:50]
+            self.direct_at = struct.unpack_from(">IH", b, 50)
         sid, st, role, flags, peer = struct.unpack_from(">IBBBI", b)
         return (sid, st, role, flags, peer, b[11:43].rstrip(b"\0")) + struct.unpack_from(">HHH", b, 43)
 

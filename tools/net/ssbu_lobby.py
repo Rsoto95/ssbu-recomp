@@ -652,9 +652,20 @@ class Lobby:
                 flags |= 1
         since = m.at if m is not None else c.search_since
         same = [x for x in self.by_at.values() if x.part == c.part]
-        self.send(hdr(MATCH_STATE) + struct.pack(">IBBBI", sid & 0xFFFFFFFF, state, role, flags, peer) + name[:NAME_LEN].ljust(NAME_LEN, b"\0")
-                  + struct.pack(">HHH", sum(1 for x in same if x.search_since is not None), len(same),
-                                min(int(now - since), 65535) if since is not None else 0), c.at)
+        out = (hdr(MATCH_STATE) + struct.pack(">IBBBI", sid & 0xFFFFFFFF, state, role, flags, peer) + name[:NAME_LEN].ljust(NAME_LEN, b"\0")
+               + struct.pack(">HHH", sum(1 for x in same if x.search_since is not None), len(same),
+                             min(int(now - since), 65535) if since is not None else 0))
+        if m is not None and c.kind == KIND_ROLLBACK and c.direct and o.direct:
+            # (2026-11-03) a rollback match goes player to player, as in the rooms of net_minilobby.c: 'A' + the address the
+            # opponent is reached at (u32, u16): where this lobby sees it, or its LAN address when both come from the same
+            # public address (the same house). Without it every message of the match went through this server (a friend
+            # and the user, both in Mexico: ~156 ms round trip through the VM instead of the direct path).
+            if o.at[0] == c.at[0] and o.lan[0]:
+                a_ip, a_port = o.lan
+            else:
+                a_ip, a_port = struct.unpack(">I", socket.inet_aton(o.at[0]))[0], o.at[1]
+            out += b"A" + struct.pack(">IH", a_ip, a_port)
+        self.send(out, c.at)
 
     def match_end(self, c, state, why):
         """c's search or match is over (state: MS_TIMEOUT, MS_PEER_LEFT, MS_TOGETHER, MS_EXPIRED)."""
