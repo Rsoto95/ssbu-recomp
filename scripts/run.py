@@ -493,7 +493,8 @@ def main():
     work = os.path.join(a.build, 'work')
     rollback = False
     gini = os.path.join(a.build, 'config', 'graphics.ini')
-    if a.play and a.exe == main_exe and not (a.linux or a.mac) and ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false'):   # (fork: on unless graphics.ini says off)
+    # (2026-11-03) ssbu_staging.exe: the test version beside the normal one ("Play SSBU (STAGING).bat"), played the same way
+    if a.play and a.exe in (main_exe, 'ssbu_staging.exe') and not (a.linux or a.mac) and ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false'):   # (fork: on unless graphics.ini says off)
         # F1 > Experimental > Rollback netcode: the normal exe and game DLL with SSBU_RB_NET (since R4 the ring saves the fight on
         # the normal build: runtime/rb_learned.c); the old pair ssbu_native_rb.exe + ssbu_game_r1.dll of an older install is not used
         rollback = True
