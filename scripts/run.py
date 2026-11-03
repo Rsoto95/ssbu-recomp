@@ -134,6 +134,40 @@ def auto_update(gini):
     return True
 
 
+def exe_behind_release(work):
+    """(2026-11-02) The release install.py names (runtime-<commit>) when build/work/ssbu_native.exe is another one (its
+    version says "<date>.<time>-<commit>"), else None. Friends pressed "Update and restart" and got the same game: the code
+    was updated but the game program was not (and nothing tried again)."""
+    try:
+        with open(os.path.join(REPO, 'scripts', 'install.py'), encoding='utf-8') as f:
+            m = re.search(r"RUNTIME_RELEASE = \('[^']*/runtime-([0-9a-f]{7})/", f.read())
+        exe = os.path.join(work, 'ssbu_native.exe')
+        if not (m and os.path.isfile(exe)):
+            return None
+        with open(exe, 'rb') as f:
+            return None if re.search(rb'\d{8}\.\d{4}-' + m.group(1).encode(), f.read()) else m.group(1)
+    except OSError:
+        return None
+
+
+def ensure_release_exe(work):
+    """(2026-11-02) Before the game opens: an installed copy whose game program is not the release's gets it now (the
+    package of install.py, checked; a file still held by a closing game: tried again)."""
+    want = exe_behind_release(work)
+    if not want:
+        return
+    print('=' * 78)
+    print('The game program is not the newest one (%s): installing it now.' % want, flush=True)
+    for attempt in range(4):
+        if runtime_only_update(work) or not exe_behind_release(work):
+            print('The new game program is installed.')
+            break
+        time.sleep(5)
+    else:
+        print('The new game program could not be installed: close every game window and open "Play SSBU.bat" again.')
+    print('=' * 78, flush=True)
+
+
 UPDATE_ASKED = False    # (2026-11-02) this launcher was started by the game's "Update and restart" (SSBU_UPDATE_WAIT_PID)
 
 
@@ -362,6 +396,11 @@ def main():
         # the new run.py (and the rest) runs from here on; the launcher's own arguments again
         return subprocess.run([sys.executable, os.path.abspath(__file__)] + sys.argv[1:],
                               env=dict(os.environ, SSBU_PLAY_UPDATED='1')).returncode
+    if a.play and os.name == 'nt' and not (a.linux or a.mac or a.build) and not os.path.exists(os.path.join(REPO, '.git')):
+        try:
+            ensure_release_exe(os.path.join(os.path.abspath(build_location.get()), 'work'))
+        except Exception as e:                            # (never keeps the game from starting)
+            print('The game program check was skipped (%s).' % e)
     if sys.platform.startswith('linux') and not a.linux and not a.build and not os.path.exists(os.path.join(REPO, 'build', 'state.json')):
         a.linux = True
     if sys.platform == 'darwin' and not a.mac and not a.linux and not a.build and os.path.exists(os.path.join(REPO, 'build-macos', 'state.json')):
