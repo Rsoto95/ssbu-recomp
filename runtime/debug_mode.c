@@ -465,6 +465,7 @@ static void lwr_own_controls(uint64_t st, uint8_t out[LWR_CTL + 2]) {
         if (e && strlen(e) >= 2 * LWR_CTL) { for (int k = 0; k < LWR_CTL; k++) { unsigned v = 0; sscanf(e + 2 * k, "%2x", &v); out[k] = (uint8_t)v; }
             printf("[rbnet] room match: TEST: this game's player's controls from SSBU_RB_NET_TEST_CTL\n"); fflush(stdout); } }
 }
+static int g_seat_of_rank[2];                   /* (defined below, with the arena's seats) */
 static ImportFn g_orig_controls_fill;
 static void controls_fill_hook(Ctx *c, void *user) {
     (void)user;
@@ -472,7 +473,10 @@ static void controls_fill_hook(Ctx *c, void *user) {
     if (!g_hs_lwr || !g_lwr_ctl_ok || g_lwr_ctl_applied) return;
     uint64_t o = sr64(GA(0x71052c40f0ULL)); if (!o) return;
     for (int i = 0; i < 2; i++) {
-        for (int k = 0; k < LWR_CTL; k++) wr8(o + 0x18 + 0x50ull * (uint64_t)i + (uint64_t)k, g_lwr_ctl[i][k]);
+        /* (2026-11-03) the controls object is indexed like the records: by ARENA SEAT in a Battle Arena (player i = seat
+         * g_seat_of_rank[i]; {0, 1} anywhere else). By rank, a match of seats 1 and 2 gave each fighter the wrong layout. */
+        uint64_t at = o + 0x18 + 0x50ull * (uint64_t)g_seat_of_rank[i];
+        for (int k = 0; k < LWR_CTL; k++) wr8(at + (uint64_t)k, g_lwr_ctl[i][k]);
         char t[200]; int n = 0; for (int k = 0; k < LWR_CTL; k++) n += snprintf(t + n, sizeof t - n, "%02x", g_lwr_ctl[i][k]);
         printf("[rbnet] room match: player %d plays with its own name-tag controls (profile + 0x24 .. + 0x4e: %s; record option byte %u)\n", i + 1, t, g_lwr_ctl[i][LWR_CTL]);
     }
