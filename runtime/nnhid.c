@@ -639,6 +639,10 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                 buttons |= ps.buttons;
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
                 if (ps.rx || ps.ry) { rx = ps.rx; ry = ps.ry; }
+                if (kind == 2 && ps.gc) {               /* (2026-11-03) a merged GameCube controller's analog L / R too (its shield) */
+                    if ((unsigned)ps.trig_l > trig_l) trig_l = (unsigned)ps.trig_l;
+                    if ((unsigned)ps.trig_r > trig_r) trig_r = (unsigned)ps.trig_r;
+                }
             }
     } else if (x_present(slot) && devices_live() && !menu_input_blocked()) {
         const XGamepad *g = &g_x[slot].st.pad;
@@ -758,11 +762,20 @@ static void hid_SetSupportedNpadIdType(Ctx *c) {            /* (const NpadIdType
  * controller on its own PC (sent in the room handshake, debug_mode.c), so both PCs pick the same control set of each player */
 static int g_lwr_style_on, g_lwr_gc[2];
 void nnhid_lwr_styles(int on, int gc0, int gc1) { g_lwr_gc[0] = gc0; g_lwr_gc[1] = gc1; g_lwr_style_on = on; }
-int nnhid_native_gc0(void) { return sdl_on() && nnpad_is_gc(0) && nnpad_gc_native() && (g_supported_styles & STYLE_GC); }
+/* (2026-11-03) online every pad of this PC plays port 1 (net_merge): port 1 is a GameCube controller when one of them is (a
+ * friend's GameCube adapter came up as player 2 behind the keyboard: port 1 was shown as a Pro Controller, the fight used his
+ * name tag's Pro controls and his R did something else) */
+static int port1_gc(void) {
+    if (nnpad_is_gc(0)) return 1;
+    if (!net_merge()) return 0;
+    for (int p = 1; p < 8; p++) if (nnpad_present(p) && nnpad_is_gc(p)) return 1;
+    return 0;
+}
+int nnhid_native_gc0(void) { return sdl_on() && port1_gc() && nnpad_gc_native() && (g_supported_styles & STYLE_GC); }
 static uint32_t npad_style(uint32_t id) {
     if (!player_connected(id)) return 0;
     if (g_lwr_style_on && id < 2) return g_lwr_gc[id] && (g_supported_styles & STYLE_GC) ? STYLE_GC : STYLE_FULLKEY;
-    if (sdl_on() && nnpad_is_gc((int)id) && nnpad_gc_native() && (g_supported_styles & STYLE_GC)) return STYLE_GC;
+    if (sdl_on() && (id == 0 ? port1_gc() : nnpad_is_gc((int)id)) && nnpad_gc_native() && (g_supported_styles & STYLE_GC)) return STYLE_GC;
     return STYLE_FULLKEY;
 }
 static void hid_GetNpadStyleSet(Ctx *c) {   /* (const NpadIdType &) */
