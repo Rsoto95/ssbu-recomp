@@ -369,10 +369,17 @@ static void oe_track_focus(void) {
      * (something else has the input, as under an overlay or a library applet); minimised = Background (as behind the HOME menu).
      * The handling mode is what [sdk 0x32c3d0, table 0xa7ff70] sends for the oe mode: 0 = (notify 0, suspend 1), 1 = (notify 1,
      * suspend 0) NoSuspend, 2 = (notify 1, suspend 1), 3 = (notify 0, suspend 1) + SetOutOfFocusSuspendingEnabled(1) AlwaysSuspend. */
+    /* (2026-11-03) On a PC another window taking the input (a click on a second monitor, Discord, a browser) is not an
+     * overlay over the game: told NotInFocus the game paused itself (its main thread waits for the next message), the
+     * picture froze for as long as the other window had the input and, online, the other player's game froze with it.
+     * So a visible window that is not the foreground window stays InFocus; minimised is handled as before.
+     * SSBU_FOCUS_PAUSE=1: the console's rule (obscured = NotInFocus), as tests/oe_focus_test.c checks it. */
+    static int pause_obscured = -1;
+    if (pause_obscured < 0) { const char *e = getenv("SSBU_FOCUS_PAUSE"); pause_obscured = e && e[0] == '1'; }
     int minimised = g_oe_window && IsIconic(g_oe_window);
     int state = ours ? 1                                                    /* InFocus */
               : g_oe_focus_mode == 3 ? 1                                    /* AlwaysSuspend: the application never learns it */
-              : !minimised ? 2                                              /* obscured: NotInFocus in the other three modes */
+              : !minimised ? (pause_obscured ? 2 : 1)                       /* obscured: InFocus on a PC (NotInFocus with SSBU_FOCUS_PAUSE=1) */
               : g_oe_focus_mode == 1 ? 3 : 1;                               /* background: Background (3) for a NoSuspend application, else unchanged */
     if (state != g_oe_focus_state) {
         g_oe_focus_state = state;
