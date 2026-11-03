@@ -1166,6 +1166,10 @@ static ImportFn g_fh_orig;
 static struct { uint64_t boma; int entry; long long frame; } g_fh_f[8];
 static int g_fh_n, g_fh_det, g_fh_detoff;
 static FILE *g_fh_out;
+/* (2026-11-03) online rollback fights: each frame's checksum is made and compared with the other game's (net_session.c
+ * on_check: "DESYNC: frame N" in the log) WITHOUT the per-frame lines of SSBU_FIGHT_HASH (thousands a minute): every log
+ * said "checksums compared 0", and a desync showed only as a game waiting for ever. SSBU_FIGHT_CHECK=0: off. */
+static int g_fh_check;
 static uint64_t g_fh_run = 0xcbf29ce484222325ull;
 static long long g_fh_poll_hist[4]; static unsigned long g_fh_poll_tid;
 static long long g_fh_drop_calls, g_fh_drop_frames, g_fh_frame_ends;
@@ -1229,10 +1233,10 @@ static void fh_hook(Ctx *c, void *user) {
                 input_mark("fight");
             }
         }
-        if (k < g_fh_n && !g_fh_out) ++g_fh_f[k].frame;
+        if (k < g_fh_n && !g_fh_out && !g_fh_check) ++g_fh_f[k].frame;
         {   int ladder_wants_damage(void); void ladder_note_damage(int entry, float dmg);      /* (lobby 1.5) ladder_report.c: each player's damage in this pass */
-            if (k < g_fh_n && !g_fh_out && ladder_wants_damage()) { float d = 0; fd_call(c, FD_N("25DamageModule__damage_impl") "i", boma, 0, 0, 0, 0, 0, 0, &d); ladder_note_damage(g_fh_f[k].entry, d); } }
-        if (k < g_fh_n && g_fh_out) {
+            if (k < g_fh_n && !g_fh_out && !g_fh_check && ladder_wants_damage()) { float d = 0; fd_call(c, FD_N("25DamageModule__damage_impl") "i", boma, 0, 0, 0, 0, 0, 0, &d); ladder_note_damage(g_fh_f[k].entry, d); } }
+        if (k < g_fh_n && (g_fh_out || g_fh_check)) {
             long long f = ++g_fh_f[k].frame;
             float x = 0, y = 0, mf = 0, dmg = 0;
             int st = (int)fd_call(c, FD_N("30StatusModule__status_kind_impl"), boma, 0, 0, 0, 0, 0, 0, NULL);
@@ -1257,10 +1261,10 @@ static void fh_hook(Ctx *c, void *user) {
             if (wk_on < 0) { const char *w = getenv("SSBU_FIGHT_HASH_WORK"); wk_on = w && w[0] && (fd_value(w, &wk_id) || ((wk_id = (double)strtoul(w, NULL, 16)), wk_id != 0)); }
             char wtxt[32] = "";
             if (wk_on) snprintf(wtxt, sizeof wtxt, " w %d", (int)fd_call(c, FD_N("24WorkModule__get_int_impl") "i", boma, (uint64_t)(int64_t)wk_id, 0, 0, 0, 0, 0, NULL));
-            fprintf(g_fh_out, "F %lld P %lld %d e %d st %x mot %llx mf %08x x %08x y %08x dmg %08x rngcalls %u rng %08x H %016llx  (%.3f %.3f frame %.2f %.2f%%)%s\n",
+            if (g_fh_out) fprintf(g_fh_out, "F %lld P %lld %d e %d st %x mot %llx mf %08x x %08x y %08x dmg %08x rngcalls %u rng %08x H %016llx  (%.3f %.3f frame %.2f %.2f%%)%s\n",
                     f, g_rgs_next, g_ra_phase, g_fh_f[k].entry, st, (unsigned long long)mot, bm, bx, by, bd, rc, (unsigned)(rh ^ (rh >> 32)), (unsigned long long)g_fh_run, (double)x, (double)y, (double)mf, (double)dmg, wtxt);
-            if ((f & 63) == 0) fflush(g_fh_out);
-            if (k == 0 && f % 300 == 0 && rb) {            /* which generators are drawn from: the 9 call counters */
+            if (g_fh_out && (f & 63) == 0) fflush(g_fh_out);
+            if (g_fh_out && k == 0 && f % 300 == 0 && rb) {            /* which generators are drawn from: the 9 call counters */
                 printf("[fight] frame %lld: generator calls", f);
                 for (int i = 0; i < 9; i++) printf(" %u", w[i * 5 + 4]);
                 printf("; frame line on thread %lu, pad poll on thread %lu; polls that saw 0 / 1 / 2 / 3+ new fight frames: %lld %lld %lld %lld; frame ends %lld, of them %lld reported dropped refreshes (%lld in all)\n", (unsigned long)GetCurrentThreadId(), (unsigned long)g_fh_poll_tid,
@@ -1317,8 +1321,10 @@ static void fight_hash_start(void) {
     g_fh_det = (d && d[0] && d[0] != '0') || rbn_handshake_wanted();      /* R3: a match between online players needs it (no extra logic frames; generators from the agreed seed) */
     g_fh_detoff = o ? atoi(o) : 0;
     if ((!h || !h[0] || h[0] == '0') && !g_fh_det) return;
+    {   const char *ck = getenv("SSBU_FIGHT_CHECK"); g_fh_check = g_fh_det && !(ck && ck[0] == '0'); }
     if (h && h[0] && h[0] != '0') g_fh_out = strcmp(h, "1") == 0 ? stdout : fopen(h, "w");
     int id = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", fh_hook, NULL, &g_fh_orig);
+    printf("[fight] per-frame desync check with the other game: %s\n", g_fh_check || (h && h[0] && h[0] != '0') ? "on" : "off");
     printf("[fight] SSBU_FIGHT_HASH %s, SSBU_DETERMINISTIC %d (off mask %d); hook on the fighters' frame line: %s\n", g_fh_out ? "on" : "off", g_fh_det, g_fh_detoff, id ? "installed or waiting for lua2cpp_common" : hook_error());
     if (g_fh_det) printf("[fight] SSBU_DETERMINISTIC: hook on the frame end %llx (dropped refreshes -> extra logic frames): %s\n", (unsigned long long)GA(0x710386fc30ull),
                          hook_install(GA(0x710386fc30ull), fh_frame_end, NULL, &g_fh_orig_frame_end) ? "installed" : hook_error());

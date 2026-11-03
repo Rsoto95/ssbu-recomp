@@ -414,6 +414,14 @@ static void rbg_step_body(Ctx *c) {
             g_rbg_in_match = 2; g_rbg_quit_t0 = now_ms();
             break;
         }
+        if (!rbn_spectating() && now_ms() - ts >= 10000) {     /* (2026-11-03) the other game answers but sends no moves for 10 s: */
+            void rbn_give_up(const char *why);                     /* its fight is over (a desync): leave this one instead of waiting for ever */
+            g_rbg_stall_ms += now_ms() - ts; stalled = 0;
+            LOG("r1: RB NET: no moves from the other player for 10 s at frame %lld while it still answers: the two games no longer show the same fight; leaving the match (player 1 walks off)\n", i);
+            rbn_give_up("the other game stopped sending its moves for 10 s (the two games no longer showed the same fight)");
+            g_rbg_in_match = 2; g_rbg_quit_t0 = now_ms();
+            break;
+        }
         {   /* while waiting: our newest pads again every 50 ms (a lost datagram must not leave both games waiting), a line every 2 s */
             static double last_tx, last_log; double now = now_ms();
             if (now - last_tx >= 50) { last_tx = now; rbn_resend(); }

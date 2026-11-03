@@ -1328,6 +1328,13 @@ static void spec_give_up(const char *why) {
 }
 /* rollback_controller.c, at the start barrier: no pads from the fighters in time */
 void rbn_spec_give_up(const char *why) { if (g_spec) spec_give_up(why); }
+/* (2026-11-03) a fighter: the other game stopped sending its moves while still answering (its fight was over: the two games no
+ * longer showed the same fight); this match is left the way of a match not agreed (rollback_controller.c: player 1 walks off) */
+void rbn_give_up(const char *why) {
+    AcquireSRWLockExclusive(&g_hs_lock); snprintf(g_hs_why, sizeof g_hs_why, "%s", why); InterlockedExchange(&g_hs_cancelled, 1); ReleaseSRWLockExclusive(&g_hs_lock);
+    printf("[rbnet] %s at frame %lld (checksums compared %lld, DESYNCS %lld, first %lld): this match is left here\n", why, (long long)g_cur, g_check_ok + g_desync, g_desync, g_desync_first);
+    fflush(stdout);
+}
 /* rollback_controller.c, every turn of its wait for the pads of the next frame (waited_ms since the wait began): a notice after
  * 1 s; after 30 s the match is given up (1: the controller leaves it the way of a match not agreed) */
 int rbn_spec_wait(double waited_ms) {
