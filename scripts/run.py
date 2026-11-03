@@ -180,15 +180,35 @@ def git_head():
         return ''
 
 
+def git_branch():
+    try:
+        return subprocess.run(['git', '-C', REPO, 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+SWITCH_BRANCHES = ('main', 'staging')   # (2026-11-03) the branches F1 > About can switch a git checkout between
+
+
 def dev_update(gini):
-    """(2026-11-02) A git checkout (the developer's own copy) is never updated by itself. With graphics.ini auto_update = ask
-    the game still says when GitHub has a newer version (update_watch) and F1 > "Update and restart" brings it in, only when
-    pressed: `git pull --ff-only` (refused while tracked files have changes not committed: nothing is touched then) and the
-    prebuilt runtime it names (runtime_only_update). True when the code changed (run.py starts again with it)."""
-    if not (UPDATE_ASKED and ini_get(gini, 'auto_update') == 'ask'):
+    """(2026-11-02) A git checkout (the developer's own copy). With graphics.ini auto_update = ask the game says when GitHub
+    has a newer version (update_watch) and F1 > "Update and restart" brings it in, only when pressed: `git pull --ff-only`
+    (refused while tracked files have changes not committed: nothing is touched then) and the prebuilt runtime it names
+    (runtime_only_update). True when the code changed (run.py starts again with it).
+    (2026-11-03) auto_update = on: the same at every Play, by itself, on the main and staging branches (a feature branch is
+    never touched). F1 > About > "Switch to staging" / "Switch to main" set SSBU_SWITCH_BRANCH: git checkout of that branch
+    first, then the same update."""
+    ini = ini_get(gini, 'auto_update')
+    switch = os.environ.get('SSBU_SWITCH_BRANCH', '')
+    branch = git_branch()
+    if switch not in SWITCH_BRANCHES or switch == branch:
+        switch = ''
+    if not ((UPDATE_ASKED and ini in ('ask', 'on')) or switch or (ini == 'on' and branch in SWITCH_BRANCHES)):
         return False
     print('=' * 78)
-    print('Update asked in the game (F1 > Update and restart): this is a git checkout, updating it with git.')
+    print('%s: this is a git checkout (branch %s), updating it with git.' % (
+        'Switch to %s asked in the game' % switch if switch else 'Update asked in the game (F1 > Update and restart)' if UPDATE_ASKED
+        else 'Automatic update (graphics.ini auto_update = on)', branch))
     dirty = subprocess.run(['git', '-C', REPO, 'status', '--porcelain', '--untracked-files=no'], capture_output=True, text=True).stdout.strip()
     if dirty:
         print('NOT updated: files of the project have changes that are not committed (commit or stash them first):')
@@ -196,7 +216,14 @@ def dev_update(gini):
         print('=' * 78)
         return False
     before = git_head()
-    rc = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only']).returncode
+    if switch:
+        if subprocess.run(['git', '-C', REPO, 'checkout', switch]).returncode:
+            print('NOT switched: git checkout %s failed.' % switch)
+            print('=' * 78)
+            return False
+        os.environ.pop('SSBU_SWITCH_BRANCH', None)          # (done: the restarted launcher must not switch again)
+        print('Switched to the %s branch.' % switch)
+    rc = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only', 'origin', git_branch()]).returncode
     if rc:
         print('NOT updated: git pull --ff-only failed (code %d): this copy has commits GitHub does not have.' % rc)
         print('=' * 78)
@@ -204,7 +231,9 @@ def dev_update(gini):
     changed = git_head() != before
     try:
         work = os.path.join(os.path.abspath(build_location.get()), 'work')
-        if runtime_only_update(work):
+        if not exe_behind_release(work):
+            print('The game program is already the one of this version.')
+        elif runtime_only_update(work):
             print('The prebuilt game program of this version is installed.')
     except Exception as e:                                  # (the code is new anyway: Install SSBU.bat > Resume can finish it)
         print('The game program was not installed (%s): "Install SSBU.bat" > Resume installs it.' % e)
@@ -217,7 +246,7 @@ def update_watch_wanted(gini):
     """(fork, 2026-11-01) the same conditions as auto_update, minus the restart guard: a player's installed copy, not a git checkout.
     (2026-11-02) A git checkout too with auto_update = ask: it is told, and updates only when "Update and restart" is pressed."""
     if os.path.exists(os.path.join(REPO, '.git')):
-        return ini_get(gini, 'auto_update') == 'ask'
+        return ini_get(gini, 'auto_update') in ('ask', 'on')
     return ini_get(gini, 'auto_update') not in ('off', '0', 'no', 'false')
 
 
@@ -234,7 +263,9 @@ def update_watch(flag):
         while True:
             time.sleep(600)
             try:
-                want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.channel_branch()),
+                # (2026-11-03) a git checkout follows its own branch (staging was compared with main)
+                br = (git_branch() or 'main') if os.path.exists(os.path.join(REPO, '.git')) else update.channel_branch()
+                want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, br),
                                    'application/vnd.github.sha', timeout=8).decode().strip()
             except Exception:                         # no internet, GitHub down or its rate limit: next time
                 continue
@@ -293,7 +324,9 @@ def runtime_only_update(work):
             os.replace(dst + '.part', dst)
         man = setup.read_manifest(dst)
         why = setup.runtime_mismatch(man) if man else 'not a runtime package'
-        if why and man and 'game-data interface' not in why and not os.path.exists(os.path.join(REPO, '.git')):
+        # (2026-11-03) a git checkout too: a release built while untracked work was in the folder lists files another branch
+        # does not have (runtime/tourney_card.inc refused main's program on the developer's copy)
+        if why and man and 'game-data interface' not in why:
             # (2026-11-03) a player's copy with some files unlike the release's (kept edits, an old leftover): the program
             # is installed anyway; what it must fit is the game built here, checked below (game_data.h). Friends stayed on
             # the old program for good while their code was the newest.
@@ -498,6 +531,12 @@ def main():
         # the normal build: runtime/rb_learned.c); the old pair ssbu_native_rb.exe + ssbu_game_r1.dll of an older install is not used
         rollback = True
         print('Rollback netcode on (the normal build; no second compile needed)')
+    # (2026-11-03) the developer's test-version launcher (ssbu_staging.exe, shows STAGING) after F1 > About > "Switch to
+    # main": the normal exe; and the staging copy is the program just installed after an update or a switch
+    staging_copy = a.exe.lower() == 'ssbu_staging.exe' and os.path.exists(os.path.join(REPO, '.git'))
+    if staging_copy and git_branch() != 'staging':
+        print('This copy is on the %s branch: the normal game (%s), not the test version.' % (git_branch(), main_exe))
+        a.exe = main_exe
     exe = os.path.join(work, a.exe)
     native = os.path.join(work, main_exe)
     if not os.path.exists(exe):
@@ -505,7 +544,7 @@ def main():
     elif exe != native and os.path.getmtime(exe) < os.path.getmtime(native):
         # a copy made before the last link runs the old runtime; an exe linked on purpose with other sources
         # (RECOMP_EXE) is older too, so it is only replaced when asked
-        if a.refresh:
+        if a.refresh or staging_copy:
             shutil.copy2(native, exe)
             print('%s was older than %s: copied again' % (a.exe, main_exe))
         else:
@@ -562,7 +601,7 @@ def main():
                     if os.path.isfile(p)), None)
         if icd:
             env['VK_DRIVER_FILES'] = icd
-    if a.play and os.name == 'nt' and not (a.linux or a.mac) and a.exe == main_exe and update_watch_wanted(gini):
+    if a.play and os.name == 'nt' and not (a.linux or a.mac) and (a.exe == main_exe or staging_copy) and update_watch_wanted(gini):
         flag = os.path.join(a.build, 'update_ready.txt')    # (fork) a newer version found while playing (update_watch)
         try:
             os.remove(flag)
@@ -575,6 +614,7 @@ def main():
             import update
             env['SSBU_UPDATE_HAVE'] = git_head() if os.path.exists(os.path.join(REPO, '.git')) else (update.read_manifest() or {}).get('commit') or ''
             # (2026-11-03) the branch this copy follows (F1 > About asks GitHub for it; staging = test versions)
+            env['SSBU_UPDATE_AUTO'] = ini_get(gini, 'auto_update') or ''   # (2026-11-03) F1 > About: a git checkout's "update by itself"
             env['SSBU_UPDATE_BRANCH'] = (subprocess.run(['git', '-C', REPO, 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True).stdout.strip() or 'main') if os.path.exists(os.path.join(REPO, '.git')) else update.channel_branch()
             if not os.path.exists(os.path.join(REPO, '.git')) and exe_behind_release(work):
                 # (2026-11-03) the code is the newest but the game program is not (its install failed): the game's check
