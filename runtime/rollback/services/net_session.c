@@ -800,6 +800,13 @@ static int g_ts_left;
 static uint64_t g_hacc = 0xcbf29ce484222325ull; static int g_hlines;
 #define HR 512
 static uint64_t g_hash[HR]; static long long g_hframe[HR], g_hfinal_upto; static long long g_desync, g_check_ok, g_desync_first = -1;
+/* (2026-11-03) the newest frame whose checksum is SETTLED: final (both players' pads known) AND older than any rollback can
+ * reach (10 frames behind the frame this game is on; the ring holds 8). A frame is final the moment the other player's pad
+ * arrives, but its re-run with that pad comes at the next pass: sent or compared then, the checksum was the one of the guess,
+ * and a fight identical on both games (the sampled frames' values the same) reported "DESYNC" on 97 % of its frames. */
+#define PCQ 64                                          /* (2026-11-03) the other game's checksums waiting until their frame is settled here */
+static long long g_pcq_f[PCQ]; static uint32_t g_pcq_v[PCQ]; static unsigned g_pcq_i;      /* (one slot, always overwritten by a newer one: "compared 0") */
+static long long settled_upto(void) { long long c = (long long)g_cur - 10; return g_hfinal_upto < c ? g_hfinal_upto : c; }
 static long long g_peer_check_f; static uint32_t g_peer_check;
 
 /* (hs13) g_lockstep: a match without the rollback ring: every frame waits for the other pad */
@@ -869,7 +876,7 @@ static void send_pads(void) {
     m.type = RB_MSG_PADS; m.player = g_local; m.newest = (int32_t)newest; m.ack = rb_input_remote_newest_consecutive_frame(g_remote);
     long long from = g_peer_ack + 1; if (newest - from + 1 > RB_MAX_PADS_PER_MSG) from = newest - RB_MAX_PADS_PER_MSG + 1; if (from < 1) from = 1;
     for (long long f = newest; f >= from; f--) { RbPad p; if (!rb_input_local_get((int)f, &p)) break; m.pads[m.count++] = p; }
-    long long cf = g_hfinal_upto;
+    long long cf = settled_upto();
     if (cf > 0 && g_hframe[cf % HR] == cf) { m.check_frame = (int32_t)cf; m.check = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32)); }
     send_msg(&m); g_sent_newest = newest;
     rbs_fighter_pads();                                 /* (2026-11-02) a fighter of an arena with spectators: the same final pads to the group */
@@ -898,7 +905,8 @@ RbPad rbn_pad(int player, long long f) {
     return p;
 }
 static void on_check(long long cf, uint32_t ck) {
-    if (cf <= 0 || cf > g_hfinal_upto || g_hframe[cf % HR] != cf) { g_peer_check_f = cf; g_peer_check = ck; return; }      /* not final here yet: kept for later */
+    if (cf > settled_upto()) { g_pcq_f[g_pcq_i % PCQ] = cf; g_pcq_v[g_pcq_i % PCQ] = ck; g_pcq_i++; return; }      /* (compared at rbn_finalize) */
+    if (cf <= 0 || g_hframe[cf % HR] != cf) return;      /* not final here yet: kept for later */
     uint32_t mine = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32));
     if (mine == ck) g_check_ok++;
     else { g_desync++; if (g_desync_first < 0) { g_desync_first = cf; printf("[rbnet] DESYNC: frame %lld checksum here %08x, the other game %08x\n", cf, mine, ck); fflush(stdout);
@@ -1051,7 +1059,8 @@ void rbn_finalize(long long cur) {
         ladder_final(f);
     }
     if (g_hlog && (upto & 63) == 0) fflush(g_hlog);
-    if (g_peer_check_f > 0 && g_peer_check_f <= g_hfinal_upto) { long long cf = g_peer_check_f; g_peer_check_f = 0; on_check(cf, g_peer_check); }
+    {   long long st = settled_upto();
+        for (int q = 0; q < PCQ; q++) if (g_pcq_f[q] > 0 && g_pcq_f[q] <= st) { long long cf = g_pcq_f[q]; g_pcq_f[q] = 0; on_check(cf, g_pcq_v[q]); } }
 }
 
 /* ---------------------------------------------------------------- time sync: extra wait per frame (ms) */
@@ -1101,7 +1110,7 @@ void rbn_match_reset(void) {
     g_stat_pred = g_stat_padget = g_stat_mis = 0; g_ts_n = 0; g_ts_extra = 0; g_ts_left = 0;
     g_hacc = 0xcbf29ce484222325ull; g_hlines = 0; g_lacc_n = 0;
     memset(g_hash, 0, sizeof g_hash); memset(g_hframe, 0, sizeof g_hframe); g_hfinal_upto = 0;
-    g_desync = 0; g_check_ok = 0; g_desync_first = -1; g_peer_check_f = 0; g_peer_check = 0;
+    g_desync = 0; g_check_ok = 0; g_desync_first = -1; g_peer_check_f = 0; g_peer_check = 0; memset(g_pcq_f, 0, sizeof g_pcq_f); g_pcq_i = 0;
     memset(g_acc_n, 0, sizeof g_acc_n); memset(g_acc_var, 0, sizeof g_acc_var); memset(g_un, 0, sizeof g_un); memset(g_unl, 0, sizeof g_unl);
     g_padcheck_bad = 0; g_padcheck_first = -1;
     AcquireSRWLockExclusive(&g_hs_lock); g_hs_mine_ok = 0; g_hs_blk_done = 0; memset(g_hs_peer_have, 0, sizeof g_hs_peer_have); ReleaseSRWLockExclusive(&g_hs_lock);
@@ -1267,7 +1276,7 @@ static void rbs_send_pads(long long from, int most, int check) {
     m.newest = (int32_t)upto;
     if (newest >= from) { m.newest = (int32_t)newest; for (long long f = newest; f >= from && m.count < most; f--) { int x = (int)(f % RBS_HIST); if (g_rbs_hist_f[x] != f) break; m.pads[m.count++] = g_rbs_hist[x]; } }
     ReleaseSRWLockShared(&g_rbs_lock);
-    if (check) { long long cf = g_hfinal_upto; if (cf > 0 && g_hframe[cf % HR] == cf) { m.check_frame = (int32_t)cf; m.check = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32)); } }
+    if (check) { long long cf = settled_upto(); if (cf > 0 && g_hframe[cf % HR] == cf) { m.check_frame = (int32_t)cf; m.check = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32)); } }
     RbsPadsHead h; memset(&h, 0, sizeof h); rbs_head(&h, RBS_PADS); h.tag = pads_tag(); h.rank = (uint8_t)g_local;
     memcpy(b, &h, sizeof h);
     size_t k = rb_msg_build(b + sizeof h, sizeof b - sizeof h, &m);
