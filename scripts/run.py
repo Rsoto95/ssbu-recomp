@@ -103,6 +103,15 @@ def auto_update(gini):
             m = re.search(r"RUNTIME_RELEASE = \('([^']+)'", f.read())
         if m and not os.path.isfile(os.path.join(REPO, 'deps', m.group(1).rsplit('/', 1)[-1])):
             pending = m.group(1).rsplit('/', 1)[-1]
+        # (2026-11-02) the package downloaded but the game program never replaced (the old game was still closing: "Access
+        # is denied"): the code said "up to date" from then on and the old exe was played for good. The exe names its
+        # commit in its version ("<date>-<commit>"): another one than the release's is installed again.
+        c = re.search(r'/runtime-([0-9a-f]{7})/', m.group(1)) if m else None
+        exe = os.path.join(os.path.dirname(os.path.dirname(gini)), 'work', 'ssbu_native.exe')
+        if not pending and c and os.path.isfile(exe):
+            with open(exe, 'rb') as f:
+                if not re.search(rb'\d{8}\.\d{4}-' + c.group(1).encode(), f.read()):
+                    pending = m.group(1).rsplit('/', 1)[-1]
     except OSError:
         pass
     if not re.fullmatch(r'[0-9a-f]{40}', want) or (want == have and not pending):
