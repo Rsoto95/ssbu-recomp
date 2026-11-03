@@ -86,7 +86,12 @@ static int ra_free(const char *n) {      /* never in a waiting import; its pages
      * NEX client's transport threads ("NEX TransportBufferThread(recv / (send") sit in a blocking read of our NEX server's
      * connection (nn::ssl, not a waiting import: 90 captures skipped, rollback off at frame 81) and Pia's own threads
      * ("Pia ...") keep the arena's session alive. Neither is the fight's simulation: never held. */
-    return strstr(n, "nopus") != NULL || !strncmp(n, "NEX ", 4) || !strncmp(n, "Pia ", 4);
+    /* (2026-11-03) ONLY with the Online menu on (SSBU_ONLINE_MENU=1), and only NEX: a free Pia thread kept running while a
+     * load put its memory back under it, and Local Wireless uses Pia too: a Local Wireless fight crashed in a Pia thread
+     * (f_710013c030 -> f_7100168910 read 0x2c21) after rollbacks, and desynced. Pia's threads wait in imports: held as before. */
+    static int om = -1;
+    if (om < 0) { const char *e = getenv("SSBU_ONLINE_MENU"); om = e && e[0] == '1'; }
+    return strstr(n, "nopus") != NULL || (om && !strncmp(n, "NEX ", 4));
 }
 /* save: every other guest thread held inside a waiting import (its place and registers noted); 0 = one was not there in time */
 /* (R3 hs16, TEST ONLY) SSBU_RB_HOLD_PROF=1: where a hold's time goes, per thread (suspend + context + retries), and the
