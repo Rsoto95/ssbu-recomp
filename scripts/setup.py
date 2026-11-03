@@ -302,6 +302,11 @@ def runtime_mismatch(m):
                 'start "Install SSBU.bat" there' % made)
     if m.get('game_data_version') != game_data_version():
         return 'runtime package refused: %s (game-data interface %s, this copy has %d)' % (what, m.get('game_data_version'), game_data_version())
+    if not os.path.exists(os.path.join(REPO, '.git')):
+        # (2026-11-03) a player's copy (not a git checkout): the prebuilt program only has to fit the game-data interface
+        # (checked above). Files unlike the release's (an edit update.py kept, a leftover, OneDrive) made the installer
+        # refuse it and ask for the C++ Build Tools to build everything: friends stayed on the old program.
+        return None
     want = m.get('tree_files')
     if isinstance(want, dict) and want:
         have = tree_files()
