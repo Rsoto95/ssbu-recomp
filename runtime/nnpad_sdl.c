@@ -751,7 +751,7 @@ void nnpad_rumble(int player, float low, float high) {
     lock();
     d = dev_of(player);
     if (d && (d->gp || d->js)) {
-        float s = eff_rumble(d) ? EFF(d, rstr) : 0.0f;
+        float s = g_cfg.def.rumble != 0 && eff_rumble(d) ? EFF(d, rstr) : 0.0f;     /* ([general] rumble = off: nothing vibrates, F1 > Controls) */
         float l = low * s, h = high * s;
         Uint16 rl = (Uint16)(l >= 1 ? 65535 : l <= 0 ? 0 : (int)(l * 65535.0f)), rh = (Uint16)(h >= 1 ? 65535 : h <= 0 ? 0 : (int)(h * 65535.0f));
         ULONGLONG now = GetTickCount64();
@@ -1440,6 +1440,44 @@ int nnpad_describe(char *out, int n) {               /* one line per device: "pl
     return k;
 }
 const char *nnpad_config_path(void) { nnpad_kb_vk(0); return g_cfg.path; }
+/* (2026-11-03, F1 > Controls > Vibration) [general] rumble = on / off: off silences every controller whatever the game's own
+ * setting says (a friend had vibration off in the game and it vibrated anyway). Written to the file and used at once. */
+int nnpad_rumble_on(void) { nnpad_kb_vk(0); return g_cfg.def.rumble != 0; }
+void nnpad_rumble_set(int on) {
+    nnpad_kb_vk(0);
+    lock();
+    g_cfg.def.rumble = on ? 1 : 0;
+    size_t len = 0;
+    char *old = read_file(g_cfg.path, &len), *out = (char *)malloc(len + 64);
+    if (old && out) {
+        size_t o = 0; int in_general = 0, done = 0;
+        for (char *p = old; *p; ) {
+            char *e = strchr(p, '
+');
+            size_t l = e ? (size_t)(e - p) + 1 : strlen(p);
+            if (*p == '[') {
+                if (in_general && !done) { o += (size_t)sprintf(out + o, "rumble = %s
+", on ? "on" : "off"); done = 1; }
+                in_general = !_strnicmp(p, "[general]", 9);
+            }
+            if (in_general && !done && !_strnicmp(p, "rumble", 6) && (p[6] == ' ' || p[6] == '=' || p[6] == '	')) {
+                o += (size_t)sprintf(out + o, "rumble = %s
+", on ? "on" : "off"); done = 1;
+            } else { memcpy(out + o, p, l); o += l; }
+            p += l;
+        }
+        if (in_general && !done) o += (size_t)sprintf(out + o, "rumble = %s
+", on ? "on" : "off");
+        FILE *f = fopen(g_cfg.path, "wb");
+        if (f) { fwrite(out, 1, o, f); fclose(f); }
+        g_cfg.mtime = file_mtime(g_cfg.path);
+    }
+    free(old); free(out);
+    if (!on) for (int q = 0; q < 8; q++) { Dev *d = dev_of(q); if (d && d->gp) SDL_RumbleGamepad(d->gp, 0, 0, 0); else if (d && d->js) SDL_RumbleJoystick(d->js, 0, 0, 0); if (d) { d->rl = d->rh = 0; } }
+    unlock();
+    say("nn::pad: vibration %s (settings menu; [general] rumble of %s)
+", on ? "on" : "off", g_cfg.path);
+}
 
 /* ================================================================ U1, the Controls page of the settings menu (menu.cpp)
  * Every pad target (16 Pro buttons + 8 stick directions) can be bound for ONE controller ([device <GUID>]) or for every

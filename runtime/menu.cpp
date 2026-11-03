@@ -51,6 +51,7 @@ extern char **environ;
 #include "net_stats.h"
 extern "C" int online_menu_status(int *players, int *ms, int *narenas, char codes[][6], int *members, int *most, int cap);   /* online_menu.inc (nnnet.c) */
 extern "C" const char *online_menu_server(void);
+extern "C" int nnpad_rumble_on(void); extern "C" void nnpad_rumble_set(int on);      /* nnpad_sdl.c: F1 > Controls > Vibration */
 extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
 extern "C" {
 #include "gfx_options.h"
@@ -747,6 +748,12 @@ static void sec_controls(void) {
     if (dv) snprintf(cur, sizeof cur, "%s (%s)%s", dv->name, nnpad_type_label(dv->type), dv->player >= 0 ? "" : " - no player");
     else snprintf(cur, sizeof cur, "Keyboard");
     const bool dis_2 = capturing();
+    {   /* (2026-11-03) every controller's vibration at once ([general] rumble of controllers.ini): off = nothing vibrates,
+         * whatever the game's own (name tag) setting says */
+        bool rumble = nnpad_rumble_on() != 0;
+        if (ImGui::Checkbox("Vibration (rumble)", &rumble)) nnpad_rumble_set(rumble ? 1 : 0);
+        ImGui::SameLine(); help("OFF: no controller vibrates, whatever the game's own setting (name tag controls) says. Used at once; kept in controllers.ini.");
+    }
     if (dis_2) ImGui::BeginDisabled();
     if (ImGui::BeginCombo("Device", cur)) {
         if (ImGui::Selectable("Keyboard", g_ctl_dev < 0)) g_ctl_dev = -1;
