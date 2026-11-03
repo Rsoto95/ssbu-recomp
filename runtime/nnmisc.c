@@ -563,6 +563,17 @@ static void err_dialog(unsigned category, unsigned number) {
     char text[160];
     if ((off && off[0] == '0') || getenv("SSBU_SEQ") || getenv("SSBU_PLAY") || getenv("SSBU_PRESS") || getenv("SSBU_SCRIPT")) return;
     snprintf(text, sizeof text, "Error Code: %04u-%04u\n\nAn error has occurred.", category, number);
+    {   /* (2026-11-03) in an online rollback fight the box held the game's thread until it was closed: no frame, the other
+         * player's game stalled, and the game's connection to the arena server timed out (a friend's 2618-0006 at a Battle
+         * Arena fight's start, then socket error 10053). The fight does not need the game's own online session: a notice
+         * that does not stop anything instead. */
+        int rbn_started(void); void menu_popup(const char *title, const char *text);
+        if (rbn_started()) {
+            char t2[200]; snprintf(t2, sizeof t2, "The game reported error %04u-%04u (its own online session). The fight goes on.", category, number);
+            menu_popup("Error", t2);
+            printf("nn::err: error %04u-%04u during an online rollback fight: shown as a notice, the game is not stopped\n", category, number);
+            return;
+        } }
     MessageBoxA(NULL, text, "Error", MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TASKMODAL | MB_TOPMOST);      /* (testers 2026-10-31: "se puso en negro") over the full-screen window: without it the box was hidden behind it and the game looked black and frozen */
 }
 static void err_ShowErrorResult(Ctx *c) {                 /* (Result): the console shows the error applet */

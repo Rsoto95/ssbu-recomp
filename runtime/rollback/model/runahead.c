@@ -81,6 +81,7 @@ static int th_blocked(HANDLE h) {
     return r[-2] == 0x0f && r[-1] == 0x05;
 }
 static int ra_audio(const char *n) { return strstr(n, "nus3::audio") || strstr(n, "sindou") || strstr(n, "AudioDevice"); }
+volatile int g_ra_base_save;              /* (2026-11-03) 1 while a fight's first save runs (snapshot_ring.c) */
 static int ra_free(const char *n) {      /* never in a waiting import; its pages (decoder state, output) are not simulation */
     /* (2026-11-02, Battle Arenas) the game's own online session lives on during an arena's fight played with rollback: the
      * NEX client's transport threads ("NEX TransportBufferThread(recv / (send") sit in a blocking read of our NEX server's
@@ -91,7 +92,11 @@ static int ra_free(const char *n) {      /* never in a waiting import; its pages
      * (f_710013c030 -> f_7100168910 read 0x2c21) after rollbacks, and desynced. Pia's threads wait in imports: held as before. */
     static int om = -1;
     if (om < 0) { const char *e = getenv("SSBU_ONLINE_MENU"); om = e && e[0] == '1'; }
-    return strstr(n, "nopus") != NULL || (om && !strncmp(n, "NEX ", 4));
+    /* (2026-11-03) and Pia's too, with the Online menu on, during the FIRST save of a fight only (g_ra_base_save,
+     * snapshot_ring.c): it holds every thread ~0.5-1 s, and Pia took the stop for its session lost (a friend's 2618-0006 at
+     * a Battle Arena fight's start). Every later capture and load holds Pia (the Local Wireless crash). */
+    extern volatile int g_ra_base_save;
+    return strstr(n, "nopus") != NULL || (om && (!strncmp(n, "NEX ", 4) || (g_ra_base_save && !strncmp(n, "Pia ", 4))));
 }
 /* save: every other guest thread held inside a waiting import (its place and registers noted); 0 = one was not there in time */
 /* (R3 hs16, TEST ONLY) SSBU_RB_HOLD_PROF=1: where a hold's time goes, per thread (suspend + context + retries), and the

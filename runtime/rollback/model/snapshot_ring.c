@@ -510,7 +510,9 @@ int r1_ring_capture(long long frame, Ctx *c) {
         g_rgp_seg = seg_was;
         if (g_rg_nomem) return 0;                         /* (hs13) out of memory: not tried again in this match */
         g_save_failed = 0; g_ra_wd_pause = 1; g_rs_drop = 1;
-        save(c); release(); g_rs_drop = 0;
+        { extern volatile int g_ra_base_save; g_ra_base_save = 1;   /* (runahead.c ra_free: Pia not held, Online menu only) */
+          save(c); release(); g_ra_base_save = 0; }
+        g_rs_drop = 0;
         g_ra_wd_pause = 0;
         if (g_save_failed == 2) { g_rg_nomem = 1; LOG("r1: RING: the base state was NOT made (out of memory: free commit %.0f MB, needed %.0f MB + 1024 MB left for the game): no rollback ring\n", g_save_avail_mb, g_save_need_mb); return 0; }
         if (g_save_failed) return 0;
