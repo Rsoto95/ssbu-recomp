@@ -291,6 +291,12 @@ def runtime_only_update(work):
             os.replace(dst + '.part', dst)
         man = setup.read_manifest(dst)
         why = setup.runtime_mismatch(man) if man else 'not a runtime package'
+        if why and man and 'game-data interface' not in why and not os.path.exists(os.path.join(REPO, '.git')):
+            # (2026-11-03) a player's copy with some files unlike the release's (kept edits, an old leftover): the program
+            # is installed anyway; what it must fit is the game built here, checked below (game_data.h). Friends stayed on
+            # the old program for good while their code was the newest.
+            print('Note: %s. The game program is installed anyway (it only has to fit the game built here).' % why)
+            why = None
         if why:
             print('The game program cannot be installed alone: %s' % why)
             return False
@@ -311,9 +317,29 @@ def runtime_only_update(work):
             if os.path.isfile(exe):
                 shutil.copy2(exe, os.path.join(work, 'ssbu_native_previous.exe'))
             for n in files:
-                with open(os.path.join(work, n + '.new'), 'wb') as f:
+                new, target = os.path.join(work, n + '.new'), os.path.join(work, n)
+                with open(new, 'wb') as f:
                     f.write(z.read(n))
-                os.replace(os.path.join(work, n + '.new'), os.path.join(work, n))
+                # (2026-11-03) a file held for a moment (OneDrive syncing it, the old game still closing): tried again for
+                # ~20 s; still held: the old one is renamed aside (Windows allows that for a running exe) and removed later
+                for attempt in range(20):
+                    try:
+                        os.replace(new, target)
+                        break
+                    except PermissionError:
+                        if attempt == 19:
+                            aside = target + '.old%d' % int(time.time())
+                            os.replace(target, aside)
+                            os.replace(new, target)
+                            print('%s was in use: the old one is kept as %s.' % (n, os.path.basename(aside)))
+                            break
+                        time.sleep(1)
+        for old in os.listdir(work):                      # (the ones set aside earlier, when no longer in use)
+            if re.search(r'\.(exe|dll)\.old\d+$', old):
+                try:
+                    os.remove(os.path.join(work, old))
+                except OSError:
+                    pass
         print('Installed %s from %s (the previous exe is ssbu_native_previous.exe).' % (', '.join(sorted(files)), os.path.basename(dst)))
         return True
     except Exception as e:                            # a download, a locked file, a bad zip: the installed game is played
