@@ -552,6 +552,10 @@ def join_matchmake_session_with_param(client, req):
         parts = a.setdefault("players", [a["owner"]])
         if client.pid not in parts:
             parts.append(client.pid)
+        seats = a.setdefault("seats", {a["owner"]: 0})
+        if client.pid not in seats:                    # (2026-11-03) the game's seat: the lowest one free now
+            taken = set(seats.values())
+            seats[client.pid] = next(s for s in range(64) if s not in taken)
         session = bytearray(a["session"])
         try:
             struct.pack_into("<I", session, session_participants_offset(session), len(parts))
@@ -679,6 +683,7 @@ def leave_arenas(pid, only_gid=None):
         if parts and pid in parts and pid != a["owner"]:
             parts.remove(pid)
             a.get("clients", {}).pop(pid, None)
+            a.get("seats", {}).pop(pid, None)
 
 
 def referee_1(client, req):
@@ -789,8 +794,16 @@ def arena_query_listener(host, log, socks=None):
             continue
         pid = struct.unpack_from("<Q", data, 6)[0]
         with ARENAS_LOCK:
-            found = [(g, a.get("players", [a["owner"]])) for g, a in ARENAS.items() if pid in a.get("players", [a["owner"]])]
-        gid, players = found[-1] if found else (0, [])
+            found = [(g, a.get("players", [a["owner"]]), dict(a.get("seats", {}))) for g, a in ARENAS.items() if pid in a.get("players", [a["owner"]])]
+        gid, players, seats = found[-1] if found else (0, [], {})
+        if seats and all(p in seats for p in players):
+            # (2026-11-03) indexed by the game's SEAT, pid 0 where a seat is empty: the game keeps a member's seat when others
+            # leave (the members [A, B] sat at seats 0 and 4; by list index B took itself for seat 1: not a fighter, so the
+            # other fighter found nobody and the match fell back to the game's own netcode)
+            by_seat = [0] * (max(seats[p] for p in players) + 1)
+            for p in players:
+                by_seat[seats[p]] = p
+            players = by_seat
         u.sendto(b"ARENA!" + struct.pack("<IB", gid, len(players)) + b"".join(struct.pack("<Q", x) for x in players), addr)
         log("arena query from %s:%d: pid %d -> arena %d, players %s" % (addr[0], addr[1], pid, gid, players))
 

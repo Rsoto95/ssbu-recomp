@@ -265,8 +265,10 @@ int online_menu_arena(uint32_t *gid, int *players, int *own_seat) {
         sendto(u, (const char *)q, sizeof q, 0, (struct sockaddr *)&a, sizeof a);
         uint8_t b[256]; int n = recv(u, (char *)b, sizeof b, 0);
         if (n >= 11 && !memcmp(b, "ARENA!", 6)) {
-            memcpy(gid, b + 6, 4); *players = b[10]; ok = 1;
-            for (int i = 0; i < *players && 11 + 8 * i + 8 <= n; i++) { uint64_t p; memcpy(&p, b + 11 + 8 * i, 8); if (p == me) *own_seat = i; }     /* (the arena's seats: its members in join order, measured) */
+            memcpy(gid, b + 6, 4); ok = 1; *players = 0;
+            /* (the arena's seats; (2026-11-03) indexed by the game's seat, pid 0 = an empty seat: members keep their seats when
+             * others leave, so only the real members count) */
+            for (int i = 0; i < b[10] && 11 + 8 * i + 8 <= n; i++) { uint64_t p; memcpy(&p, b + 11 + 8 * i, 8); if (p) ++*players; if (p == me) *own_seat = i; }
         }
     }
     closesocket(u);
