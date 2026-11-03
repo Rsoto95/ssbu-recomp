@@ -1082,6 +1082,8 @@ void rbn_match_reset(void) {
         AcquireSRWLockExclusive(&g_hs_lock); g_local = g_spec_saved_local; InterlockedExchange(&g_spec, 0); ReleaseSRWLockExclusive(&g_hs_lock);
         printf("[rbnet] spectator: the watched match is over\n");
     }
+    {   void nnhid_lwr_styles(int on, int gc0, int gc1);   /* (2026-11-03) the ports in their own controller kinds again NOW: kept until */
+        nnhid_lwr_styles(0, 0, 0); }                        /* the next set-up, the menu bound a player's controller to another slot ("my controller was not taken") */
     printf("[rbnet] match %d over: the session is ready for the next match (pads of an older match dropped so far: %lld)\n", g_match_n, (long long)g_rx_oldmatch);
     fflush(stdout);
 }
