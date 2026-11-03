@@ -46,7 +46,7 @@ DEFAULT_BRANCH = 'main'
 MANIFEST = os.path.join('build', 'update_manifest.json')
 BACKUP = os.path.join('build', 'update_backup')
 # never written, never deleted (first path component, lower case; a trailing * is a prefix)
-PROTECTED = ('.git', 'build', 'deps', 'config', 'saves', 'userdata*', 'build_location.txt')   # build_location.txt: the install location chosen in the window
+PROTECTED = ('.git', 'build', 'deps', 'config', 'saves', 'userdata*', 'build_location.txt', 'update_channel.txt')   # build_location.txt: the install location chosen in the window
 UA = {'User-Agent': 'ssbu-recomp-update'}
 
 # changed path prefix -> the earliest setup.py step that has to run again (the list is in STEPS order of setup.py)
@@ -258,6 +258,21 @@ def sha256_file(p):
     return h.hexdigest()
 
 
+CHANNEL_FILE = os.path.join(REPO_DIR, 'update_channel.txt')
+STAGING_BRANCH = 'staging'
+
+
+def channel_branch():
+    """(2026-11-03) The branch a player's copy updates from: 'staging' when update_channel.txt says so (F1 > About > Check for
+    staging updates writes it; Back to normal updates deletes it), else DEFAULT_BRANCH. Test versions reach only the friends
+    who asked for them; main gets tested work only."""
+    try:
+        with open(CHANNEL_FILE, encoding='utf-8', errors='replace') as f:
+            return STAGING_BRANCH if f.read().strip().lower() == STAGING_BRANCH else DEFAULT_BRANCH
+    except OSError:
+        return DEFAULT_BRANCH
+
+
 def is_protected(rel):
     first = rel.replace('\\', '/').split('/')[0].lower()
     for p in PROTECTED:
@@ -428,7 +443,7 @@ def main():
     is_git = os.path.exists(os.path.join(REPO_DIR, '.git')) and shutil.which('git')
     tracked = tracked_source() if is_git and not (a.repo and a.branch) else None
     a.repo = a.repo or (tracked and tracked[0]) or DEFAULT_REPO
-    a.branch = a.branch or (tracked and tracked[1]) or DEFAULT_BRANCH
+    a.branch = a.branch or (tracked and tracked[1]) or channel_branch()
     if not re.fullmatch(r'[\w.-]+/[\w.-]+', a.repo):
         die('--repo must look like owner/name')
     if is_git:

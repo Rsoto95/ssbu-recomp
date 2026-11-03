@@ -1816,18 +1816,40 @@ static DWORD wh_get(HMODULE w, const wchar_t *host, const wchar_t *path, const w
     buf[got] = 0;
     return got;
 }
+/* (2026-11-03) the update channel: the branch this copy follows (run.py SSBU_UPDATE_BRANCH: main, or staging when
+ * <repo>\update_channel.txt says so: test versions for the friends who help test). The check asks GitHub for that branch. */
+static char g_chk_branch[16] = "main";
+static const char *upd_branch(void) { const char *b = getenv("SSBU_UPDATE_BRANCH"); return b && *b ? b : "main"; }
+static int upd_repo_is_git(void) {
+    const char *d = getenv("SSBU_UPDATE_DIR"); char p[MAX_PATH];
+    if (!d || !*d) return 0;
+    snprintf(p, sizeof p, "%s\\.git", d);
+    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+}
+static void upd_set_channel(int staging) {               /* written for run.py / update.py (the next start and Update and restart) */
+    const char *d = getenv("SSBU_UPDATE_DIR"); char p[MAX_PATH];
+    if (d && *d) {
+        snprintf(p, sizeof p, "%s\\update_channel.txt", d);
+        if (staging) { FILE *f = fopen(p, "w"); if (f) { fputs("staging\n", f); fclose(f); } } else DeleteFileA(p);
+    }
+    _putenv_s("SSBU_UPDATE_BRANCH", staging ? "staging" : "main");
+    printf("menu: update channel: %s (%s)\n", staging ? "STAGING (test versions)" : "normal (main)", d && *d ? d : "no folder known"); fflush(stdout);
+}
 static DWORD WINAPI update_ask_thread(LPVOID unused) {
     (void)unused;
     char got[64] = ""; DWORD n = 0;
     HMODULE w = LoadLibraryW(L"winhttp.dll");
-    if (w) n = wh_get(w, L"api.github.com", L"/repos/Rsoto95/ssbu-recomp/commits/main", L"Accept: application/vnd.github.sha\r\n", got, sizeof got);
+    wchar_t path[160], ipath[160];
+    swprintf(path, 160, L"/repos/Rsoto95/ssbu-recomp/commits/%hs", g_chk_branch);
+    swprintf(ipath, 160, L"/Rsoto95/ssbu-recomp/%hs/scripts/install.py", g_chk_branch);
+    if (w) n = wh_get(w, L"api.github.com", path, L"Accept: application/vnd.github.sha\r\n", got, sizeof got);
     /* (2026-11-03) the game program too: the release the newest install.py names (runtime-<commit>) against this exe's version
      * ("<date>.<time>-<commit>"). A friend's code was the newest while the program was the old one, and this said "latest". */
     InterlockedExchange(&g_chk_exe_old, 0);
     {   static char inst[96 * 1024];
         const char *v = ssbu_version(), *dash = v ? strrchr(v, '-') : NULL;
         snprintf(g_chk_rt_have, sizeof g_chk_rt_have, "%.7s", dash ? dash + 1 : "");
-        DWORD k = w ? wh_get(w, L"raw.githubusercontent.com", L"/Rsoto95/ssbu-recomp/main/scripts/install.py", NULL, inst, sizeof inst) : 0;
+        DWORD k = w ? wh_get(w, L"raw.githubusercontent.com", ipath, NULL, inst, sizeof inst) : 0;
         const char *m = k ? strstr(inst, "/releases/download/runtime-") : NULL;
         g_chk_rt[0] = 0;
         if (m) {
@@ -1842,22 +1864,33 @@ static DWORD WINAPI update_ask_thread(LPVOID unused) {
     snprintf(g_chk_latest, sizeof g_chk_latest, "%.7s", got);
     const char *have = getenv("SSBU_UPDATE_HAVE");
     int newer = (have && *have && _strnicmp(have, got, 7) != 0) || g_chk_exe_old;
-    printf("menu: check for updates: GitHub has %s, this copy %s; game program published %s, this one %s: %s\n", g_chk_latest, have && *have ? have : "(not known)",
+    printf("menu: check for updates (branch %s): GitHub has %s, this copy %s; game program published %s, this one %s: %s\n", g_chk_branch, g_chk_latest, have && *have ? have : "(not known)",
            g_chk_rt[0] ? g_chk_rt : "?", g_chk_rt_have, newer ? "a NEWER version" : have && *have ? "the newest" : "?"); fflush(stdout);
     if (newer && getenv("SSBU_UPDATE_FLAG")) { FILE *f = fopen(getenv("SSBU_UPDATE_FLAG"), "w"); if (f) { fputs(g_chk_latest, f); fclose(f); } snprintf(g_upd, sizeof g_upd, "%s", g_chk_latest); }
     InterlockedExchange(&g_chk_state, newer ? 3 : 2);
     return 0;
 }
+static void upd_start_check(const char *branch) {
+    snprintf(g_chk_branch, sizeof g_chk_branch, "%s", branch);
+    InterlockedExchange(&g_chk_state, 1);
+    HANDLE t = CreateThread(NULL, 0, update_ask_thread, NULL, 0, NULL); if (t) CloseHandle(t); else InterlockedExchange(&g_chk_state, 4);
+}
 static void about_update_ui(void) {
     ImGui::Separator();
     LONG st = g_chk_state;
+    int staging = !strcmp(upd_branch(), "staging"), git = upd_repo_is_git();
+    if (git) ImGui::TextDisabled("Updates: this copy is a git checkout (branch %s): git decides what it runs.", upd_branch());
+    else if (staging) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Updates: STAGING (test versions: they may break; thanks for testing).");
+    else ImGui::TextDisabled("Updates: normal (main).");
     if (st == 1) ImGui::BeginDisabled();
-    if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) {
-        InterlockedExchange(&g_chk_state, 1);
-        HANDLE t = CreateThread(NULL, 0, update_ask_thread, NULL, 0, NULL); if (t) CloseHandle(t); else InterlockedExchange(&g_chk_state, 4);
+    if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) upd_start_check(upd_branch());
+    if (!git) {
+        ImGui::SameLine();
+        if (!staging && ImGui::Button("Check for staging updates")) { upd_set_channel(1); upd_start_check("staging"); }
+        if (staging && ImGui::Button("Back to normal updates")) { upd_set_channel(0); upd_start_check("main"); }
     }
     if (st == 1) ImGui::EndDisabled();
-    ImGui::SameLine();
+    if (!git && !staging) ImGui::TextDisabled("Staging = the test versions, before everyone gets them: they may break. Back to normal: the button that appears instead.");
     const char *have = getenv("SSBU_UPDATE_HAVE");
     if (st == 2 && have && *have) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "You have the latest version (%s).", g_chk_latest);
     else if (st == 2) ImGui::TextDisabled("The newest on GitHub is %s; this copy's is not known: start the game with \"Play SSBU.bat\".", g_chk_latest);

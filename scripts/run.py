@@ -88,9 +88,11 @@ def auto_update(gini):
     if os.path.exists(os.path.join(REPO, '.git')):
         return dev_update(gini)
     import update
+    if update.channel_branch() != update.DEFAULT_BRANCH:
+        print('Update channel: STAGING (test versions, they may break). F1 > About > "Back to normal updates" leaves it.')
     have = (update.read_manifest() or {}).get('commit')
     try:
-        want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.DEFAULT_BRANCH),
+        want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.channel_branch()),
                            'application/vnd.github.sha', timeout=8).decode().strip()
     except Exception as e:                            # no internet, GitHub down or its rate limit: play what is installed
         print('Update check skipped (%s): playing the installed version.' % e)
@@ -232,7 +234,7 @@ def update_watch(flag):
         while True:
             time.sleep(600)
             try:
-                want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.DEFAULT_BRANCH),
+                want = update.http('https://api.github.com/repos/%s/commits/%s' % (update.DEFAULT_REPO, update.channel_branch()),
                                    'application/vnd.github.sha', timeout=8).decode().strip()
             except Exception:                         # no internet, GitHub down or its rate limit: next time
                 continue
@@ -572,6 +574,8 @@ def main():
         try:                                          # (2026-11-02) F1 > About > Check for updates compares GitHub's newest with this
             import update
             env['SSBU_UPDATE_HAVE'] = git_head() if os.path.exists(os.path.join(REPO, '.git')) else (update.read_manifest() or {}).get('commit') or ''
+            # (2026-11-03) the branch this copy follows (F1 > About asks GitHub for it; staging = test versions)
+            env['SSBU_UPDATE_BRANCH'] = (subprocess.run(['git', '-C', REPO, 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True).stdout.strip() or 'main') if os.path.exists(os.path.join(REPO, '.git')) else update.channel_branch()
             if not os.path.exists(os.path.join(REPO, '.git')) and exe_behind_release(work):
                 # (2026-11-03) the code is the newest but the game program is not (its install failed): the game's check
                 # and its banner say a new version is ready, and "Update and restart" installs the program
