@@ -771,6 +771,16 @@ static int port1_gc(void) {
     for (int p = 1; p < 8; p++) if (nnpad_present(p) && nnpad_is_gc(p)) return 1;
     return 0;
 }
+/* (2026-11-03) rollback_controller.c, the results screen after an online match: A held on a pad of this PC that is NOT
+ * port 1's own device (a GameCube adapter's port 4: after the fight the pads are no longer merged into port 1). Read
+ * directly instead of merging the pads again: kept merged into the next match's set-up (an arena has no character select
+ * in between) the joiner's panel took port 1 and the match gave him his GameCube controls instead of his Pro ones. */
+int nnhid_local_a_elsewhere(void) {
+    if (!sdl_on() || !devices_live() || menu_input_blocked()) return 0;
+    NnPadState ps;
+    for (int p = 1; p < 8; p++) if (nnpad_get(p, &ps) && (ps.buttons & (1ull << BTN_A))) return 1;
+    return 0;
+}
 int nnhid_native_gc0(void) { return sdl_on() && port1_gc() && nnpad_gc_native() && (g_supported_styles & STYLE_GC); }
 static uint32_t npad_style(uint32_t id) {
     if (!player_connected(id)) return 0;

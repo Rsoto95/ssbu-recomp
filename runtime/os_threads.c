@@ -454,6 +454,34 @@ static void sleep_wait_diag(Ctx *c) {
     for (int k = 0; k < 24; k += 8) printf("r1: SOUND WAIT:   object + %02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", k * 4, ow[k], ow[k + 1], ow[k + 2], ow[k + 3], ow[k + 4], ow[k + 5], ow[k + 6], ow[k + 7]);
     fflush(stdout);
 }
+/* (2026-11-03) a network thread of the game (NetSystem, Pia) waking from a sleep in a rollback fight waits until no load can
+ * go back before this point (rollback_controller.c rbg_net_thread_may_run: its work after a capture was undone by a load,
+ * its packets were not: a crash in NetSystem). At most 100 ms (then it goes on as before). SSBU_RB_NET_GATE=0: off. */
+static int net_thread_now(void) {
+    static __declspec(thread) int is = -1;
+    if (is >= 0) return is;
+    Obj *o = t_thread ? obj(t_thread) : NULL;
+    const char *n = o && o->name ? (const char *)(uintptr_t)o->name : NULL;
+    if (!n) return 0;                                   /* (no name yet: asked again next time) */
+    is = strstr(n, "NetSystem") || strstr(n, "Pia");
+    return is;
+}
+static void net_thread_gate(void) {
+    static int on = -1; static volatile LONG64 gated, waited_us, timeouts;
+    if (on < 0) { const char *e = getenv("SSBU_RB_NET_GATE"); on = !(e && e[0] == '0'); }
+    if (!on || !net_thread_now()) return;
+    int rbg_net_thread_may_run(void);
+    if (rbg_net_thread_may_run()) return;
+    LARGE_INTEGER f, t0, t1; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0);
+    double ms = 0;
+    while (!rbg_net_thread_may_run()) {
+        Sleep(1); QueryPerformanceCounter(&t1); ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+        if (ms >= 100.0) break;
+    }
+    LONG64 n = InterlockedIncrement64(&gated); InterlockedAdd64(&waited_us, (LONG64)(ms * 1000.0));
+    if (ms >= 100.0) { LONG64 k = InterlockedIncrement64(&timeouts); if (k <= 20) printf("r1: RB NET: network thread gate: waited 100 ms for the frame to be final, went on (%lld times)\n", (long long)k); }
+    if (n % 2000 == 0) printf("r1: RB NET: network thread gate: %lld wakeups held back, %.1f ms each on average, %lld at the 100 ms limit\n", (long long)n, waited_us / 1000.0 / (double)n, (long long)timeouts);
+}
 static void os_SleepThread(Ctx *c) {
     movie_preroll_diag(c);
     sleep_wait_diag(c);
@@ -461,6 +489,7 @@ static void os_SleepThread(Ctx *c) {
         static LONG lines; if (InterlockedIncrement(&lines) <= 20) printf("nn::os::SleepThread: asked to sleep %lld ms (%llx ns) by f_%llx (return address %llx)\n", (long long)((int64_t)A0 / 1000000ll), (unsigned long long)A0, (unsigned long long)c->fn, (unsigned long long)c->x[30]);
     }
     sleep_ns((int64_t)A0);
+    net_thread_gate();
 }
 static void os_GetCurrentStackInfo(Ctx *c) {
     Obj *o = t_thread ? obj(t_thread) : NULL;

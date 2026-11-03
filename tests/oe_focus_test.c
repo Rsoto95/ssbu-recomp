@@ -92,6 +92,7 @@ static int ignored_startup(const char *name) {
 int main(int argc, char **argv) {
     int disabled = argc > 1 && !strcmp(argv[1], "--disabled");
     _putenv("SSBU_FREEZE_TEST=");
+    _putenv("SSBU_FOCUS_PAUSE=1");      /* the console's rule (obscured = NotInFocus); the PC default keeps an obscured window in focus */
     _putenv(disabled ? "SSBU_FOCUS_NOTIFY=0" : "SSBU_FOCUS_NOTIFY=1");
     InitializeCriticalSection(&g_oe_lock);
     Ctx c = {0};

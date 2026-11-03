@@ -506,21 +506,42 @@ static void rbg_after_begin(void) {
     const char *e = getenv("SSBU_RB_NET_AFTER");
     if (e && e[0] == '0') return;
     g_rbg_after_t0 = now_ms(); g_rbg_after_n = g_rbg_after_hold = g_rbg_after_polls = 0; g_rbg_after_down = 1;      /* (an A held at the end of the fight is not a press) */
-    LOG("r1: RB NET: results screen: player 2's card is closed with player 1's A (at most %d presses, %.0f s)\n", RBG_AFTER_PRESSES, RBG_AFTER_MS / 1000.0);
+    { int l = rbn_local_player();
+      LOG("r1: RB NET: results screen: the other player's card is closed with this PC's A (this PC player %d; at most %d presses, %.0f s)\n", l + 1, RBG_AFTER_PRESSES, RBG_AFTER_MS / 1000.0); }
+}
+/* (2026-11-03, owner's game crashed mid-fight: the game's NetSystem thread read a list with a null link 12 frames after a
+ * load and died copying from address 0x10) The game's network threads (NetSystem, Pia: Battle Arenas keep their session
+ * open under the fight) are in the ring's state, but their sockets and the other side are not: work such a thread did
+ * after a capture is undone by a load to that capture while the packets it took are gone. os_threads.c SleepThread asks
+ * this before such a thread goes on after a sleep: in a rollback fight, only once the frame now on is final (both players'
+ * pads known up to it), so no load can go back before this point. 1 = it may go on. */
+int rbg_net_thread_may_run(void) {
+    if (g_rbg_in_match != 1 || !g_rg_ready || g_ra_off || !rbn_started()) return 1;
+    long long f = g_rgs_next;
+    return f < 1 || rb_input_finalized() >= f;
 }
 static int rbg_after(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {   /* 1 = port id's pad was given */
     if (now_ms() - g_rbg_after_t0 > RBG_AFTER_MS || rbn_started() || (g_rbg_after_n >= RBG_AFTER_PRESSES && !g_rbg_after_hold)) {
         LOG("r1: RB NET: results screen: player 2's A given %d times (port 2 read %d times with A down), done\n", g_rbg_after_n, g_rbg_after_polls);
         g_rbg_after_t0 = 0; return 0;
     }
+    /* Port 1 is this PC's player on both PCs (nnhid.c merges this PC's pads into port 1 while online). (2026-11-03, a friend:
+     * "se trabó en la result screen pero a mí no": the merge ends with the session at the fight's end, so his GameCube
+     * controller - adapter port 4 - went back to port 4, which nobody read here, and neither card closed. Its A is now read
+     * directly (nnhid_local_a_elsewhere) and pressed on port 1 too: one A closes both cards. 9345a93 kept the pads merged
+     * instead, into the next arena match's set-up, which then gave him his GameCube controls instead of his Pro ones.) */
+    if (rbn_local_player() < 0) return 0;               /* (a spectator: nobody's card is this PC's) */
     if (id == 0) {
+        int nnhid_local_a_elsewhere(void);
+        if (nnhid_local_a_elsewhere()) *b |= 1;         /* (A of this PC's other pads, on port 1) */
         int down = (*b & 1) != 0;                       /* A (nnhid.c BTN_A) */
         if (down && !g_rbg_after_down && g_rbg_after_n < RBG_AFTER_PRESSES) {
             g_rbg_after_n++; g_rbg_after_hold = 6;
-            LOG("r1: RB NET: results screen: A %d of player 1 at %.1f s after the match: given to player 2 too\n", g_rbg_after_n, (now_ms() - g_rbg_after_t0) / 1000.0);
+            LOG("r1: RB NET: results screen: A %d of this PC (player %d) at %.1f s after the match: given to port 2 too\n", g_rbg_after_n, rbn_local_player() + 1,
+                (now_ms() - g_rbg_after_t0) / 1000.0);
         }
         g_rbg_after_down = down;
-        return 0;                                       /* player 1's own pad is untouched */
+        return 0;                                       /* this PC's own pad is untouched */
     }
     *b = 0; *lx = *ly = *rx = *ry = 0;
     if (g_rbg_after_hold > 0) { *b = 1; g_rbg_after_hold--; g_rbg_after_polls++; }
