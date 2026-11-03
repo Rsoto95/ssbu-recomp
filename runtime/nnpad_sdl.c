@@ -1473,6 +1473,12 @@ void nnpad_rumble_set(int on) {
     unlock();
     say("nn::pad: vibration %s (settings menu; [general] rumble of %s)\n", on ? "on" : "off", g_cfg.path);
 }
+/* ================================================================ U1, the Controls page of the settings menu (menu.cpp)
+ * Every pad target (16 Pro buttons + 8 stick directions) can be bound for ONE controller ([device <GUID>]) or for every
+ * controller of its kind ([type xbox|playstation|switch|gamecube|generic|joystick]); the device section wins over the type
+ * profile, which wins over the built-in default. All of it is written to controllers.ini at once and used at once (the
+ * memory copy is changed together with the file; the 1 s reload then finds nothing new). */
+static const char *const g_type_label[NTYPE] = {"Xbox", "PlayStation", "Switch", "GameCube", "other pad", "joystick (no SDL mapping)"};
 const char *nnpad_type_label(int t) { return t >= 0 && t < NTYPE ? g_type_label[t] : "?"; }
 const char *nnpad_type_key(int t) { return t >= 0 && t < NTYPE ? g_type_key[t] : "?"; }
 const char *nnpad_target_name(int t) { return t >= 0 && t < 24 ? g_kbn[t] : ""; }
