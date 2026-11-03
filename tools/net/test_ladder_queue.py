@@ -146,6 +146,88 @@ class LadderQueueTest(TL.TournamentLobbyTest):
         self.assertEqual(v["lr"][1], "1")                           # (Rober wins the set, and it counts)
         self.assertGreater(int(v["lr"][5]), int(v["lr"][4]))
 
+    def to_fight(self, a, b):
+        """two queued fakes through the stage strikes to their paired match: (host, guest)"""
+        guard = 0
+        while guard < 60:
+            guard += 1
+            vs = [f.view(0, wait=0.05)[1] for f in (a, b)]
+            if all(v.get("go") == ["1"] for v in vs):
+                break
+            for f, v in zip((a, b), vs):
+                phase, turn = v["phase"][0], v["phase"][1]
+                if phase in ("strike", "ban", "pick") and turn == "1":
+                    free = [x for x in v["pool"] if x not in v.get("struck", [])]
+                    f.view(0, L.T_STAGE, struct.pack(">HB", int(v["me"][1]), len(free[0])) + free[0].encode())
+                elif phase == "chars" and v["ready"][0] == "0":
+                    f.view(0, L.T_READY, struct.pack(">QB", chara("mario"), 0))
+        (h, hv), (g, gv) = sorted(zip((a, b), vs), key=lambda x: x[1]["me"][4] != "1")
+        h.match(L.KIND_ROLLBACK, 1)
+        g.match(L.KIND_ROLLBACK, 1)
+        h.until(L.MS_MATCHED)
+        g.until(L.MS_MATCHED)
+        h.tx(L.RB, struct.pack(">QI", h.cookie, g.ip) + b"x")
+        g.tx(L.RB, struct.pack(">QI", g.cookie, h.ip) + b"x")
+        time.sleep(0.1)
+        return h, g
+
+    def test_link_cut_both_on_the_lobby_nobody_blamed(self):
+        a, b = self.fake("Rober"), self.fake("napky")
+        a.view(0, L.T_LADDER_JOIN)
+        b.view(0, L.T_LADDER_JOIN)
+        time.sleep(0.6)
+        h, g = self.to_fight(a, b)
+        for f, o, slot in ((h, g, 0), (g, h, 1)):                    # (both games saw the other go silent, 3 min in)
+            f.tx(L.RESULT, struct.pack(">QQIBBBBI", f.cookie, 0x8888, o.ip, slot, LD.RULE_STOCK, LD.LADDER_STOCKS, 2, 7)
+                 + struct.pack(">QQBBHHII", chara("mario"), chara("fox"), 2, 1, 300, 900, 3 * 3600, 0))
+        time.sleep(0.5)
+        _, v = a.view(0)
+        self.assertIn("lk", v)                                      # (the set goes on: the game is played again)
+        self.assertIn("not counted", v["err"][0])
+        self.assertEqual(v["score"][:2], ["0", "0"])
+
+    def test_disconnect_after_two_minutes_loses(self):
+        a, b = self.fake("Rober"), self.fake("napky")
+        a.view(0, L.T_LADDER_JOIN)
+        self.assertEqual(json.loads(self.get("/ladder_queue.json"))["searching"], 1)
+        b.view(0, L.T_LADDER_JOIN)
+        time.sleep(0.6)
+        self.assertEqual(json.loads(self.get("/ladder_queue.json")), {"searching": 0, "playing": 1})
+        guard = 0
+        while guard < 60:                                           # (to the fight: strikes, both ready, paired)
+            guard += 1
+            vs = [f.view(0, wait=0.05)[1] for f in (a, b)]
+            if all(v.get("go") == ["1"] for v in vs):
+                break
+            for f, v in zip((a, b), vs):
+                phase, turn = v["phase"][0], v["phase"][1]
+                if phase in ("strike", "ban", "pick") and turn == "1":
+                    free = [s for s in v["pool"] if s not in v.get("struck", [])]
+                    f.view(0, L.T_STAGE, struct.pack(">HB", int(v["me"][1]), len(free[0])) + free[0].encode())
+                elif phase == "chars" and v["ready"][0] == "0":
+                    f.view(0, L.T_READY, struct.pack(">QB", chara("mario"), 0))
+        (h, hv), (g, gv) = sorted(zip((a, b), vs), key=lambda x: x[1]["me"][4] != "1")
+        h.match(L.KIND_ROLLBACK, 1)
+        g.match(L.KIND_ROLLBACK, 1)
+        h.until(L.MS_MATCHED)
+        g.until(L.MS_MATCHED)
+        h.tx(L.RB, struct.pack(">QI", h.cookie, g.ip) + b"x")
+        g.tx(L.RB, struct.pack(">QI", g.cookie, h.ip) + b"x")
+        time.sleep(0.1)
+        # napky (losing) pulls the cable after 3 minutes of fight: its game leaves the lobby, Rober's game reports the cut
+        nap, other = b, a
+        slot = 0 if other is h else 1
+        other.tx(L.RESULT, struct.pack(">QQIBBBBI", other.cookie, 0x7777, nap.ip, slot, LD.RULE_STOCK, LD.LADDER_STOCKS, 2, 7)
+                 + struct.pack(">QQBBHHII", chara("mario"), chara("fox"), 2, 1, 300, 900, 3 * 3600, 0))
+        time.sleep(0.2)
+        nap.tx(L.LEAVE, struct.pack(">Q", nap.cookie))              # (then napky's game drops off the lobby too)
+        time.sleep(2.5)
+        _, v = a.view(0)
+        self.assertNotIn("lk", v, "".join(self.lines[-20:]))
+        self.assertEqual(v["lr"][1], "1")                           # (Rober wins the set: napky lost the connection)
+        self.assertGreater(int(v["lr"][5]), int(v["lr"][4]))
+        self.assertTrue(any("lost the connection" in l for l in self.lines))
+
     def test_casual_match_not_ranked(self):
         a, b = self.fake("Rober"), self.fake("napky")
         a.match(L.KIND_ROLLBACK, 1)

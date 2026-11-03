@@ -1706,7 +1706,10 @@ static void sec_tourney(void) {
         else if (T.lq_in) {
             ImGui::TextColored(amber, "Searching for an opponent...  %d:%02d  (%d waiting)", T.lq_secs / 60, T.lq_secs % 60, T.lq_waiting);
             if (ImGui::Button("Stop searching##lq", ImVec2(bw, 0))) net_ladder_queue(0);
-        } else if (ImGui::Button("Search for a ladder opponent##lq", ImVec2(bw * 1.5f, 0))) net_ladder_queue(1);
+        } else {
+            if (ImGui::Button("Search for a ladder opponent##lq", ImVec2(bw * 1.5f, 0))) net_ladder_queue(1);
+            ImGui::SameLine(); ImGui::TextColored(T.lq_waiting ? green : ImVec4(0.7f, 0.7f, 0.7f, 1), "%d searching now", T.lq_waiting);
+        }
         help("The server pairs you with the next player who searches (the closest rating first). The set (best of 3) is played like a tournament set: stage strikes, then Smash and start. When it is over the winner gains rating and the loser loses some. Only ladder sets change the rating.");
         ImGui::Separator();
     }

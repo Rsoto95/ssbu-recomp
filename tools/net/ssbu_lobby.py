@@ -133,6 +133,8 @@ TOURNEY, TOURNEY_STATE, TOURNEY_DOC = 29, 30, 31   # 1.7 tournaments (tournament
 LADDER_RULES = {"kind": "ladder", "bo": 3, "bo_top8": 3, "bo_finals": 3, "bans": 2, "stocks": 3, "checkin": False,
                 "noshow": 300, "turn_for": 60, "organizer_name": "Ladder"}
 LADDER_RESULT_FOR = 180.0     # s: the game shows the last ladder set's result (rating before / after) this long
+LADDER_DC_FRAMES = 2 * 60 * 60  # (2026-11-03) a ladder game cut by a disconnection after 2 min of fight (frames):
+LADDER_DC_SILENT = 5.0          #   the player whose game lost the lobby too (gone, or silent this many s) loses the set
 LADDER_GONE_FOR = float(os.environ.get("SSBU_LADDER_GONE_FOR", "180"))   # s: a ladder player's game gone this long: the other wins the set (both gone: no set, no rating)
 T_PLAYER_OPS = (T_STAGE, T_READY, T_UNREADY)        # (they act on the player's own set, whatever tournament it looks at)
 T_CHUNK, T_LIST, T_REPORT_WAIT, T_ERR_FOR = 1000, 8, 60.0, 8.0
@@ -349,6 +351,34 @@ class TourneyMixin:
         if self.lq.pop(c, None) is not None:
             self.say("ladder: %s left the queue (%s)" % (c.ladder_why, why))
 
+    def lq_dc_loser(self, t, sid, by, why, now):
+        """(2026-11-03, against quitting a losing set) a ladder game cut by a disconnection (or by one player leaving the
+        match, or with one game's result missing) after LADDER_DC_FRAMES of fight: the player whose game also lost the
+        lobby (gone, or silent LADDER_DC_SILENT s) loses the whole set, and its rating. Both still on the lobby (only the
+        link between the two broke) or both gone: nobody is blamed (the game is played again). Returns 1 when it decided."""
+        if not any(k in why for k in ("disconnection", "left the match", "only one")):
+            return 0
+        frames = max((r.get("frames") or 0 for r in by), default=0)
+        if frames < LADDER_DC_FRAMES:
+            return 0
+        v = t.view[sid]
+        gone = []
+        for e in v["p"]:
+            x = self.t_client(t, e)
+            if x is None or now - x.seen > LADDER_DC_SILENT:
+                gone.append(e)
+        if len(gone) != 1:
+            return 0
+        loser = gone[0]
+        winner_side = 1 - v["p"].index(loser)
+        t.override(sid, winner_side, by="left")
+        names = (t.entrants[loser]["name"], t.entrants[v["p"][winner_side]]["name"])
+        self.say("ladder: match %d: %s lost the connection after %d s of fight: %s wins the set" % (t.id, names[0], frames // 60, names[1]))
+        x = self.t_client(t, v["p"][winner_side])
+        if x is not None:
+            x.t_err, x.t_err_at = "%s lost the connection after 2 minutes of fight: you win the set" % names[0], now
+        return 1
+
     def lq_guard(self, now):
         """running ladder matches whose players' games are gone: one gone LADDER_GONE_FOR s, the other wins the set (it
         counts); both gone that long, the match is cancelled (no rating)"""
@@ -364,8 +394,8 @@ class TourneyMixin:
                         gone.append(e)
                 else:
                     self.lq_gone.pop(key, None)
-            if not gone:
-                continue
+            if not gone or any(r["tid"] == t.id for r in self.t_reports.values()):
+                continue                            # (a game's result is waited for: it decides first, lq_dc_loser)
             if len(gone) == 2:
                 t.cancel()
                 self.say("ladder: match %d cancelled: both games left" % t.id)
@@ -767,7 +797,10 @@ class TourneyMixin:
             return
         side = t.view[sid]["p"].index(e)
         opp = self.by_ip.get(peer)                 # (2026-11-02) a fight against someone else (a casual arena game): not this set's
-        if opp is None or opp is not self.t_client(t, t.view[sid]["p"][1 - side]):
+        other = self.t_client(t, t.view[sid]["p"][1 - side])
+        if opp is None and other is None and flags & 2 and (t.proc(sid) or {}).get("phase") == "playing":
+            pass                                    # (2026-11-03) the set's opponent left the lobby during this very match: still counted
+        elif opp is None or opp is not other:
             return
         rep = self.t_reports.setdefault(seed, {"at": now, "tid": t.id, "sid": sid, "by": {}})
         if rep["tid"] != t.id or rep["sid"] != sid:
@@ -778,7 +811,7 @@ class TourneyMixin:
         win = None if win_slot is None else side if win_slot == slot else 1 - side
         why = "a desync" if desyncs else "a disconnection" if flags & 2 else "a player left the match" if flags & 1 else ""
         mine_c = (c0, c1) if slot == 0 else (c1, c0)        # (fighters by side: this side's first)
-        rep["by"][side] = {"win": win, "bad": bool(why), "chara": mine_c if side == 0 else mine_c[::-1], "why": why}
+        rep["by"][side] = {"win": win, "bad": bool(why), "chara": mine_c if side == 0 else mine_c[::-1], "why": why, "frames": frames}
         if len(rep["by"]) == 2:
             self.t_settle(seed, now)
 
@@ -791,7 +824,9 @@ class TourneyMixin:
         sid, by = rep["sid"], list(rep["by"].values())
         wins = {r["win"] for r in by}
         why = rep.get("why") or next((r["why"] for r in by if r["bad"]), "") or ("a draw" if None in wins else "the two games disagree" if len(wins) > 1 else "")
-        if why:
+        if why and t.is_ladder() and self.lq_dc_loser(t, sid, by, why, now):
+            pass                                    # (the player who lost the connection lost the set: lq_dc_loser)
+        elif why:
             p = t.proc(sid)
             if p is not None:
                 p["ready"], p["phase"] = [None, None], "chars"
@@ -825,7 +860,10 @@ class TourneyMixin:
             if done:
                 self.t_changed(t, now)
         for seed, rep in list(self.t_reports.items()):
-            if now - rep["at"] > T_REPORT_WAIT:
+            t0 = self.tourneys.get(rep["tid"])
+            quick = (t0 is not None and t0.is_ladder() and len(rep["by"]) == 1 and now - rep["at"] > 1.0
+                     and self.t_client(t0, t0.view[rep["sid"]]["p"][1 - next(iter(rep["by"]))]) is None)   # (its game left the lobby)
+            if quick or now - rep["at"] > T_REPORT_WAIT:
                 t = self.tourneys.get(rep["tid"])
                 if t is not None and len(rep["by"]) == 1:
                     missing = 1 - next(iter(rep["by"]))
@@ -1659,6 +1697,7 @@ Ordenado por rating menos dos veces la desviación (quien jugó poco sube despac
 <li>Cuando alguien más busca, el servidor los junta (el rating más parecido primero). La pantalla se abre sola.</li>
 <li>Tachen escenarios, vayan a <b>Smash</b>, elijan personaje y presionen <b>start</b>: la pelea empieza sola.</li>
 <li>Al terminar el set cambia el rating de los dos.</li></ol></div>
+<p id="live" class="how" style="font-size:16px">&nbsp;</p>
 <h2>Tabla</h2>
 <div class="wrap"><table><thead><tr><th>#</th><th>Jugador</th><th class="n">Rating</th><th class="n">Sets G-P</th></tr></thead><tbody id="t"></tbody></table></div>
 <section id="hist"></section>
@@ -1687,7 +1726,16 @@ async function show(name) {
      "<tr><td colspan=4 class=rd>Todavía no jugó sets de ladder.</td></tr>") + "</tbody></table></div>";
   el.scrollIntoView({behavior: "smooth"});
 }
+async function live() {                             // how many search for an opponent now (every 5 s)
+  try {
+    const q = await (await fetch("ladder_queue.json")).json();
+    document.getElementById("live").innerHTML = "<b>Buscando rival ahora: " + q.searching + "</b> &middot; sets de ladder en juego: " + q.playing +
+      (q.searching === 1 ? " &middot; <span class=w>alguien te espera: entra a buscar (F3 &gt; Ladder)</span>" : "");
+  } catch (e) {}
+  setTimeout(live, 5000);
+}
 (async () => {
+  live();
   try { ICONS = new Set(await (await fetch("icons.json")).json()); } catch (e) {}
   const rows = await (await fetch("ladder.json")).json();
   document.getElementById("t").innerHTML = rows.map((p, i) => "<tr class=p data-n=\\"" + esc(p.name) + "\\"><td>" + (i + 1) + "</td><td>" + esc(p.name) +
@@ -2157,6 +2205,13 @@ def start_status_server(lobby, bind, port, started):
                     row["fighters"] = [{"key": tournament_mod.chara_key(x), "name": tournament_mod.chara_name(x)}
                                        for x in row.pop("mains", []) if isinstance(x, int) and tournament_mod is not None]
                 return 200, json.dumps(rows).encode(), "application/json"
+            if ld is not None and path == "/ladder_queue.json":       # (2026-11-03) how many search now, sets being played
+                try:
+                    playing = sum(1 for t in list(lobby.tourneys.all.values()) if t.is_ladder() and t.state == "running") if lobby.tourneys else 0
+                    searching = len(list(lobby.lq))
+                except RuntimeError:                # (the lobby's thread changed them meanwhile: the next poll)
+                    playing = searching = 0
+                return 200, json.dumps({"searching": searching, "playing": playing}).encode(), "application/json"
             if ld is not None and path == "/ladder_matches.json":
                 return 200, json.dumps(ld.matches()).encode(), "application/json"
             if lobby.tourneys is not None and path == "/tournaments":

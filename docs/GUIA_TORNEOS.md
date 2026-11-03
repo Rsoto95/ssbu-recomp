@@ -164,11 +164,15 @@ El ladder es un servicio aparte de los torneos: juegas cuando quieras, contra qu
 
 - **Dejar de buscar:** en la pantalla del ladder presiona **X** (o en F1, **Stop searching**).
 - **Si tu rival no llega** a Smash en **5 minutos** y tú sí, ganas el set (cuenta para el rating).
-- **Si alguien cierra el juego** a mitad del set y no vuelve en **3 minutos**, el otro gana el set. Si se van los dos, el
-  set se cancela y no cuenta.
+- **Si alguien se desconecta con 2 minutos o más de pelea**, pierde el set completo y sus puntos (el otro gana). Así no
+  sirve desconectarse para no perder. El servidor ve de quién se cortó la conexión: si los dos siguen conectados al
+  servidor (solo falló la conexión entre ustedes), nadie pierde y ese game se juega de nuevo.
+- **Si se desconecta antes de los 2 minutos**, el game se juega de nuevo. Si no vuelve en **3 minutos**, el otro gana el
+  set. Si se van los dos, el set se cancela y no cuenta.
 - Mientras estás inscrito en un torneo (o sigues vivo en uno) no puedes buscar en el ladder.
 - Las partidas casuales (Smash normal, Battle Arenas) **no cambian el rating**: solo los sets del ladder.
 - **Y** en la pantalla del ladder muestra tu rating, tus sets ganados y perdidos y tu lugar.
 
-La tabla y todos los sets (con escenarios y personajes de cada game) están en **http://160.34.219.118:8080/ladder**. Dale
-clic a un jugador para ver su historial, o a un set para ver sus games.
+La tabla y todos los sets (con escenarios y personajes de cada game) están en **http://160.34.219.118:8080/ladder**.
+Arriba dice **cuántos están buscando rival ahora** (y en el juego, en F3 y en F1 > Tournament). Dale clic a un jugador
+para ver su historial, o a un set para ver sus games.
