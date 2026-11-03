@@ -531,10 +531,13 @@ static int id_supported(uint32_t id) {
  * Wireless room, a room code (host / join), the arena queue, or a match already running. With rollback on but none of
  * these (Smash on one PC, two friends on the couch) each pad is its own player again (net_session.c: such a fight is local). */
 static int net_merge(void) {
-    int r1_net_on(void), nnldn_role(void), net_online(void), net_mode(void), net_arena_queued(void), rbn_started(void);
+    int r1_net_on(void), nnldn_role(void), net_online(void), net_mode(void), net_arena_queued(void), rbn_started(void), rbg_after_active(void);
     if (g_x_synth || scripted_run() || !r1_net_on()) return 0;
     int mode = net_online() > 0 ? net_mode() : -1;
-    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started();
+    /* (2026-11-03) and on the results screen after an online match (rollback_controller.c rbg_after_active): the session ends
+     * with the fight, and a pad that is not port 1's own device (a GameCube adapter's port 4) went back to its own port,
+     * where the results screen's A mirroring never saw it: the joiner could not leave the results screen */
+    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started() || rbg_after_active();
 }
 
 /* Is a controller connected as this npad id? Player 1 always exists in scripted runs (the script is its pad). */
