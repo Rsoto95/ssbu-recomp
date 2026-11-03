@@ -1786,30 +1786,57 @@ typedef BOOL (WINAPI *WhRead)(void *, LPVOID, DWORD, LPDWORD);
 typedef BOOL (WINAPI *WhClose)(void *);
 static volatile LONG g_chk_state;                          /* 0 never, 1 asking, 2 the newest, 3 a newer one, 4 could not ask */
 static char g_chk_latest[16];
+static char g_chk_rt[8], g_chk_rt_have[8];                 /* (2026-11-03) the published game program's commit, this exe's */
+static volatile LONG g_chk_exe_old;                         /* 1: this game program is not the published one */
+/* GET https://<host><path> into buf (at most cap - 1 bytes, NUL-ended); the bytes read */
+static DWORD wh_get(HMODULE w, const wchar_t *host, const wchar_t *path, const wchar_t *hdr, char *buf, DWORD cap) {
+    WhOpen open_ = (WhOpen)GetProcAddress(w, "WinHttpOpen"); WhConnect conn = (WhConnect)GetProcAddress(w, "WinHttpConnect");
+    WhOpenRequest req = (WhOpenRequest)GetProcAddress(w, "WinHttpOpenRequest"); WhSend send_ = (WhSend)GetProcAddress(w, "WinHttpSendRequest");
+    WhReceive recv_ = (WhReceive)GetProcAddress(w, "WinHttpReceiveResponse"); WhRead read_ = (WhRead)GetProcAddress(w, "WinHttpReadData");
+    WhClose close_ = (WhClose)GetProcAddress(w, "WinHttpCloseHandle");
+    DWORD got = 0;
+    if (!(open_ && conn && req && send_ && recv_ && read_ && close_) || cap < 2) return 0;
+    void *s = open_(L"ssbu-recomp", 0 /* default proxy */, NULL, NULL, 0);
+    void *c = s ? conn(s, host, 443, 0) : NULL;
+    void *r = c ? req(c, L"GET", path, NULL, NULL, NULL, 0x00800000 /* WINHTTP_FLAG_SECURE */) : NULL;
+    if (r && send_(r, hdr, hdr ? (DWORD)-1 : 0, NULL, 0, 0, 0) && recv_(r, NULL)) {
+        DWORD n = 0;
+        while (got < cap - 1 && read_(r, buf + got, cap - 1 - got, &n) && n) got += n;
+    }
+    if (r) close_(r);
+    if (c) close_(c);
+    if (s) close_(s);
+    buf[got] = 0;
+    return got;
+}
 static DWORD WINAPI update_ask_thread(LPVOID unused) {
     (void)unused;
     char got[64] = ""; DWORD n = 0;
     HMODULE w = LoadLibraryW(L"winhttp.dll");
-    WhOpen open_ = w ? (WhOpen)GetProcAddress(w, "WinHttpOpen") : NULL; WhConnect conn = w ? (WhConnect)GetProcAddress(w, "WinHttpConnect") : NULL;
-    WhOpenRequest req = w ? (WhOpenRequest)GetProcAddress(w, "WinHttpOpenRequest") : NULL; WhSend send_ = w ? (WhSend)GetProcAddress(w, "WinHttpSendRequest") : NULL;
-    WhReceive recv_ = w ? (WhReceive)GetProcAddress(w, "WinHttpReceiveResponse") : NULL; WhRead read_ = w ? (WhRead)GetProcAddress(w, "WinHttpReadData") : NULL;
-    WhClose close_ = w ? (WhClose)GetProcAddress(w, "WinHttpCloseHandle") : NULL;
-    if (open_ && conn && req && send_ && recv_ && read_ && close_) {
-        void *s = open_(L"ssbu-recomp", 0 /* default proxy */, NULL, NULL, 0);
-        void *c = s ? conn(s, L"api.github.com", 443, 0) : NULL;
-        void *r = c ? req(c, L"GET", L"/repos/Rsoto95/ssbu-recomp/commits/main", NULL, NULL, NULL, 0x00800000 /* WINHTTP_FLAG_SECURE */) : NULL;
-        if (r && send_(r, L"Accept: application/vnd.github.sha\r\n", (DWORD)-1, NULL, 0, 0, 0) && recv_(r, NULL)) read_(r, got, sizeof got - 1, &n);
-        if (r) close_(r);
-        if (c) close_(c);
-        if (s) close_(s);
+    if (w) n = wh_get(w, L"api.github.com", L"/repos/Rsoto95/ssbu-recomp/commits/main", L"Accept: application/vnd.github.sha\r\n", got, sizeof got);
+    /* (2026-11-03) the game program too: the release the newest install.py names (runtime-<commit>) against this exe's version
+     * ("<date>.<time>-<commit>"). A friend's code was the newest while the program was the old one, and this said "latest". */
+    InterlockedExchange(&g_chk_exe_old, 0);
+    {   static char inst[96 * 1024];
+        const char *v = ssbu_version(), *dash = v ? strrchr(v, '-') : NULL;
+        snprintf(g_chk_rt_have, sizeof g_chk_rt_have, "%.7s", dash ? dash + 1 : "");
+        DWORD k = w ? wh_get(w, L"raw.githubusercontent.com", L"/Rsoto95/ssbu-recomp/main/scripts/install.py", NULL, inst, sizeof inst) : 0;
+        const char *m = k ? strstr(inst, "/releases/download/runtime-") : NULL;
+        g_chk_rt[0] = 0;
+        if (m) {
+            m += strlen("/releases/download/runtime-");
+            int hex = 1; for (int i = 0; i < 7 && hex; i++) hex = isxdigit((unsigned char)m[i]);
+            if (hex) snprintf(g_chk_rt, sizeof g_chk_rt, "%.7s", m);
+        }
+        if (g_chk_rt[0] && g_chk_rt_have[0] && _strnicmp(g_chk_rt, g_chk_rt_have, 7)) InterlockedExchange(&g_chk_exe_old, 1);
     }
-    got[n < sizeof got ? n : sizeof got - 1] = 0;
     int ok = n >= 40; for (int i = 0; i < 40 && ok; i++) ok = isxdigit((unsigned char)got[i]);
     if (!ok) { printf("menu: check for updates: GitHub could not be asked\n"); fflush(stdout); InterlockedExchange(&g_chk_state, 4); return 0; }
     snprintf(g_chk_latest, sizeof g_chk_latest, "%.7s", got);
     const char *have = getenv("SSBU_UPDATE_HAVE");
-    int newer = have && *have && _strnicmp(have, got, 7) != 0;
-    printf("menu: check for updates: GitHub has %s, this copy %s: %s\n", g_chk_latest, have && *have ? have : "(not known)", newer ? "a NEWER version" : have && *have ? "the newest" : "?"); fflush(stdout);
+    int newer = (have && *have && _strnicmp(have, got, 7) != 0) || g_chk_exe_old;
+    printf("menu: check for updates: GitHub has %s, this copy %s; game program published %s, this one %s: %s\n", g_chk_latest, have && *have ? have : "(not known)",
+           g_chk_rt[0] ? g_chk_rt : "?", g_chk_rt_have, newer ? "a NEWER version" : have && *have ? "the newest" : "?"); fflush(stdout);
     if (newer && getenv("SSBU_UPDATE_FLAG")) { FILE *f = fopen(getenv("SSBU_UPDATE_FLAG"), "w"); if (f) { fputs(g_chk_latest, f); fclose(f); } snprintf(g_upd, sizeof g_upd, "%s", g_chk_latest); }
     InterlockedExchange(&g_chk_state, newer ? 3 : 2);
     return 0;
@@ -1828,7 +1855,8 @@ static void about_update_ui(void) {
     if (st == 2 && have && *have) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "You have the latest version (%s).", g_chk_latest);
     else if (st == 2) ImGui::TextDisabled("The newest on GitHub is %s; this copy's is not known: start the game with \"Play SSBU.bat\".", g_chk_latest);
     else if (st == 3 && getenv("SSBU_UPDATE_CMD")) {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "A new version is ready (%s).", g_chk_latest);
+        if (g_chk_exe_old) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "A new game program is out (%s; this one is %s).", g_chk_rt, g_chk_rt_have);
+        else ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "A new version is ready (%s).", g_chk_latest);
         ImGui::SameLine();
         if (ImGui::Button("Update and restart##about")) ImGui::OpenPopup("Update the game?##about");
         if (ImGui::BeginPopupModal("Update the game?##about", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {

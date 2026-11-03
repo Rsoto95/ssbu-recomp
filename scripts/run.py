@@ -546,6 +546,12 @@ def main():
         try:                                          # (2026-11-02) F1 > About > Check for updates compares GitHub's newest with this
             import update
             env['SSBU_UPDATE_HAVE'] = git_head() if os.path.exists(os.path.join(REPO, '.git')) else (update.read_manifest() or {}).get('commit') or ''
+            if not os.path.exists(os.path.join(REPO, '.git')) and exe_behind_release(work):
+                # (2026-11-03) the code is the newest but the game program is not (its install failed): the game's check
+                # and its banner say a new version is ready, and "Update and restart" installs the program
+                env['SSBU_UPDATE_HAVE'] = 'program-old'
+                with open(flag, 'w') as f:
+                    f.write(exe_behind_release(work))
         except Exception:
             pass
         update_watch(flag)
