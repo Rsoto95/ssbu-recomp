@@ -128,6 +128,41 @@ folder name) and the DLLs of `SSBU_MODS`. Two copies of a mod match when their f
 An older lobby server lists only rooms of your own build (F1 says so); an older game keeps working as before and only
 sees rooms of its own build.
 
+## Accounts and tournaments (the tournament screen, lobby server 1.7)
+
+These live on a lobby server that keeps them: the group's Oracle server (`tools/net/deploy_arenas.sh` installs the lobby
+with accounts and tournaments on, `LADDER=on LADDER_OPEN=1`), not a room inside a player's game. The Spanish
+step-by-step guide for players and organizers: [GUIA_TORNEOS.md](GUIA_TORNEOS.md).
+
+- **Connect:** F1 -> Experimental -> **Tournaments** ON (graphics.ini `tournaments = on`), then restart: the game joins
+  the lobby of `online_menu_server` (port 39500) instead of the group's Radmin network (`gfx_online_menu_env`).
+- **Your account** (F1 -> Online): made by itself the first time your game joins such a server. Its name follows
+  F1 -> Experimental -> Your name (if no other account has it). The **account code** moves it to another PC, and logs
+  the organizer in on the web page. Whoever has the code is you: keep it secret.
+- **The tournament screen, no F1** (`runtime/tourney_card.inc`): F3, or hold - (Minus) about a second; B closes it. It
+  opens by itself when the player must act (check-in, a new set, its stage turn; never during a fight) and a line at the
+  top right always says what is next. While it is open the game gets no input (`menu_input_blocked`).
+- **Tournaments:** double elimination (winners and losers brackets, grand final with reset), up to 256 players, every set
+  in parallel (the lobby pairs each set's two players: no room codes). Sign-up, then a check-in (who does not check in is
+  left out at the start), then the bracket.
+- **A set:** game 1, the players strike the five starter stages (1-2-1); later games, the winner bans stages and the
+  loser picks one (starters and counterpicks), with the d-pad and A on the tournament screen, 60 s per step (then the
+  first stage left is chosen). Then both go to Smash, choose a fighter and press start: the game waits there and the match
+  starts by itself with the chosen stage, the tournament's stocks, no items and no hazards. From game 2 the winner chooses
+  a fighter first; the loser sees it and has 10 s to go back and change.
+- **Results** count by themselves when both games report the same winner of a fight between the set's two players. A
+  draw, a desync, a disconnection, a player who left or two different reports: the game is played again. One report
+  alone counts only when the other game is gone. A player never seen at the set-up in 10 minutes while the other was:
+  the other wins the set (the organizer can undo it). Tournament games count for the ladder only when the organizer
+  chose "rated".
+- **On stream:** the organizer can put a set in a Battle Arena (its code on the web page): the two players are told on
+  their tournament screen, the others watch it there as spectators; its result counts for the set.
+- **Web:** `http://<server>:8080/tournaments`: every bracket (names only), and the **organizer's tools** after logging
+  in with the account code (the page signs a challenge with it; the code never travels): create, seeding, check-in,
+  start, results, replay, DQ, on stream, cancel.
+- **Server admin:** `sudo ssbu-account list | rename | ban | unban | delete`; `TOURNAMENT_ADMINS="Name1,Name2"` limits who
+  may make tournaments.
+
 ## Status and limits
 
 - Experimental.
@@ -159,15 +194,24 @@ the room's. Each player plays with his own name-tag controls (button layout and 
 off use the game's own online netcode as before (a short message says so once), so players with different settings can
 still play together in a room.
 
-Input delay is chosen from the best measured round trip: 1 frame below about 117 ms, 2 frames from about 117 ms, 3 from 150 ms,
-4 from about 184 ms (the rest of the trip is covered by rollback).
+**Input delay** (F1 -> Gameplay, graphics.ini `input_delay`, default **auto** since 2026-11-03): each player chooses 1..6
+or Auto; the match uses the larger of the two, and the host resolves Auto from the latest measured round trips (the one
+3 of 4 stay under), so both games always play with the same number: the whole one-way trip in frames, rounded up, 1..7
+(1 under 33 ms, 2 up to 67 ms, 3 up to 100 ms, 4 up to 133 ms, 5 up to 167 ms, 6 up to 200 ms, 7 above); rollback only
+covers the spikes. The rollback
+predicts the other player's input by repeating the last one it got, so every change of that input costs a rollback of
+(one-way trip - delay) frames: with a delay too low for the ping (e.g. 3 at 120 ms) most changes cost 2-4 frames and the
+game stutters. Other details: a game without the snapshot ring (not enough memory) plays with at least the delay that
+covers the whole trip (it waits for every pad); pads that come during the frame wait are checked at once (a rollback one
+frame shorter; `SSBU_RB_NET_LATEDRAIN=0` turns it off); the game behind in time runs a little faster too, so both clocks
+meet sooner. The match report in the log says the delay and the rollback sizes (k 1..7).
 
 **Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
 because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**
 brings the sound back (graphics.ini `fight_sound = on`), at the cost of some stutter and, rarely, a crash. It is each
 player's own choice and is used from the next match.
 
-Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
+Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch: raise the delay one step);
 Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between
 real players over the internet. Please report how it feels.
 

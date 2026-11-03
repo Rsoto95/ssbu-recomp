@@ -10,7 +10,7 @@
  *   SSBU_RB_NET=loop[,<f>] one game: the other player is a bot whose pads "arrive" <f> frames late (default 4):
  *                          rollback without a network, for the determinism proof (f = 0: never late = reference)
  *   SSBU_RB_NET_PLAYER=0|1 this game's player (default: 0, 1 in SSBU_ONLINE=join mode)
- *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default: from the measured round trip, 1..4)
+ *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default: graphics.ini input_delay; auto = from the round trip, 1..7)
  *   SSBU_RB_NET_BOT=<seed> the local player's pads come from a test bot instead of the controller / input sequence
  *   SSBU_RB_NET_LOG=<file> one line per finalized frame: "f <frame> h <checksum>" (compare two games' files)
  *   SSBU_RB_NET_AHEAD=<n>  most frames this game runs ahead of the newest remote pad (default 7 = the ring depth)
@@ -132,6 +132,9 @@ static uint64_t g_hs_seed; static uint32_t g_match_id;  /* the agreed match: its
  * play the match with it (a different delay on each side would desync: each takes the other's first frames as empty) */
 static int g_hs_delay;
 static int my_delay(void) { int d = g_delay_cfg >= 0 ? g_delay_cfg : gfx_input_delay(); return d < 0 ? 0 : d > 12 ? 12 : d; }
+/* (2026-11-03) the host resolves "auto" (0) from the round trip it measured, so both games play with the same number (before, each
+ * game chose its own from its own round trip at the match start: two numbers near a boundary differed); -1 = no round trip yet */
+static int hs_auto_delay(int dm, int dp, uint64_t waited_ms);
 static volatile LONG g_hs_cancelled;                    /* this match: 1 = no agreement: played locally and left at once; 2 = (pub2) set up
                                                            * inside a Local Wireless room: the game's own netcode plays it, no rollback, nothing changed */
 static int g_match_n;                                   /* (hs12) online matches of this session so far (1 = the first; rbn_start) */
@@ -349,10 +352,12 @@ static void rbs_hist_reset(void);
 static int rbs_popc(LONG v) { int n = 0; while (v) { n += (int)(v & 1); v >>= 1; } return n; }
 int rbn_spectating(void) { return g_spec != 0; }
 /* Esc (this game's window in front) or B on any controller, held 0.3 s; SSBU_RB_NET_TEST_CANCEL=<s>: as if pressed after s seconds (test) */
+int menu_tourney_modal(void);                          /* menu.cpp (tourney_card.inc): the tournament screen is open (its B closes it, not this wait) */
 static int hs_stop_pressed(double waited_ms) {
     static ULONGLONG since; static double test = -2;
     if (test == -2) { const char *e = getenv("SSBU_RB_NET_TEST_CANCEL"); test = e && *e ? atof(e) * 1000.0 : -1; }
     if (test >= 0 && waited_ms >= test) return 1;
+    if (menu_tourney_modal()) { since = 0; return 0; }
     int down = 0;
     HWND fg = GetForegroundWindow(); DWORD pid = 0;
     if (fg) GetWindowThreadProcessId(fg, &pid);
@@ -379,6 +384,25 @@ static void hs_stage_rule(RbhMatch *m, const RbhMatch *peer) {
     printf("[rbnet] handshake: stage: the host picked %016llx form %u, the joiner %016llx form %u; drawn with the agreed seed (%s): the %s's pick%s\n",
            (unsigned long long)hs, hf,
            (unsigned long long)js, *(const uint32_t *)(peer->stage + 8), e && *e ? e : "random", joiner ? "joiner" : "host", valid ? "" : " (the joiner's is not a stage entry)");
+    fflush(stdout);
+}
+/* (lobby 1.7) a tournament set's game: the stage the players chose (struck / banned / picked on the tournament screen) and the
+ * tournament's rules (stocks, a stock match, no items, no hazards) replace the host's own, in its proposal; the rest of the
+ * stage entry (flag word, second id) stays the host's own, as debug_mode.c writes a stage (ui_stage id = 0x69 << 56 |
+ * hash40("ui_stage_<name>"), form 0 = the normal one). The joiner takes the proposal as always. */
+static uint64_t hs_hash40(const char *s) {
+    uint32_t crc = 0xffffffffu; size_t n = strlen(s);
+    for (size_t i = 0; i < n; i++) { crc ^= (uint8_t)s[i]; for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1))); }
+    return ((uint64_t)n << 32) | (uint32_t)~crc;
+}
+static void hs_tourney_rules(RbhMatch *m) {
+    char stage[32], nm[48]; int stocks = 3;
+    if (!net_tourney_queued() || !net_tourney_match(stage, sizeof stage, &stocks)) return;
+    snprintf(nm, sizeof nm, "ui_stage_%s", stage);
+    uint64_t id = 0x6900000000000000ull | hs_hash40(nm); uint32_t form = 0;
+    memcpy(m->stage, &id, 8); memcpy(m->stage + 8, &form, 4);
+    m->rule_kind = 1; m->stock = (uint8_t)stocks; m->items = 0; m->hazards = 0;
+    printf("[rbnet] handshake: tournament set: stage %s (%016llx), %d stocks, no items, no hazards\n", stage, (unsigned long long)id, stocks);
     fflush(stdout);
 }
 int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
@@ -486,18 +510,22 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * (online play off, lobby or LAN mode) is a local fight, untouched, like a room fight; the online rollback match comes from
      * a Local Wireless room's match (R3 lwr) or a room code (host / join). SSBU_RB_NET_FIND=1: the lobby search (test). */
     {   const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
-        if (!lwr /* (R3 lwr: a room match) */ && mode != 2 /* NET_MODE_HOST */ && mode != 3 /* NET_MODE_JOIN */ && !(e && e[0] == '1') && !net_arena_queued() /* (arena / room: in its queue: the match waits for the turn) */) {
+        if (!lwr /* (R3 lwr: a room match) */ && mode != 2 /* NET_MODE_HOST */ && mode != 3 /* NET_MODE_JOIN */ && !(e && e[0] == '1') && !net_arena_queued() /* (arena / room: in its queue: the match waits for the turn) */ && !net_tourney_queued() /* (lobby 1.7: a tournament set) */) {
             InterlockedExchange(&g_hs_room, 1);
             printf("[rbnet] handshake %ld: no room code: a local fight, played as without rollback\n", (long)round);
             fflush(stdout);
             return 0;
         } }
-    int find = 0, phase = 1, ar_wait = 0;
+    int find = 0, phase = 1, ar_wait = 0, tq = 0;          /* tq: a tournament set (lobby 1.7): held here until both players are ready */
+    uint64_t seen_first = 0;                                /* (tournament) when the other player's fighter was first shown to this one */
     {   int nnldn_role(void); const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
-        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && ((e && e[0] == '1') || net_arena_queued() || arena);     /* (lobby 1.6: the arena's turn searches by itself) */
+        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && ((e && e[0] == '1') || net_arena_queued() || net_tourney_queued() || arena);     /* (lobby 1.6: the arena's turn searches by itself; 1.7 a tournament set, a Battle Arena) */
         /* (room, 2026-10-30) in the room's queue but not its turn yet: the match waits here, with no time limit, and searches
          * the moment the turn comes (the loser of the match on goes to the back): the players only press start and wait */
-        if (find) { phase = 0; if (arena) net_match_find_rb_key(agid); else if (net_arena_queued() && !net_arena_turn()) ar_wait = 1; else net_match_find_rb(); } }
+        if (find) { phase = 0; tq = !arena && net_tourney_queued();
+                    if (arena) net_match_find_rb_key(agid);
+                    else if (tq ? !net_tourney_turn() : (net_arena_queued() && !net_arena_turn())) ar_wait = 1;
+                    else net_match_find_rb(); } }
     double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 120000.0;
     if (lwr) limit = getenv("SSBU_RB_NET_ROOM_WAIT") ? atof(getenv("SSBU_RB_NET_ROOM_WAIT")) * 1000.0 : 10000.0;     /* (R3 lwr) both games are at this set-up together */
     uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0, last_here = 0;
@@ -517,12 +545,20 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     for (;;) {
         uint64_t now = GetTickCount64();
         if (g_hs_refused) break;
-        if (ar_wait) {                                  /* (room) waiting for the turn */
+        if (ar_wait && tq) {                            /* (tournament) ready at the set-up: the stage chosen, then the fighters in order */
+            static NetTourney tn;
+            net_tourney_get(&tn);
+            if (tn.set < 0) { snprintf(g_hs_why, sizeof g_hs_why, "your tournament set is not being played now"); break; }
+            int confirm = 0;                            /* (the loser of the last game: 10 s to go back and change after seeing the winner's fighter) */
+            if (tn.first == 2 && tn.ready_them && tn.their_chara) { if (!seen_first) seen_first = now; confirm = now - seen_first >= 10000; }
+            if (!strcmp(tn.phase, "chars") || !strcmp(tn.phase, "go")) net_tourney_ready(mine->chara[0], confirm);
+            if (net_tourney_turn()) { ar_wait = 0; t0 = now; net_match_find_rb(); printf("[rbnet] handshake %ld: the tournament set can start (game %d against %s): asking the lobby for that opponent\n", (long)round, tn.game, tn.opp); fflush(stdout); }
+        } else if (ar_wait) {                           /* (room) waiting for the turn */
             if (!net_arena_queued()) { snprintf(g_hs_why, sizeof g_hs_why, "you are not in the room's queue any more"); break; }
             if (net_arena_turn()) { ar_wait = 0; t0 = now; net_match_find_rb(); printf("[rbnet] handshake %ld: the room's turn came: asking the lobby for the opponent of the turn\n", (long)round); fflush(stdout); }
         }
         if (!ar_wait && (double)(now - t0) > limit) { snprintf(g_hs_why, sizeof g_hs_why, phase ? "no answer from the other player after %.0f s" : "no opponent found in %.0f s", limit / 1000.0); break; }
-        if (hs_stop_pressed((double)(now - t0))) { snprintf(g_hs_why, sizeof g_hs_why, "stopped waiting (Esc / B) after %.0f s", (now - t0) / 1000.0); stopped = 1; break; }
+        if (hs_stop_pressed((double)(now - t0))) { snprintf(g_hs_why, sizeof g_hs_why, "stopped waiting (Esc / B) after %.0f s", (now - t0) / 1000.0); stopped = 1; if (tq) net_tourney_unready(); break; }
         if (phase == 0 && !ar_wait) {                   /* (R3 net3) the lobby's opponent search */
             net_match_get(&mm);
             if (mm.kind == 2 && (mm.state == MM_MATCHED || mm.state == MM_TOGETHER) && mm.peer) {
@@ -546,26 +582,27 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
                 AcquireSRWLockShared(&g_rbs_lock); snprintf(g_hs_why, sizeof g_hs_why, "%s", g_rbs_bad_why); ReleaseSRWLockShared(&g_rbs_lock);
                 g_hs_refused = 1; hs_refuse(g_hs_peer.nonce, g_hs_why);
             }
-            if (!g_hs_have_prop && g_hs_have_peer && lwr && !g_hs_refused && rbs_popc(g_rbs_seats) >= g_rbs_need) {      /* (R3 lwr) the room's match: both games built it from the room; only the seed is new; (2026-11-02) and every spectator's HELLO is in */
+            if (!g_hs_have_prop && g_hs_have_peer && lwr && !g_hs_refused && rbs_popc(g_rbs_seats) >= g_rbs_need && hs_auto_delay(my_delay(), g_hs_peer.m.pad0, now - t0) > 0) {      /* (R3 lwr) the room's match: both games built it from the room; only the seed is new; (2026-11-02) and every spectator's HELLO is in */
                 if (g_hs_peer.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_peer.exe_stamp);
                 if (g_hs_peer.m.chara[0] != mine->chara[0] || g_hs_peer.m.rule_kind != mine->rule_kind || g_hs_peer.m.stock != mine->stock) {
                     snprintf(g_hs_why, sizeof g_hs_why, "the room's match differs on the two games (player 1 %016llx here, %016llx there; rule kind %d / %d, stocks %d / %d)", (unsigned long long)mine->chara[0], (unsigned long long)g_hs_peer.m.chara[0], mine->rule_kind, g_hs_peer.m.rule_kind, mine->stock, g_hs_peer.m.stock);
                     g_hs_refused = 1; hs_refuse(g_hs_peer.nonce, g_hs_why);
                 } else {
                     RbhMatch m = *mine; m.seed = hs_new_seed();
-                    m.pad0 = (uint8_t)(g_hs_peer.m.pad0 > my_delay() ? g_hs_peer.m.pad0 : my_delay());
+                    m.pad0 = (uint8_t)hs_auto_delay(my_delay(), g_hs_peer.m.pad0, now - t0);
                     hs_head(&g_hs_prop, RBH_PROPOSE); g_hs_prop.echo = g_hs_peer.nonce; g_hs_prop.m = m; g_hs_have_prop = 1;
                 }
             }
-            if (!g_hs_have_prop && g_hs_have_peer && !lwr) {
+            if (!g_hs_have_prop && g_hs_have_peer && !lwr && hs_auto_delay(my_delay(), g_hs_peer.m.pad0, now - t0) > 0) {
                 if (g_hs_peer.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_peer.exe_stamp);
                 RbhMatch m = *mine;
                 m.chara[1] = g_hs_peer.m.chara[0]; m.colour[1] = g_hs_peer.m.colour[0];
                 m.has_layout[1] = g_hs_peer.m.has_layout[0]; memcpy(m.layout[1], g_hs_peer.m.layout[0], sizeof m.layout[1]);
                 if (m.chara[1] == m.chara[0] && m.colour[1] == m.colour[0]) m.colour[1] = (uint8_t)((m.colour[0] + 1) & 7);   /* same fighter, same colour: the joiner takes the next one */
                 m.seed = hs_new_seed();
-                m.pad0 = (uint8_t)(g_hs_peer.m.pad0 > my_delay() ? g_hs_peer.m.pad0 : my_delay());
+                m.pad0 = (uint8_t)hs_auto_delay(my_delay(), g_hs_peer.m.pad0, now - t0);
                 hs_stage_rule(&m, &g_hs_peer.m);
+                hs_tourney_rules(&m);
                 hs_head(&g_hs_prop, RBH_PROPOSE); g_hs_prop.echo = g_hs_peer.nonce; g_hs_prop.m = m; g_hs_have_prop = 1;
             }
             if (g_hs_accepted && g_hs_have_prop) { *out = g_hs_prop.m; ok = 1; }
@@ -584,7 +621,22 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             char t[400]; double w = (now - t0) / 1000.0;
             char line[200];
             NetArena ra; if (find) net_arena_get(&ra); else memset(&ra, 0, sizeof ra);
-            if (ar_wait) {                               /* (room) what the player sees while it waits for the turn */
+            if (ar_wait && tq) {                         /* (tournament) what the player sees while the set gets ready */
+                static NetTourney tn;
+                net_tourney_get(&tn);
+                char step[260];
+                if (!strcmp(tn.phase, "strike") || !strcmp(tn.phase, "ban") || !strcmp(tn.phase, "pick"))
+                    snprintf(step, sizeof step, tn.my_turn ? "YOUR TURN to %s a stage: press F3 (or hold - for a second)." : "%s is choosing the stage (%s).",
+                             !strcmp(tn.phase, "strike") ? "strike" : !strcmp(tn.phase, "ban") ? "ban" : "pick", tn.opp);
+                else if (tn.first == 2 && !tn.ready_them) snprintf(step, sizeof step, "You lost the last game: %s (the winner) chooses a fighter first.", tn.opp);
+                else if (tn.first == 2 && tn.their_chara) {
+                    int left = seen_first ? 10 - (int)((now - seen_first) / 1000) : 10;
+                    snprintf(step, sizeof step, "%s chose %s. To change your fighter, hold B now (%d s); otherwise you play with yours.", tn.opp, tn.their_chara_name[0] ? tn.their_chara_name : "a fighter", left > 0 ? left : 0);
+                } else snprintf(step, sizeof step, "Waiting for %s to choose a fighter and press start.", tn.opp);
+                snprintf(t, sizeof t, "Tournament: game %d against %s (%d - %d), stage %s.\n%s\nYour match starts by itself.\nPress Esc or hold B to go back.",
+                         tn.game, tn.opp, tn.mine, tn.theirs, tn.stage[0] ? net_tourney_stage_name(tn.stage) : "not chosen yet", step);
+                menu_notice(t);
+            } else if (ar_wait) {                        /* (room) what the player sees while it waits for the turn */
                 char now_on[120] = "";
                 if (ra.has_match) snprintf(now_on, sizeof now_on, "\nNow playing: %s vs %s.", ra.match[0].name, ra.match[1].name);
                 snprintf(t, sizeof t, "%s's room: waiting for your turn (place %d in the queue).%s\nKeep this screen: your match starts by itself when it is your turn.\nPress Esc or hold B to stop waiting.",
@@ -603,7 +655,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         }
         {   long long p = nvn_front_presents();
             if (p != presents) { presents = p; presents_at = now; }
-            else if (now - presents_at > 100 && now - last_redraw >= 100) { last_redraw = now; redraws++; nvn_front_osk_redraw(); } }
+            else if (now - presents_at > 100 && now - last_redraw >= (menu_tourney_modal() ? 33u : 100u)) { last_redraw = now; redraws++; nvn_front_osk_redraw(); } }     /* (the tournament screen: ~30 fps for its stage tiles) */
         if (g_rbs_gid && now - last_here >= 100) { last_here = now; RbsHead h; memset(&h, 0, sizeof h); rbs_head(&h, RBS_HERE); rbs_send(&h, sizeof h); }     /* (2026-11-02) in the arena's group */
         if (g_rbs_need && now - last_log >= 5000) printf("[arena] handshake %ld: player 1 waits for the spectators: %d of %d HELLO received (seats %02lx)\n", (long)round, rbs_popc(g_rbs_seats), (int)g_rbs_need, (unsigned long)g_rbs_seats);
         if (now - last_log >= 5000) { last_log = now; printf("[rbnet] handshake %ld: still waiting (%s%.0f s; lobby %s; other game %s; messages sent %lld, received %lld; notice updates %llu, frames shown again %llu)\n", (long)round, phase ? "" : "finding an opponent, ", (now - t0) / 1000.0,
@@ -641,7 +693,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
     g_hs_delay = out->pad0;
     printf("[rbnet] handshake %ld: input delay %d frames for this match (%s; here %d, 0 = auto)\n", (long)round, g_hs_delay,
-           g_hs_delay ? "the larger of the two players' settings" : "both on auto: from the round trip", my_delay());
+           g_hs_delay ? "the larger of the two players' settings, auto = from the round trip" : "both on auto: from the round trip", my_delay());
     host_fixed_random_reseed(g_hs_seed);
     printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld; match id %08x; notice updates %llu, frames shown again %llu)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx, g_match_id,
            (unsigned long long)notes, (unsigned long long)redraws);
@@ -688,6 +740,8 @@ static volatile LONG g_rq_head, g_rq_tail; static SRWLOCK g_rq_lock = SRWLOCK_IN
 static volatile LONG64 g_rx_pkts, g_rx_bad, g_rx_drop, g_tx_pkts, g_tx_fail, g_rx_last_ms, g_rx_oldmatch;
 static volatile LONG g_rtt_us = -1, g_rtt_min_us = -1;
 static long long g_rtt_n; static double g_rtt_sum;      /* (under g_rq_lock) */
+#define RTTR 32
+static long g_rttr[RTTR]; static unsigned g_rttr_n;    /* (2026-11-03) the latest round trips (under g_rq_lock): their 75th percentile chooses the auto delay */
 #define TSQ 64
 static int32_t g_tsq[TSQ]; static int g_tsq_n;          /* clock-offset samples waiting for the main thread (under g_rq_lock) */
 /* (hs14) the mode byte at the end of every PADS message (after the match tag): bit 7 = this game plays the match WITHOUT the
@@ -739,7 +793,7 @@ void rbn_rx(const uint8_t *p, int n) {
         if (rtt <= 0 || rtt >= 5000000) return;
         InterlockedExchange(&g_rtt_us, rtt); if (g_rtt_min_us < 0 || rtt < g_rtt_min_us) InterlockedExchange(&g_rtt_min_us, rtt);
         AcquireSRWLockExclusive(&g_rq_lock);
-        g_rtt_sum += rtt; g_rtt_n++;
+        g_rtt_sum += rtt; g_rtt_n++; g_rttr[g_rttr_n++ % RTTR] = rtt;
         if (g_started && m.frame > 0 && g_cur > 0 && g_tsq_n < TSQ) g_tsq[g_tsq_n++] = (int32_t)((g_cur - m.frame) * 16683 - rtt / 2);   /* > 0: this game runs ahead */
         ReleaseSRWLockExclusive(&g_rq_lock);
         return;
@@ -756,8 +810,37 @@ static int rbn_peer_heard_ms(void) {                    /* (R3 lwr) any rollback
     return last ? (int)(GetTickCount64() - (ULONGLONG)last) : -1;
 }
 static void rtt_reset(void) {                           /* (R3 net3) */
-    AcquireSRWLockExclusive(&g_rq_lock); g_rtt_sum = 0; g_rtt_n = 0; ReleaseSRWLockExclusive(&g_rq_lock);
+    AcquireSRWLockExclusive(&g_rq_lock); g_rtt_sum = 0; g_rtt_n = 0; g_rttr_n = 0; ReleaseSRWLockExclusive(&g_rq_lock);
     InterlockedExchange(&g_rtt_us, -1); InterlockedExchange(&g_rtt_min_us, -1);
+}
+/* (2026-11-03) the round trip that 3 of 4 of the latest ones stay under (us; 0 = none), *n = how many: a little above the
+ * typical one, so the usual jitter is covered by the delay too */
+static long rtt_p75_us(int *n) {
+    long v[RTTR]; int k;
+    AcquireSRWLockShared(&g_rq_lock); k = g_rttr_n < RTTR ? (int)g_rttr_n : RTTR; memcpy(v, g_rttr, sizeof v); ReleaseSRWLockShared(&g_rq_lock);
+    *n = k; if (!k) return 0;
+    for (int a = 1; a < k; a++) { long x = v[a]; int b = a - 1; while (b >= 0 && v[b] > x) { v[b + 1] = v[b]; b--; } v[b + 1] = x; }
+    return v[(k * 3) / 4 < k ? (k * 3) / 4 : k - 1];
+}
+/* (2026-11-03) the input delay for a round trip: the whole one-way trip in frames, rounded up (owner's choice: "cover the
+ * whole trip"; rollback only covers the spikes): under 33 ms 1, 67 -> 2, 100 -> 3, 133 -> 4, 167 -> 5, 200 -> 6, above 7
+ * (the ring's depth). Before: one-way - 2 rounded, at most 4 (120 ms -> 2): every change of the other player's input was a
+ * rollback of 2-4 frames, and those of 3+ take longer than a frame (a hitch). */
+static int delay_for_rtt(long rtt_us) {
+    if (rtt_us <= 0) return 3;
+    double one_way = rtt_us / 2000.0 / (1000.0 / 60.0);
+    int d = (int)ceil(one_way - 0.001);
+    return d < 1 ? 1 : d > 7 ? 7 : d;
+}
+static int hs_auto_delay(int dm, int dp, uint64_t waited_ms) {
+    if (dm > 0 && dp > 0) return dm > dp ? dm : dp;
+    int n; long med = rtt_p75_us(&n);
+    if (n < 3 && waited_ms < 3000) return -1;           /* (pings every 100 ms: a few more tenths of a second) */
+    int a = delay_for_rtt(n ? med : -1);
+    if (dm <= 0) dm = a;
+    if (dp <= 0) dp = a;
+    { static uint64_t said; if (GetTickCount64() - said > 2000) { said = GetTickCount64(); printf("[rbnet] handshake: auto input delay %d (round trip %.1f ms: 3 of 4 of the latest %d under it)\n", a, med / 1000.0, n); fflush(stdout); } }
+    return dm > dp ? dm : dp;
 }
 /* a thread that pings the other player every 100 ms from the start (the delay is chosen from it when the match begins) */
 static DWORD WINAPI ping_thread(void *u) {
@@ -821,7 +904,14 @@ static int lock_delay(void) {                           /* the delay that covers
 }
 static int peer_lockstep(void) { return g_peer_mode >= 0 && (g_peer_mode & 0x80) && g_peerdelay; }
 static int auto_delay(void) {
-    if (g_hs_delay > 0) return g_hs_delay;              /* the delay both games agreed on in the handshake */
+    if (g_hs_delay > 0) {                               /* the delay both games agreed on in the handshake */
+        /* (2026-11-03) but a game without the ring waits for the other pad EVERY frame: with the agreed delay below the
+         * one-way trip that was a stall on nearly every frame (120 ms: delay 3, the trip 4 frames). Both games take the larger
+         * of the two announced trip delays (hs14 mode byte, known on both before frame 1), never less than the agreed one. */
+        int d = g_hs_delay;
+        if (!g_loop && g_peerdelay > 0 && (g_lockstep || peer_lockstep())) { int a = g_my_lockd, pd = g_peer_mode >= 0 ? (g_peer_mode & 0x7f) : 0; if (pd > a) a = pd; if (a > d) d = a; }
+        return d;
+    }
     if (g_delay_cfg >= 0) return g_delay_cfg;
     if (g_lockstep && (!g_peerdelay || g_loop)) return lock_delay();     /* (the old way; the loop test) */
     if (g_lockstep || peer_lockstep()) {                /* (hs14) either game has no ring: both take the larger of the two announced delays */
@@ -829,11 +919,8 @@ static int auto_delay(void) {
         return pd > d ? pd : d;
     }
     if (g_loop) return 2;
-    int rtt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
-    if (rtt <= 0) return 2;
-    double one_way = rtt / 2000.0 / (1000.0 / 60.0);     /* frames */
-    int d = (int)(one_way - 2.0 + 0.5);                   /* up to 2 frames of lateness covered by rollback */
-    return d < 1 ? 1 : d > 4 ? 4 : d;
+    {   int n; long med = rtt_p75_us(&n);              /* (an older host left both on auto: each game from its own round trips) */
+        return delay_for_rtt(n ? med : (g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us)); }
 }
 void rbn_start(long long f0) {
     g_f0 = f0; g_started = 1; g_match_n++; g_last_tag = pads_tag();
@@ -1078,6 +1165,9 @@ double rbn_pace_extra(long long f) {
         if (g_peerdelay && g_lockstep) est_ms += g_tsbias; else if (peer_lockstep()) est_ms -= g_tsbias;
         /* ahead: half of the lead given back over the next 30 frames (the other game, behind, does nothing; both halves meet) */
         if (est_ms > 2.0) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; }
+        /* (2026-11-03) behind: a quarter of the gap taken back by running a little faster (both rollback games; at most 1 ms
+         * per frame), so the two meet sooner: the game ahead rolls back by the whole gap more on every change of input */
+        else if (est_ms < -2.0 && !g_lockstep && !peer_lockstep()) { g_ts_extra = est_ms / 4.0 / 30.0; if (g_ts_extra < -1.0) g_ts_extra = -1.0; g_ts_left = 30; g_ts_n++; }
         else g_ts_left = 0;
     }
     if (g_ts_left > 0) { g_ts_left--; return g_ts_extra; }

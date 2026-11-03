@@ -748,6 +748,54 @@ void net_ladder_get(NetLadder *o) {
     ReleaseSRWLockShared(&g_ld_lock);
     if (g_cfg <= 0) o->state = NET_LADDER_OFF;
 }
+/* the account code: id[16] + key[32] + the first 2 bytes of their SHA-256 (a typo check), Crockford base32 in groups of 8 */
+#define ACC_BYTES (LD_ID + LD_KEY + 2)
+static const char k_b32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+static void acc_check(const uint8_t *b, uint8_t out[2]) { Sha256 s; uint8_t h[32]; sha256_init(&s); sha256_add(&s, b, LD_ID + LD_KEY); sha256_end(&s, h); out[0] = h[0]; out[1] = h[1]; }
+int net_account_code(char *out, int n) {
+    if (n > 0) out[0] = 0;
+    if (!g_ld_on || n < 96) return 0;
+    uint8_t b[ACC_BYTES];
+    memcpy(b, g_ld_id, LD_ID); memcpy(b + LD_ID, g_ld_key, LD_KEY); acc_check(b, b + LD_ID + LD_KEY);
+    int o = snprintf(out, (size_t)n, "SSBU"), bits = 0, k = 0; uint32_t acc = 0;
+    for (int i = 0; i < ACC_BYTES; i++) {
+        acc = (acc << 8) | b[i]; bits += 8;
+        while (bits >= 5) { if (k++ % 8 == 0) out[o++] = '-'; out[o++] = k_b32[(acc >> (bits - 5)) & 31]; bits -= 5; }
+    }
+    out[o] = 0;                                         /* (400 bits: 80 characters, nothing left over) */
+    return 1;
+}
+int net_account_use_code(const char *code) {
+    uint8_t b[ACC_BYTES], chk[2];
+    int bits = 0, nb = 0; uint32_t acc = 0;
+    const char *p = code;
+    while (*p && isspace((unsigned char)*p)) p++;       /* (a pasted code often starts with a space) */
+    if (!_strnicmp(p, "SSBU", 4)) p += 4;
+    for (; *p; p++) {
+        int c = toupper((unsigned char)*p), v;
+        if (c == '-' || c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        if (c == 'O') c = '0'; else if (c == 'I' || c == 'L') c = '1';      /* (Crockford: read alike) */
+        const char *q = strchr(k_b32, c);
+        if (!c || !q) return 0;
+        v = (int)(q - k_b32);
+        acc = (acc << 5) | (uint32_t)v; bits += 5;
+        if (bits >= 8) { if (nb == ACC_BYTES) return 0; b[nb++] = (uint8_t)(acc >> (bits - 8)); bits -= 8; }
+    }
+    if (nb != ACC_BYTES || bits) return 0;              /* (exactly 80 characters) */
+    acc_check(b, chk);
+    if (chk[0] != b[LD_ID + LD_KEY] || chk[1] != b[LD_ID + LD_KEY + 1]) return 0;
+    char t[2 * LD_KEY + 1];
+    hex_text(b, LD_ID, t);
+    int ok = gfx_ini_set("ladder_id", t);
+    hex_text(b + LD_ID, LD_KEY, t);
+    ok &= gfx_ini_set("ladder_key", t);
+    ok &= gfx_ini_set("ladder_registered", "1");        /* (the lobby knows its key: only the proof is sent) */
+    gfx_ini_set("ladder_invite", "");
+    printf("[online] account: an account code was used (graphics.ini ladder_id / ladder_key): it is this game's account from the next start%s\n", ok ? "" : " (graphics.ini could NOT be written)");
+    fflush(stdout);
+    return ok;
+}
+const char *net_online_name(void) { return g_cfg > 0 ? g_name : ""; }
 
 /* ---------------------------------------------------------------- direct paths */
 static void punch(Peer *q, int c, int ack, uint64_t word) {     /* (peers lock held) */
@@ -1417,6 +1465,256 @@ static void arena_state(const uint8_t *p, int n) {      /* (client thread) an AR
     }
 }
 
+/* ---------------------------------------------------------------- tournaments (lobby 1.7, tools/net/ssbu_lobby.py TOURNEY)
+ * TOURNEY 29 = cookie u64 + seq u16 + op u8 + tournament id u32 + bracket version held u32 + the op's arguments: a request
+ * (a new seq) is sent every 400 ms until a TOURNEY_STATE 30 acknowledges its seq; between requests op 0 (look) goes every
+ * second while F1 > Tournament is shown or this player is in a tournament that is not over. TOURNEY_STATE is text lines (this
+ * player's view, ssbu_lobby.py t_state); TOURNEY_DOC 31 (tournament id u32, version u32, chunk u8, chunks u8, text) carries
+ * the bracket (t_doc) when ours is older. */
+#define T_TOURNEY 29
+#define T_TOURNEY_STATE 30
+#define T_TOURNEY_DOC 31
+#define TD_CHUNKS 64
+#define TD_CHUNK 1000
+static SRWLOCK g_t_lock = SRWLOCK_INIT;
+static NetTourney g_t;                                  /* (g_t_lock) */
+static volatile LONG64 g_t_watch;                       /* when F1 > Tournament last asked */
+static uint8_t g_t_req[96]; static int g_t_req_n;      /* (g_t_lock) the request waiting for its acknowledgement: op + its arguments */
+static uint16_t g_t_seq; static int g_t_req_tid;        /* (g_t_lock) */
+static volatile LONG g_t_focus_want;
+static uint64_t g_t_tx;                                 /* (client thread) */
+static uint64_t g_t_ready_chara; static int g_t_ready_confirm = -1;   /* the last ready asked (net_tourney_ready is called in a loop) */
+static uint32_t g_td_id, g_td_ver; static int g_td_n, g_td_got;       /* (client thread) the bracket being put together */
+static int g_td_len[TD_CHUNKS]; static uint8_t g_td_buf[TD_CHUNKS][TD_CHUNK];
+static const char *const k_t_stage[][2] = {
+    {"battle_field", "Battlefield"}, {"battle_field_s", "Small Battlefield"}, {"end", "Final Destination"}, {"poke_stadium2", "Pokemon Stadium 2"},
+    {"animal_village", "Smashville"}, {"animal_city", "Town and City"}, {"poke_kalos", "Kalos Pokemon League"}, {"yoshi_story", "Yoshi's Story"},
+    {"fox_lylatcruise", "Lylat Cruise"}, {"trail_castle", "Hollow Bastion"}, {"ff_cave", "Northern Cave"}, {"dracula_castle", "Dracula's Castle"},
+    {"fzero_bigblue", "Big Blue"}, {"zelda_skyward", "Skyloft"}, {"kirby_cave", "The Great Cave Offensive"}};
+const char *net_tourney_stage_name(const char *stage) {
+    for (size_t i = 0; i < sizeof k_t_stage / sizeof k_t_stage[0]; i++) if (!strcmp(stage, k_t_stage[i][0])) return k_t_stage[i][1];
+    return stage;
+}
+static void t_request(int tid, const uint8_t *op_args, int n) {      /* (any thread) a new request: op u8 + its arguments */
+    if (!net_online() || n > (int)sizeof g_t_req) return;
+    AcquireSRWLockExclusive(&g_t_lock);
+    memcpy(g_t_req, op_args, (size_t)n); g_t_req_n = n; g_t_req_tid = tid ? tid : g_t.focus;
+    g_t_seq = (uint16_t)(g_t_seq + 1 ? g_t_seq + 1 : 1);
+    g_t.pending = 1;
+    ReleaseSRWLockExclusive(&g_t_lock);
+    g_t_tx = 0;
+}
+static void tourney_send(uint64_t t) {                  /* (client thread) */
+    uint8_t p[4 + 8 + 2 + 1 + 4 + 4 + sizeof g_t_req];
+    AcquireSRWLockShared(&g_t_lock);
+    int req = g_t.pending, n = 23, tid = req ? g_t_req_tid : (g_t_focus_want ? (int)g_t_focus_want : g_t.focus);
+    hdr(p, T_TOURNEY); s64(p + 4, g_cookie); s16(p + 12, g_t_seq);
+    s32(p + 15, (uint32_t)tid); s32(p + 19, (uint32_t)(tid && tid == g_t.focus ? g_t.version : 0));
+    if (req) { p[14] = g_t_req[0]; memcpy(p + 23, g_t_req + 1, (size_t)(g_t_req_n - 1)); n += g_t_req_n - 1; }
+    else p[14] = 0;
+    ReleaseSRWLockShared(&g_t_lock);
+    tx(p, n, &g_lobby);
+    g_t_tx = t;
+}
+static void tourney_tick(uint64_t t) {                  /* (client thread, joined) */
+    AcquireSRWLockShared(&g_t_lock);
+    int req = g_t.pending, in = 0;
+    if (g_t.me >= 0 && strcmp(g_t.tstate, "done") && strcmp(g_t.tstate, "cancelled")) in = 1;
+    for (int i = 0; i < g_t.n; i++) if (g_t.list[i].signed_up && strcmp(g_t.list[i].state, "done") && strcmp(g_t.list[i].state, "cancelled")) in = 1;
+    if (g_t.own_id && strcmp(g_t.own_state, "done")) in = 1;
+    int off = g_t.known && g_t.off;
+    ReleaseSRWLockShared(&g_t_lock);
+    if (req) { if (t - g_t_tx >= 400) tourney_send(t); return; }
+    if ((in || t - (uint64_t)g_t_watch < 2500) && t - g_t_tx >= 1000) tourney_send(t);
+    else if (!off && t - g_t_tx >= 5000) tourney_send(t);      /* (2026-11-02) idle: a new tournament's sign-up shows a card (tourney_card.inc) */
+}
+static int t_words(char *s, char out[][24], int max) {  /* the space-separated words of s into out */
+    int n = 0; char *ctx = NULL;
+    for (char *w = strtok_s(s, " ", &ctx); w && n < max; w = strtok_s(NULL, " ", &ctx)) snprintf(out[n++], 24, "%s", w);
+    return n;
+}
+static void t_rest(const char *line, int skip, char *out, int n) {   /* the text after `skip` words */
+    const char *p = line;
+    for (int k = 0; k < skip && p; k++) { p = strchr(p, ' '); if (p) p++; }
+    snprintf(out, (size_t)n, "%s", p ? p : "");
+}
+static void tourney_state(const uint8_t *p, int n) {    /* (client thread) a TOURNEY_STATE body */
+    if (n < 2) return;
+    uint16_t ack = g16(p);
+    char text[1500]; int len = n - 2 < (int)sizeof text - 1 ? n - 2 : (int)sizeof text - 1;
+    memcpy(text, p + 2, (size_t)len); text[len] = 0;
+    AcquireSRWLockExclusive(&g_t_lock);
+    NetTourney old = g_t;
+    NetTourney *a = &g_t;
+    a->known = 1; a->off = 0; a->err[0] = 0; a->n = 0; a->me = a->set = -1; a->status[0] = 0; a->place = 0;
+    a->phase[0] = 0; a->my_turn = a->left = 0; a->stage[0] = 0; a->npool = a->nstruck = 0; a->first = 0;
+    a->ready_me = a->ready_them = 0; a->their_chara = 0; a->their_chara_name[0] = 0; a->go = 0; a->opp[0] = 0;
+    a->own_id = a->own_in = 0; a->own_state[0] = a->own_name[0] = 0; a->br = 0; a->round = a->set_bo = 0; a->turn_secs = -1;
+    a->next_br = 0; a->next_round = 0; a->next_who[0] = 0; a->feature[0] = 0;
+    int focus = 0; char *ctx = NULL;
+    for (char *line = strtok_s(text, "\n", &ctx); line; line = strtok_s(NULL, "\n", &ctx)) {
+        char *rest = strchr(line, ' '); if (rest) *rest++ = 0; else rest = line + strlen(line);
+        char cp[300]; snprintf(cp, sizeof cp, "%s", rest);
+        if (!strcmp(line, "acct")) sscanf(rest, "%d %d", &a->account, &a->can_create);
+        else if (!strcmp(line, "off")) a->off = 1;
+        else if (!strcmp(line, "err")) snprintf(a->err, sizeof a->err, "%s", rest);
+        else if (!strcmp(line, "t") && a->n < NET_T_LIST) {
+            NetTourneyItem *it = &a->list[a->n];
+            if (sscanf(rest, "%d %11s %d %d %d", &it->id, it->state, &it->players, &it->signed_up, &it->organizer) == 5) { t_rest(rest, 5, it->name, sizeof it->name); a->n++; }
+        } else if (!strcmp(line, "f")) { int ver = 0, chunks = 0; sscanf(rest, "%d %d %d", &focus, &ver, &chunks); }
+        else if (!strcmp(line, "me")) {
+            char w[6][24]; int k = t_words(cp, w, 6);
+            if (k >= 3) {
+                a->me = atoi(w[0]); a->set = atoi(w[1]);
+                if (a->set >= 0 && k >= 5) { a->side = atoi(w[3]); a->host = atoi(w[4]); }
+                else if (a->set < 0) { snprintf(a->status, sizeof a->status, "%s", w[2]); if (k >= 4) a->place = atoi(w[3]); }
+            }
+        } else if (!strcmp(line, "opp")) snprintf(a->opp, sizeof a->opp, "%s", rest);
+        else if (!strcmp(line, "score")) sscanf(rest, "%d %d %d %d", &a->mine, &a->theirs, &a->need, &a->game);
+        else if (!strcmp(line, "rules")) sscanf(rest, "%d", &a->rule_stocks);
+        else if (!strcmp(line, "phase")) { if (sscanf(rest, "%7s %d %d %d", a->phase, &a->my_turn, &a->left, &a->turn_secs) < 4) a->turn_secs = -1; }
+        else if (!strcmp(line, "mt")) {                  /* (2026-11-02) the player's own tournament: id, state, checked in, name */
+            if (sscanf(rest, "%d %11s %d", &a->own_id, a->own_state, &a->own_in) == 3) t_rest(rest, 3, a->own_name, sizeof a->own_name);
+        } else if (!strcmp(line, "feature")) snprintf(a->feature, sizeof a->feature, "%s", rest);
+        else if (!strcmp(line, "round")) { char br[4] = ""; if (sscanf(rest, "%3s %d %d", br, &a->round, &a->set_bo) == 3) a->br = br[0]; }
+        else if (!strcmp(line, "next")) {
+            char br[4] = ""; if (sscanf(rest, "%3s %d", br, &a->next_round) == 2 && br[0] != '-') { a->next_br = br[0]; t_rest(rest, 2, a->next_who, sizeof a->next_who); }
+        }
+        else if (!strcmp(line, "stage")) { snprintf(a->stage, sizeof a->stage, "%s", strcmp(rest, "-") ? rest : ""); }
+        else if (!strcmp(line, "pool")) a->npool = t_words(cp, a->pool, NET_T_STAGES);
+        else if (!strcmp(line, "struck")) a->nstruck = t_words(cp, a->struck, NET_T_STAGES);
+        else if (!strcmp(line, "first")) sscanf(rest, "%d", &a->first);
+        else if (!strcmp(line, "ready")) {
+            char hex[24] = ""; sscanf(rest, "%d %d %23s", &a->ready_me, &a->ready_them, hex);
+            if (strcmp(hex, "-")) { a->their_chara = strtoull(hex, NULL, 16); t_rest(rest, 3, a->their_chara_name, sizeof a->their_chara_name); }
+        } else if (!strcmp(line, "go")) sscanf(rest, "%d", &a->go);
+    }
+    if (focus != a->focus) { a->focus = focus; a->version = 0; a->nent = a->nsets = a->nplaces = 0; a->tstate[0] = 0; }
+    if (ack == g_t_seq) a->pending = 0;
+    NetTourney now = *a;
+    ReleaseSRWLockExclusive(&g_t_lock);
+    /* the player's steps, as popups at each change (owner: every feature for the friends comes with on-screen steps) */
+    char m[400];
+    if (now.err[0] && strcmp(now.err, old.err)) { say("tournament: %s", now.err); if (strstr(now.err, "not counted")) menu_popup("Tournament", now.err); }
+    if (now.set >= 0 && (old.set != now.set || old.game != now.game)) {
+        say("tournament: set %d, game %d against %s", now.set, now.game, now.opp);     /* (2026-11-02) the cards on screen say it (tourney_card.inc) */
+    }
+    if (now.set < 0 && now.me >= 0 && strcmp(now.status, old.status)) {
+        if (!strcmp(now.status, "wait") && old.set >= 0) { snprintf(m, sizeof m, "Set over (%d - %d). Keep the game open: a card appears when your next set is ready.", old.mine, old.theirs); menu_popup("Tournament", m); }
+        else if (!strcmp(now.status, "dq")) menu_popup("Tournament", "You were disqualified by the organizer.");
+    }
+}
+static void tourney_doc_parse(int tid, uint32_t ver, char *text) {   /* (client thread) the whole bracket */
+    static NetTourney d;                                /* (only its bracket fields are used) */
+    memset(&d, 0, sizeof d);
+    char *ctx = NULL;
+    for (char *line = strtok_s(text, "\n", &ctx); line; line = strtok_s(NULL, "\n", &ctx)) {
+        char cp[400]; snprintf(cp, sizeof cp, "%s", line + (line[0] && line[1] ? 2 : 1));
+        const char *rest = line[0] && line[1] ? line + 2 : "";
+        switch (line[0]) {
+        case 'T': { int id; if (sscanf(rest, "%d %11s %9s %d %d %d %d %d", &id, d.tstate, d.seed_mode, &d.bo, &d.bo_top8, &d.bo_finals, &d.bans, &d.stocks) == 8) t_rest(rest, 8, d.organizer, sizeof d.organizer); break; }
+        case 'N': snprintf(d.name, sizeof d.name, "%s", rest); break;
+        case 'P': if (rest[0] == 's') d.nstarters = t_words(cp + 2, d.starters, NET_T_STAGES); else d.ncps = t_words(cp + 2, d.cps, NET_T_STAGES); break;
+        case 'E': if (d.nent < NET_T_MAX) { NetTourneyEntrant *e = &d.ent[d.nent]; int idx; char r[16];
+                      if (sscanf(rest, "%d %d %15s", &idx, &e->dq, r) == 3) { e->rating = strcmp(r, "-") ? atoi(r) : -1; t_rest(rest, 3, e->name, sizeof e->name); d.nent++; } } break;
+        case 'S': if (d.nsets < NET_T_SETS) { NetTourneySet *s = &d.sets[d.nsets]; char br[4];
+                      if (sscanf(rest, "%d %3s %d %d %d %9s %d %d %d %d", &s->id, br, &s->round, &s->p[0], &s->p[1], s->state, &s->winner, &s->score[0], &s->score[1], &s->bo) == 10) { s->br = br[0]; d.nsets++; } } break;
+        case 'R': if (d.nplaces < NET_T_MAX && sscanf(rest, "%d %d", &d.places[d.nplaces][0], &d.places[d.nplaces][1]) == 2) d.nplaces++; break;
+        }
+    }
+    AcquireSRWLockExclusive(&g_t_lock);
+    if (g_t.focus == tid) {
+        g_t.version = (int)ver;
+        memcpy(g_t.tstate, d.tstate, sizeof d.tstate); memcpy(g_t.seed_mode, d.seed_mode, sizeof d.seed_mode);
+        memcpy(g_t.organizer, d.organizer, sizeof d.organizer); memcpy(g_t.name, d.name, sizeof d.name);
+        g_t.bo = d.bo; g_t.bo_top8 = d.bo_top8; g_t.bo_finals = d.bo_finals; g_t.bans = d.bans; g_t.stocks = d.stocks;
+        g_t.nstarters = d.nstarters; g_t.ncps = d.ncps; memcpy(g_t.starters, d.starters, sizeof d.starters); memcpy(g_t.cps, d.cps, sizeof d.cps);
+        g_t.nent = d.nent; memcpy(g_t.ent, d.ent, sizeof d.ent);
+        g_t.nsets = d.nsets; memcpy(g_t.sets, d.sets, sizeof d.sets);
+        g_t.nplaces = d.nplaces; memcpy(g_t.places, d.places, sizeof d.places);
+    }
+    ReleaseSRWLockExclusive(&g_t_lock);
+}
+static void tourney_doc(const uint8_t *p, int n) {      /* (client thread) a TOURNEY_DOC body: a chunk of the bracket */
+    if (n < 10) return;
+    uint32_t tid = g32(p), ver = g32(p + 4); int i = p[8], cnt = p[9], len = n - 10;
+    if (cnt < 1 || cnt > TD_CHUNKS || i >= cnt || len > TD_CHUNK) return;
+    if (tid != g_td_id || ver != g_td_ver || cnt != g_td_n) { g_td_id = tid; g_td_ver = ver; g_td_n = cnt; g_td_got = 0; for (int k = 0; k < TD_CHUNKS; k++) g_td_len[k] = -1; }
+    if (g_td_len[i] < 0) { memcpy(g_td_buf[i], p + 10, (size_t)len); g_td_len[i] = len; g_td_got++; }
+    if (g_td_got != g_td_n) return;
+    static char text[TD_CHUNKS * TD_CHUNK + 1];
+    int o = 0;
+    for (int k = 0; k < g_td_n; k++) { memcpy(text + o, g_td_buf[k], (size_t)g_td_len[k]); o += g_td_len[k]; }
+    text[o] = 0;
+    g_td_got = -1;                                      /* (done: the same version again is ignored) */
+    tourney_doc_parse((int)tid, ver, text);
+}
+void net_tourney_get(NetTourney *o) {
+    InterlockedExchange64(&g_t_watch, (LONG64)ms_now());
+    AcquireSRWLockShared(&g_t_lock);
+    *o = g_t;
+    ReleaseSRWLockShared(&g_t_lock);
+    if (!g_joined) o->known = 0;
+}
+void net_tourney_peek(NetTourney *o) {
+    AcquireSRWLockShared(&g_t_lock);
+    *o = g_t;
+    ReleaseSRWLockShared(&g_t_lock);
+    if (!g_joined) o->known = 0;
+}
+void net_tourney_look(int tid) { InterlockedExchange(&g_t_focus_want, tid); g_t_tx = 0; }
+void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks) {
+    uint8_t a[1 + 32 + 5]; memset(a, 0, sizeof a);
+    a[0] = 3; memcpy(a + 1, name, strlen(name) < 32 ? strlen(name) : 32);
+    a[33] = (uint8_t)bo; a[34] = (uint8_t)bo_top8; a[35] = (uint8_t)bo_finals; a[36] = (uint8_t)bans; a[37] = (uint8_t)stocks;
+    say("tournament: making \"%s\"", name);
+    t_request(0, a, sizeof a);
+}
+void net_tourney_simple(int op, int tid) { uint8_t a[1] = {(uint8_t)op}; t_request(tid, a, 1); }
+void net_tourney_seed_mode(int tid, int mode) { uint8_t a[2] = {6, (uint8_t)mode}; t_request(tid, a, 2); }
+void net_tourney_move(int tid, int from, int to) { uint8_t a[3] = {7, (uint8_t)from, (uint8_t)to}; t_request(tid, a, 3); }
+void net_tourney_dq(int tid, int entrant) { uint8_t a[2] = {8, (uint8_t)entrant}; t_request(tid, a, 2); }
+void net_tourney_result(int tid, int set, int winner) { uint8_t a[4] = {9, 0, 0, (uint8_t)(int8_t)winner}; s16(a + 1, (uint16_t)set); t_request(tid, a, 4); }
+void net_tourney_stage(int tid, int set, const char *stage) {
+    uint8_t a[4 + 32]; int l = (int)strlen(stage); if (l > 32) l = 32;
+    a[0] = 10; s16(a + 1, (uint16_t)set); a[3] = (uint8_t)l; memcpy(a + 4, stage, (size_t)l);
+    t_request(tid, a, 4 + l);
+}
+int net_tourney_queued(void) {
+    AcquireSRWLockShared(&g_t_lock);
+    int q = g_joined && g_t.known && g_t.set >= 0;
+    ReleaseSRWLockShared(&g_t_lock);
+    return q;
+}
+int net_tourney_turn(void) {
+    AcquireSRWLockShared(&g_t_lock);
+    int t = g_joined && g_t.known && g_t.set >= 0 && g_t.go;
+    ReleaseSRWLockShared(&g_t_lock);
+    return t;
+}
+void net_tourney_ready(uint64_t chara, int confirm) {
+    AcquireSRWLockShared(&g_t_lock);
+    int same = g_t.ready_me && g_t_ready_chara == chara && g_t_ready_confirm == confirm, busy = g_t.pending, tid = g_t.focus;
+    ReleaseSRWLockShared(&g_t_lock);
+    if (same || (busy && g_t_ready_chara == chara && g_t_ready_confirm == confirm)) return;
+    g_t_ready_chara = chara; g_t_ready_confirm = confirm;
+    uint8_t a[10]; a[0] = 11; s64(a + 1, chara); a[9] = (uint8_t)(confirm != 0);
+    say("tournament: ready with fighter %016llx%s", (unsigned long long)chara, confirm ? " (seen the other player's)" : "");
+    t_request(tid, a, sizeof a);
+}
+void net_tourney_unready(void) {
+    g_t_ready_confirm = -1;
+    AcquireSRWLockShared(&g_t_lock); int tid = g_t.focus; ReleaseSRWLockShared(&g_t_lock);
+    uint8_t a[1] = {12}; t_request(tid, a, 1);
+}
+int net_tourney_match(char *stage, int n, int *stocks) {
+    AcquireSRWLockShared(&g_t_lock);
+    int ok = g_t.known && g_t.set >= 0 && g_t.stage[0];
+    if (ok) { snprintf(stage, (size_t)n, "%s", g_t.stage); *stocks = g_t.rule_stocks > 0 ? g_t.rule_stocks : 3; }
+    ReleaseSRWLockShared(&g_t_lock);
+    return ok;
+}
+
 static void mm_state(const uint8_t *p, int n, uint64_t t) {    /* (client thread) a MATCH_STATE body (n bytes) */
     uint32_t id = g32(p);
     int st = p[4], role = p[5], flags = p[6];
@@ -1947,6 +2245,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         if (g_joined) mm_tick(t);                                                                         /* O2 */
         if (g_joined) ladder_tick(t);                                                                     /* ladder: a match result until acknowledged */
         if (g_joined) arena_tick(t);                                                                      /* arena (lobby 1.6) */
+        if (g_joined) tourney_tick(t);                                                                    /* tournaments (lobby 1.7) */
         struct sockaddr_in from;
         int flen = sizeof from;
         int n = recvfrom(g_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
@@ -1995,6 +2294,12 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             break;
         case T_ARENA_STATE:
             if (g_joined) arena_state(buf + 4, n - 4);
+            break;
+        case T_TOURNEY_STATE:
+            if (g_joined) tourney_state(buf + 4, n - 4);
+            break;
+        case T_TOURNEY_DOC:
+            if (g_joined) tourney_doc(buf + 4, n - 4);
             break;
         case T_LISTING:
             if (n >= 12 + NI_SIZE && g_joined) {

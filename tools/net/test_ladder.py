@@ -86,8 +86,59 @@ class LadderTest(unittest.TestCase):
         c = os.urandom(16)
         self.assertEqual(self.ld.identify(c, "Mallory", key=os.urandom(32))[1], "not invited")
         self.ld.open_signup = True
-        self.assertEqual(self.ld.identify(c, "roberto", key=os.urandom(32))[1], "name taken")
-        self.assertEqual(self.ld.identify(c, "Mallory", key=os.urandom(32)), (c, "Mallory"))
+        self.assertEqual(self.ld.identify(c, "roberto", key=os.urandom(32)), (c, "roberto 2"))      # (a free variant)
+        d = os.urandom(16)
+        self.assertEqual(self.ld.identify(d, "Mallory", key=os.urandom(32)), (d, "Mallory"))
+
+    # accounts
+    def join(self, pid, key, name):
+        nonce = os.urandom(8)
+        return self.ld.identify(pid, name, nonce, LD.join_proof(key, nonce))
+
+    def test_rename_follows_the_game_with_open_signup(self):
+        self.assertEqual(self.join(self.a, self.ka, "Robert"), (self.a, "Roberto"))      # (invitation only: names are the admin's)
+        self.ld.open_signup = True
+        self.assertEqual(self.join(self.a, self.ka, "Robert"), (self.a, "Robert"))
+        self.assertEqual(self.join(self.a, self.ka, "fredy"), (self.a, "Robert"))        # (another account's name)
+        self.assertEqual(self.join(self.a, self.ka, "Player-1c83"), (self.a, "Robert"))  # (the game's placeholder)
+        self.assertEqual(self.join(self.a, self.ka, " x"), (self.a, "Robert"))            # (too short)
+        self.assertEqual(self.join(self.a, self.ka, "a\x07b"), (self.a, "Robert"))        # (a control character)
+        self.assertEqual(self.join(self.a, self.ka, "  Rob   Soto "), (self.a, "Rob Soto"))
+        self.assertEqual(self.ld.player(self.a)[0], "Rob Soto")
+
+    def test_signup_names(self):
+        self.ld.open_signup = True
+        self.assertEqual(self.ld.identify(os.urandom(16), "Player-0a1b", key=os.urandom(32))[1], "Player-0a1b")
+        self.assertEqual(self.ld.identify(os.urandom(16), "", key=os.urandom(32))[1], "Player")
+        self.assertEqual(self.ld.identify(os.urandom(16), "x" * 40, key=os.urandom(32))[1], "Player 2")
+        long_name = "N" * LD.NAME_MAX
+        self.assertEqual(self.ld.identify(os.urandom(16), long_name, key=os.urandom(32))[1], long_name)
+        self.assertEqual(self.ld.identify(os.urandom(16), long_name, key=os.urandom(32))[1], "N" * (LD.NAME_MAX - 2) + " 2")
+
+    def test_admin_rename_ban_delete(self):
+        self.assertIsNone(self.ld.rename("Roberto", "Beto"))
+        self.assertIn("another account", self.ld.rename("Beto", "fredy"))
+        self.assertIn("no account", self.ld.rename("Nadie", "X1"))
+        self.assertIn("not a valid name", self.ld.rename("Beto", "x"))
+        self.assertEqual(self.join(self.a, self.ka, "?"), (self.a, "Beto"))
+        self.assertIsNone(self.ld.ban("Beto"))
+        self.assertEqual(self.join(self.a, self.ka, "?"), (None, "banned"))
+        self.assertIsNone(self.ld.ban("Beto", False))
+        self.assertEqual(self.join(self.a, self.ka, "?"), (self.a, "Beto"))
+        self.assertEqual([r[0] for r in self.ld.accounts()], ["Beto", "FreDy"])
+        self.assertIsNone(self.ld.delete("Beto"))
+        self.assertIn("no account", self.ld.delete("Beto"))
+        self.assertEqual(self.join(self.a, self.ka, "?")[1], "unknown id")               # (the game signs up again)
+
+    def test_older_database_gets_the_banned_column(self):
+        path = os.path.join(self.dir.name, "old.db")
+        db = LD.sqlite3.connect(path)
+        db.executescript(LD.SCHEMA.replace(", banned INTEGER NOT NULL DEFAULT 0", ""))
+        db.close()
+        old = LD.Ladder(path, now=self.clock)
+        self.assertIn("no account", old.ban("nobody"))
+        self.assertIn("banned", [r[1] for r in old.db.execute("PRAGMA table_info(players)")])
+        old.db.close()
 
     def test_invite_is_single_use(self):
         code = self.ld.invite("Third")

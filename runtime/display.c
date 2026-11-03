@@ -443,8 +443,12 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     char exe[MAX_PATH] = "";
     GetModuleFileNameA(NULL, exe, sizeof exe);
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
-    int visible = show ? atoi(show) != 0 : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
+    int visible = show ? atoi(show) != 0 : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe") || !_stricmp(base, "ssbu_staging.exe"));      /* (_rb: the rollback pair a player starts; staging: the test version, "Play SSBU (STAGING).bat") */
     snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU native (study build)");
+    {   /* (2026-11-03) the test version says so in its title (owner: "not to confuse staging and the normal one") */
+        const char *br = getenv("SSBU_UPDATE_BRANCH");
+        if (!_stricmp(base, "ssbu_staging.exe") || (br && !_stricmp(br, "staging"))) { char t[sizeof g_title]; snprintf(t, sizeof t, "%s", g_title); snprintf(g_title, sizeof g_title, "%s - STAGING (test version)", t); }
+    }
     if (visible) {
         g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);

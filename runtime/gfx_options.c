@@ -27,7 +27,7 @@ int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
 const char *gfx_language(void) { gfx_options(); return g_gfx_language; }
 static int g_gfx_unlock_all;                         /* unlock_all = off | on (unlock_all.c) */
 int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
-static volatile int g_gfx_input_delay = 3;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
+static volatile int g_gfx_input_delay = 0;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
 int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
 void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
 /* (2026-11-02) the game's own Online menu (Battle Arenas) on our server: online_menu = off | on, online_menu_server =
@@ -35,10 +35,23 @@ void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
  * the arenas' rollback, <server>:39500) at the start by gfx_online_menu_env (boot.c), when SSBU_ONLINE_MENU is not set. */
 static int g_gfx_online_menu; static char g_gfx_online_menu_server[64] = GFX_ONLINE_MENU_SERVER_DEFAULT;
 int gfx_online_menu(void) { gfx_options(); return g_gfx_online_menu; }
+static int g_gfx_tournaments;                          /* (2026-11-02) tournaments = on: the lobby of the same server (its accounts and tournaments) */
+int gfx_tournaments(void) { gfx_options(); return g_gfx_tournaments; }
 static int gfx_ipv4(const char *v) { int a, b, c, d; char x; return sscanf(v, "%d.%d.%d.%d%c", &a, &b, &c, &d, &x) == 4 && a >= 0 && a < 256 && b >= 0 && b < 256 && c >= 0 && c < 256 && d >= 0 && d < 256; }
 void gfx_online_menu_env(void) {
     gfx_options();
-    if (!g_gfx_online_menu || getenv("SSBU_ONLINE_MENU")) return;
+    if (getenv("SSBU_ONLINE_MENU")) return;
+    if (!g_gfx_online_menu && g_gfx_tournaments) {      /* (2026-11-02) tournaments only: the server's lobby (accounts, tournaments), Local Wireless kept */
+        char lobby[96]; snprintf(lobby, sizeof lobby, "%s:39500", g_gfx_online_menu_server);
+        const char *was = getenv("SSBU_ONLINE");
+        if (was && !_stricmp(was, "off")) return;           /* (a test run's SSBU_ONLINE=off wins: never the live server) */
+        _putenv_s("SSBU_ONLINE_MENU_PREV_ONLINE", was && *was ? was : "-");
+        _putenv_s("SSBU_ONLINE", lobby);
+        _putenv_s("SSBU_ONLINE_MENU_FROM_INI", "1");        /* (menu.cpp restart_game: the next copy reads graphics.ini again) */
+        printf("graphics.ini tournaments = on: the tournament server's lobby %s\n", lobby);
+        return;
+    }
+    if (!g_gfx_online_menu) return;
     {   const char *was = getenv("SSBU_ONLINE");             /* (2026-11-03) a run asked to be offline stays offline: the installer's */
         if (was && !_stricmp(was, "off")) {                 /* self-tests (SSBU_ONLINE=off) ran on the live server with Battle Arenas */
             printf("graphics.ini online_menu = on, but this run is offline (SSBU_ONLINE=off): Battle Arenas off\n");     /* on: 19 SDK failures */
@@ -202,7 +215,7 @@ static const char *const k_default_ini =
 "; input_delay = 1 .. 8 | auto\r\n"
 ";   The input delay of online rollback fights, in frames (F1 > Gameplay). Both games of a match use the larger of the\r\n"
 ";   two players' values. auto: from the measured round trip. SSBU_RB_NET_DELAY=<n> wins.\r\n"
-"input_delay = 3\r\n"
+"input_delay = auto\r\n"
 "\r\n"
 "; fight_sound = off | on\r\n"
 ";   Music and sound effects in online rollback fights (F1 > Gameplay). off: silent fights, the smoothest (the game's\r\n"
@@ -215,6 +228,11 @@ static const char *const k_default_ini =
 ";   rollback 1-on-1 fights and spectators; Local Wireless rooms are not available then. Used from the next start.\r\n"
 ";   online_menu_server = <IPv4 address> changes the server (default " GFX_ONLINE_MENU_SERVER_DEFAULT ").\r\n"
 "online_menu = off\r\n"
+"\r\n"
+"; tournaments = off | on\r\n"
+";   Tournaments (F1 > Online > Tournaments): on: the game connects to the tournament server (the same as online_menu_server)\r\n"
+";   instead of the group's Radmin network; sign up, check in and play your sets from the cards on screen. Used from the next start.\r\n"
+"tournaments = off\r\n"
 "\r\n"
 "; sharpening = 0 .. 100      (Vulkan)\r\n"
 ";   0 = off. Sharpens the picture on its way to the window, without halos (kept inside each pixel's neighbours).\r\n"
@@ -353,6 +371,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
         else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
+        else if (!_stricmp(key, "tournaments")) g_gfx_tournaments = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
         else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }
         else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
         else if (!_stricmp(key, "screenshot_dir")) snprintf(g_gfx_shot_dir, sizeof g_gfx_shot_dir, "%s", val);      /* nvn_vk_draw.c */

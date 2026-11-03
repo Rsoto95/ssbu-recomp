@@ -27,6 +27,7 @@ enum { ML_MATCH = 20, ML_MATCH_STATE };                 /* O2 matchmaking (net_r
 enum { ML_MS_IDLE, ML_MS_SEARCHING, ML_MS_MATCHED, ML_MS_TIMEOUT, ML_MS_PEER_LEFT, ML_MS_TOGETHER, ML_MS_EXPIRED };
 enum { ML_KIND_ROOM = 1, ML_KIND_ROLLBACK = 2 };        /* (R3 net3, lobby 1.4) MATCH op 1 / op 2: a Local Wireless search, a rollback-match search */
 enum { ML_RESULT = 22, ML_RESULT_ACK, ML_ARENA, ML_ARENA_STATE };     /* (1.6 arena) the RESULT of a rollback match, the arena (ssbu_lobby.py docstring) */
+enum { ML_TOURNEY = 29, ML_TOURNEY_STATE };             /* (1.7) tournaments live on a lobby server with accounts: this lobby says it has none */
 enum { ML_AR_OUT, ML_AR_WAITING, ML_AR_TURN, ML_AR_PLAYING };
 #define ML_ARENA_TURN_FOR 120000                        /* ms: a turn not started in this time (ssbu_lobby.py ARENA_TURN_FOR) */
 #define ML_ARENA_PLAY_FOR 900000                        /* ms: a match without a result */
@@ -932,6 +933,13 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
         ml_on_match(c, p[12], ml_get32(p + 13), now);
     } else if (kind == ML_ARENA && len >= 13 && cookie_ok) {        /* (1.6) */
         ml_on_arena(c, p, len, now);
+    } else if (kind == ML_TOURNEY && len >= 23 && cookie_ok) {     /* (1.7) the request acknowledged; "off": no tournaments here (F1 > Tournament says where they are) */
+        static const char k_off[] = "acct 0 0\noff";
+        uint8_t pkt[4 + 2 + sizeof k_off];
+        uint8_t *q = ml_hdr(pkt, ML_TOURNEY_STATE);
+        q[0] = p[12]; q[1] = p[13];
+        memcpy(q + 2, k_off, sizeof k_off - 1);
+        ml_send(pkt, (int)(4 + 2 + sizeof k_off - 1), &c->at);
     } else if (kind == ML_RESULT && len >= ML_RESULT_LEN && cookie_ok) {
         ml_arena_result(c, p, now);
     } else if (kind == 16 && len > 16 && len <= 1500 && cookie_ok) {      /* R3: a rollback message (net_relay.c T_RB) to the other players of its lobby code */

@@ -28,6 +28,7 @@ int menu_enabled(void) {
 }
 int menu_is_open(void) { return 0; }
 int menu_input_blocked(void) { return 0; }
+int menu_tourney_modal(void) { return 0; }      /* (2026-11-02) the tournament screen (tourney_card.inc): none without the menu */
 void menu_request_toggle(void) {}
 void menu_notice(const char *text) { (void)text; }      /* (the message is in the log only) */
 void menu_toast(const char *text, int ms) { (void)text; (void)ms; }      /* (the message is in the log only) */
