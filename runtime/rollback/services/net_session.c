@@ -715,6 +715,18 @@ void rbn_rx(const uint8_t *p, int n) {
         n -= 2;
     }
     InterlockedIncrement64(&g_rx_pkts); InterlockedExchange64(&g_rx_last_ms, (LONG64)GetTickCount64());
+    /* (2026-11-03) a ping or pong that arrives twice (straight from the other player, and 1 in 30 also through the lobby:
+     * net_relay.c net_rb_send) counts once, the first copy: the late copy through the lobby was answered and measured again,
+     * and a Battle Arena match at 9 ms showed a 50 ms round trip (the input delay and the time sync come from it) */
+    static uint64_t seen_ping[16], seen_pong[16]; static unsigned seen_ping_i, seen_pong_i;
+    if (p[0] == RB_MSG_PING || p[0] == RB_MSG_PONG) {
+        RbMsg d; if (rb_msg_parse(p, (size_t)n, &d)) {
+            uint64_t key = p[0] == RB_MSG_PING ? (uint64_t)d.time_us : (uint64_t)d.echo_us;
+            uint64_t *seen = p[0] == RB_MSG_PING ? seen_ping : seen_pong; unsigned *at = p[0] == RB_MSG_PING ? &seen_ping_i : &seen_pong_i;
+            for (int k = 0; k < 16; k++) if (seen[k] == key) return;
+            seen[(*at)++ % 16] = key;
+        }
+    }
     if (p[0] == RB_MSG_PING) {                          /* answered at once on this thread (the round trip excludes the frame wait) */
         RbMsg m, r; if (!rb_msg_parse(p, (size_t)n, &m)) { InterlockedIncrement64(&g_rx_bad); return; }
         memset(&r, 0, sizeof r); r.type = RB_MSG_PONG; r.frame = (int32_t)g_cur; r.time_us = now_us(); r.echo_us = m.time_us;
