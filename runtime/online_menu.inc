@@ -17,6 +17,14 @@ static volatile LONG g_om_packets, g_om_udp;               /* nn::ssl / UDP pack
 /* Pia's NAT check asks nncs1 and nncs2 and compares the answers: they must be two addresses. nncs2 -> the second one
  * (SSBU_ONLINE_MENU_SERVER2, default 127.0.0.2: loopback too on Windows). */
 static char g_om_server2[64] = "127.0.0.2";
+/* (2026-11-02) A server on another PC has ONE address: nncs2 = nncs1 made Pia give up at once (2618-0006, before a single
+ * socket was opened). The game is told nncs2 is OM_NNCS2_VIRTUAL; what it sends there goes to our server (port 10025 ->
+ * 39599, already open on the server, 10125 -> 10126, any other the same) and what comes back from those ports is shown as
+ * coming from the virtual address (tools/net/nex_server.py: the same mapping). */
+#define OM_NNCS2_VIRTUAL "198.18.0.2"
+static uint32_t g_om_v2, g_om_v2_server;                   /* network order; 0 = no virtual nncs2 */
+static unsigned om_v2_port_out(unsigned p) { return p == 10025 ? 39599 : p == 10125 ? 10126 : p; }
+static unsigned om_v2_port_in(unsigned p) { return p == 39599 ? 10025 : p == 10126 ? 10125 : 0; }
 static ImportFn g_om_prev_gai2, g_om_prev_gainn, g_om_prev_ghbn, g_om_prev_resolve, g_om_prev_connect, g_om_prev_sendto,
                 g_om_prev_send, g_om_prev_socket, g_om_prev_ssl_host, g_om_prev_primary_ip, g_om_prev_bind, g_om_prev_recvfrom,
                 g_om_prev_bind2, g_om_prev_recvfrom2;
@@ -290,8 +298,12 @@ static void om_SendTo(Ctx *c) {
     uint32_t was = dst ? M32(dst + 4) : 0;
     int swapped = g_om_fake && dst && M8(dst + 1) == 2 && om_is_fake(was);
     if (swapped) M32(dst + 4) = htonl(INADDR_LOOPBACK);
+    uint16_t port_was = dst ? M16(dst + 2) : 0;
+    int v2 = g_om_v2 && dst && M8(dst + 1) == 2 && was == g_om_v2;
+    if (v2) { M32(dst + 4) = g_om_v2_server; M16(dst + 2) = htons((uint16_t)om_v2_port_out(ntohs(port_was))); }
     g_om_prev_sendto(c);
-    if (swapped) M32(dst + 4) = was;
+    if (swapped || v2) M32(dst + 4) = was;
+    if (v2) M16(dst + 2) = port_was;
 }
 static void om_Bind(Ctx *c) {                              /* (fd, const sockaddr *, len): which port each socket asks for (Pia: 2026-11-02) */
     int fd = (int)A0;
@@ -319,6 +331,10 @@ static void om_trace_rx(uint64_t buf, long long got) {     /* a Pia packet of th
     if (got == 144 && b[0] == 0x32 && b[1] == 0xab && b[2] == 0x98 && b[3] == 0x64) hook_trace_window("a 144-byte Pia packet received");
 }
 static void om_fake_from(uint64_t from) {
+    if (g_om_v2 && from && M8(from + 1) == 2 && M32(from + 4) == g_om_v2_server) {
+        unsigned p = om_v2_port_in(ntohs(M16(from + 2)));
+        if (p) { M32(from + 4) = g_om_v2; M16(from + 2) = htons((uint16_t)p); return; }
+    }
     if (g_om_fake && from && M8(from + 1) == 2 && M32(from + 4) == htonl(INADDR_LOOPBACK) && !om_server_port(ntohs(M16(from + 2))))
         M32(from + 4) = om_fake_for_port(ntohs(M16(from + 2)));
 }
@@ -451,7 +467,11 @@ static void online_menu_register(void) {
     int remote = 0;                                        /* (2026-11-02) our server on another PC (Radmin, a VPS) */
     {   struct in_addr a; remote = InetPtonA(AF_INET, g_om_server, &a) == 1 && (a.s_addr & 0xff) != 127; }
     if ((e = getenv("SSBU_ONLINE_MENU_SERVER2")) && *e) snprintf(g_om_server2, sizeof g_om_server2, "%s", e);
-    else if (remote) snprintf(g_om_server2, sizeof g_om_server2, "%s", g_om_server);   /* (one server: nncs2 = nncs1) */
+    else if (remote) {                                     /* (one server: nncs2 is a virtual address of it, see OM_NNCS2_VIRTUAL) */
+        snprintf(g_om_server2, sizeof g_om_server2, "%s", OM_NNCS2_VIRTUAL);
+        InetPtonA(AF_INET, OM_NNCS2_VIRTUAL, &g_om_v2); InetPtonA(AF_INET, g_om_server, &g_om_v2_server);
+        printf("[online-menu] NAT check: nncs1 %s, nncs2 %s (virtual: %s ports 39599 / 10126)\n", g_om_server, OM_NNCS2_VIRTUAL, g_om_server);
+    }
     {   const char *f = getenv("SSBU_ONLINE_MENU_FAKEIP");
         struct in_addr a;
         if (!f || !*f) f = remote ? "off" : "10.200.0.1";     /* (the fake addresses are for copies on ONE PC only) */

@@ -751,7 +751,7 @@ def pia_claim(client):
 ARENA_QUERY_PORT = 39599
 
 
-def arena_query_listener(host, log):
+def arena_query_listener(host, log, socks=None):
     """(2026-11-02) The game asks which Battle Arena its player is in, to look for its opponent of a rollback match in the
     lobby with that arena as the key (ssbu_lobby.py MATCH op 2 with a key; runtime net_session.c). UDP, little-endian:
     "ARENA?" + pid u64 -> "ARENA!" + gid u32 (0: in none) + n u8 + n x pid u64 (the arena's players, its maker first)."""
@@ -762,6 +762,8 @@ def arena_query_listener(host, log):
         log("arena query port %s:%d: %s" % (host, ARENA_QUERY_PORT, e))
         return
     log("arena queries on UDP %s:%d" % (host, ARENA_QUERY_PORT))
+    if socks is not None:
+        socks[("nncs2", 10025)] = u                         # (the virtual nncs2's port 10025: NNCS2_PORTS)
     while True:
         try:
             data, addr = u.recvfrom(256)
@@ -777,6 +779,11 @@ def arena_query_listener(host, log):
             for code, members, most in rows:
                 out += code.encode("ascii", "replace")[:5].ljust(5, b"\0") + struct.pack("<BB", min(members, 255), min(most, 255))
             u.sendto(out, addr)
+            continue
+        if len(data) == 16 and socks is not None and PUBLIC_IP[0]:   # a NAT check sent to the virtual nncs2:10025
+            out, via = nat_answer(data, addr, ("nncs2", 10025), socks)
+            if out is not None and via is not None:
+                via.sendto(out, addr)
             continue
         if len(data) < 14 or data[:6] != b"ARENA?":
             continue
@@ -1096,6 +1103,11 @@ PUBLIC_IP = [""]               # --public-ip: this server's address as the playe
                                # the private one of its network card); empty = the address each connection came in on
 
 
+# (2026-11-02) One address (--public-ip): Pia needs nncs2 to be another address (nncs2 = nncs1: 2618-0006 at once). The
+# runtime tells the game nncs2 is NNCS2_VIRTUAL and sends what goes there to this server: its port 10025 -> 39599 (the
+# arena query port, already open), 10125 -> 10126 (only answered FROM: no inbound rule needed). runtime online_menu.inc.
+NNCS2_VIRTUAL = "198.18.0.2"
+NNCS2_PORTS = {10025: 39599, 10125: 10126}
 NAT_OTHER_PORT = {2, 3, 0x66}
 NAT_OTHER_IP = {2}
 
@@ -1107,10 +1119,12 @@ def nat_answer(data, addr, here, socks):
     host, port = here
     if kind in NAT_OTHER_IP and len(NAT_HOSTS) > 1:       # (one address: nncs1 and nncs2 are the same server; the game asks 101-103 only)
         host = NAT_HOSTS[1] if host == NAT_HOSTS[0] else NAT_HOSTS[0]
+    elif kind in NAT_OTHER_IP and PUBLIC_IP[0]:            # (one address: the virtual nncs2 <-> nncs1)
+        host = "nncs2" if host != "nncs2" else NAT_HOSTS[0]
     if kind in NAT_OTHER_PORT:
         port = NAT_PORTS[1] if port == NAT_PORTS[0] else NAT_PORTS[0]
     out = struct.pack(">IIII", kind, addr[1], struct.unpack(">I", socket.inet_aton(pub_ip(addr[0], addr[1])))[0],
-                      struct.unpack(">I", socket.inet_aton(PUBLIC_IP[0] or host))[0])
+                      struct.unpack(">I", socket.inet_aton(NNCS2_VIRTUAL if host == "nncs2" else (PUBLIC_IP[0] or host)))[0])
     return out, socks.get((host, port))
 
 
@@ -1174,7 +1188,11 @@ def main():
             socks[(host, port)] = u
     for here in list(socks):
         threading.Thread(target=nat_listener, args=(here, socks, log), daemon=True).start()
-    threading.Thread(target=arena_query_listener, args=(a.bind, log), daemon=True).start()
+    if a.public_ip:                                          # the virtual nncs2's port 10125 (answers only)
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        u.bind(("0.0.0.0", NNCS2_PORTS[10125]))
+        socks[("nncs2", 10125)] = u
+    threading.Thread(target=arena_query_listener, args=(a.bind, log, socks if a.public_ip else None), daemon=True).start()
     for host in NAT_HOSTS:
         for port in (33334, 33335):
             threading.Thread(target=sinkhole, args=(host, port, log), daemon=True).start()
