@@ -27,7 +27,7 @@ int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
 const char *gfx_language(void) { gfx_options(); return g_gfx_language; }
 static int g_gfx_unlock_all;                         /* unlock_all = off | on (unlock_all.c) */
 int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
-static volatile int g_gfx_input_delay = 3;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
+static volatile int g_gfx_input_delay = 0;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
 int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
 void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
 /* (2026-11-02) the game's own Online menu (Battle Arenas) on our server: online_menu = off | on, online_menu_server =
@@ -215,7 +215,7 @@ static const char *const k_default_ini =
 "; input_delay = 1 .. 8 | auto\r\n"
 ";   The input delay of online rollback fights, in frames (F1 > Gameplay). Both games of a match use the larger of the\r\n"
 ";   two players' values. auto: from the measured round trip. SSBU_RB_NET_DELAY=<n> wins.\r\n"
-"input_delay = 3\r\n"
+"input_delay = auto\r\n"
 "\r\n"
 "; fight_sound = off | on\r\n"
 ";   Music and sound effects in online rollback fights (F1 > Gameplay). off: silent fights, the smoothest (the game's\r\n"
