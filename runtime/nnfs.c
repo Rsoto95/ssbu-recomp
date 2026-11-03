@@ -555,6 +555,52 @@ static void journal_list(FILE *j, const char *work, const char *rel) {     /* ev
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }
+/* (2026-11-03) Moves a committed file over the old one even when the old one is open somewhere. MoveFileEx refuses to
+ * replace a file another handle holds (ERROR_ACCESS_DENIED, even with FILE_SHARE_DELETE): a reader of the committed save
+ * in this game (the game opens the committed file for reading while its save thread commits) or an outside scanner
+ * (antivirus, search indexer) for a moment. The Switch has no such rule, so the game aborted (nn::err 0x3e802, then
+ * nn::diag abort on the SaveStorage thread). Then: a POSIX-semantics rename (NTFS, Windows 10 1709 and later: the open
+ * handles keep the old data, the name points at the new file at once), and retries for up to ~2 s for a lock that does
+ * not allow even that. */
+typedef struct { DWORD flags; HANDLE root; DWORD len; WCHAR name[1]; } RenameInfoEx;   /* = FILE_RENAME_INFO with Flags */
+static BOOL rename_posix(const char *a, const char *b) {
+    WCHAR wb[MAX_PATH];
+    int n = MultiByteToWideChar(CP_ACP, 0, b, -1, wb, MAX_PATH);
+    if (n <= 1) return FALSE;
+    HANDLE h = CreateFileA(a, DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    size_t size = sizeof(RenameInfoEx) + (size_t)n * sizeof(WCHAR);
+    RenameInfoEx *ri = (RenameInfoEx *)calloc(1, size);
+    BOOL ok = FALSE;
+    if (ri) {
+        ri->flags = 0x1 | 0x2;                         /* FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS */
+        ri->len = (DWORD)((n - 1) * sizeof(WCHAR));
+        memcpy(ri->name, wb, (size_t)n * sizeof(WCHAR));
+        ok = SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)22 /* FileRenameInfoEx */, ri, (DWORD)size);
+        free(ri);
+    }
+    DWORD e = GetLastError();
+    CloseHandle(h);
+    if (!ok) SetLastError(e);
+    return ok;
+}
+static BOOL move_replace(const char *a, const char *b) {
+    for (int tries = 0; ; tries++) {
+        if (MoveFileExA(a, b, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return TRUE;
+        DWORD e = GetLastError();
+        if (e != ERROR_ACCESS_DENIED && e != ERROR_SHARING_VIOLATION) return FALSE;
+        if (rename_posix(a, b)) {
+            if (tries == 0) trace_printf("     fs journal: %s was open (Windows error %lu): replaced with a POSIX rename\n", b, e);
+            return TRUE;
+        }
+        if (tries >= 40) {
+            printf("nn::fs: %s could not be replaced, something else holds it (Windows error %lu, tried for 2 s)\n", b, e);
+            SetLastError(e);
+            return FALSE;
+        }
+        Sleep(50);
+    }
+}
 /* Applies a decided commit: marker lines are "W <working folder>", "R <committed folder>", then "D rel" (delete),
  * "M rel" (make folder), "F rel" (move file). Every step can be repeated, so a commit interrupted here is finished by
  * running it again. */
@@ -575,7 +621,7 @@ static int journal_apply(const char *marker) {
         else if (line[0] == 'M') { join(a, root, arg); make_parents(a); CreateDirectoryA(a, NULL); }
         else if (line[0] == 'F') {
             join(a, work, arg); join(b, root, arg);
-            if (exists(a)) { make_parents(b); if (!MoveFileExA(a, b, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { fclose(j); return -2; } }
+            if (exists(a)) { make_parents(b); if (!move_replace(a, b)) { fclose(j); return -2; } }
             n++;
         }
     }
@@ -721,7 +767,7 @@ static void fs_Commit(Ctx *c) {                          /* (const char *mount n
         ok = fflush(j) == 0 && FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(j)));
         fclose(j);
     }
-    if (ok) ok = MoveFileExA(journal, marker, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);      /* the commit is decided here */
+    if (ok) ok = move_replace(journal, marker);                                                        /* the commit is decided here */
     if (ok) { changes = journal_apply(marker); ok = changes >= 0; }
     if (ok) tomb_clear(m);
     commit_done(mx);
