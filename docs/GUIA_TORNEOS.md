@@ -174,5 +174,9 @@ El ladder es un servicio aparte de los torneos: juegas cuando quieras, contra qu
 - **Y** en la pantalla del ladder muestra tu rating, tus sets ganados y perdidos y tu lugar.
 
 La tabla y todos los sets (con escenarios y personajes de cada game) están en **http://160.34.219.118:8080/ladder**.
-Arriba dice **cuántos están buscando rival ahora** (y en el juego, en F3 y en F1 > Tournament). Dale clic a un jugador
+Arriba dice **cuántos están buscando rival ahora** (y en el juego, en F3 y en F1 > Tournament).
+
+**Avisos en el juego:** cuando alguien empieza a buscar en el ladder (y tú no estás buscando ni jugando un set), sale un
+aviso chico arriba por unos segundos ("1 player is searching for a ladder opponent right now"). Lo mismo cuando se abre un
+torneo. Estos avisos **nunca salen durante una pelea**: si estás peleando, aparecen cuando termina. Dale clic a un jugador
 para ver su historial, o a un set para ver sus games.

@@ -16,7 +16,8 @@
 static NetTourney g_tc;                                          /* (render thread) the last state, read each frame */
 static int g_tc_auto, g_tc_sel, g_tc_tab, g_tc_confirm, g_tc_list_sel;
 static ULONGLONG g_tc_close_at, g_tc_banner_until, g_tc_opened_at;
-static char g_tc_banner[240];
+static char g_tc_banner[240], g_tc_banner_title[16] = "TOURNAMENT";
+static int g_tc_lq_told;                                         /* (2026-11-03) "someone searches" told for this wait */
 static char g_tc_sig_turn[96], g_tc_sig_set[64];
 static int g_tc_checkin_for, g_tc_invite_for;
 
@@ -107,12 +108,24 @@ static void tc_tick(uint64_t b, uint64_t down) {
     {   int idx[NET_T_LIST], n = tc_open_list(idx);      /* a tournament open for sign-ups that the player is not in: a note at the top, once */
         for (int k = 0; k < n; k++) {
             const NetTourneyItem &it = g_tc.list[idx[k]];
-            if (!it.signed_up && it.id > g_tc_invite_for && !g_tc.own_id) {
+            if (!it.signed_up && it.id > g_tc_invite_for && !g_tc.own_id && !fight && !g_open) {     /* (never over a fight: after it) */
                 g_tc_invite_for = it.id;
+                snprintf(g_tc_banner_title, sizeof g_tc_banner_title, "TOURNAMENT");
                 snprintf(g_tc_banner, sizeof g_tc_banner, "Tournament open: %s (%d players).\nTo sign up: press F3, or hold - (Minus) for a second.", it.name, it.players);
                 g_tc_banner_until = now + 15000;
             }
         }
+    }
+    /* (2026-11-03) someone waits in the ladder queue and this player is free (not searching, no set, no tournament going
+     * on): a short note at the top, once per wait, never over a fight (it comes after it) nor over F1 */
+    if (g_tc.lq_known && g_tc.lq_waiting == 0) g_tc_lq_told = 0;
+    else if (g_tc.lq_known && !g_tc.lq_in && g_tc.set < 0 && !g_tc.own_ladder && !g_tc_lq_told && !fight && !g_open && !g_tc_modal &&
+             !(g_tc.own_id && !strcmp(g_tc.own_state, "running")) && now >= g_tc_banner_until) {
+        g_tc_lq_told = 1;
+        snprintf(g_tc_banner_title, sizeof g_tc_banner_title, "LADDER");
+        snprintf(g_tc_banner, sizeof g_tc_banner, "%d player%s searching for a ladder opponent right now.\nTo play: press F3 (or hold - for a second), then A on Ladder.",
+                 g_tc.lq_waiting, g_tc.lq_waiting == 1 ? " is" : "s are");
+        g_tc_banner_until = now + 8000;
     }
     /* opened by itself for a stage turn: when the stage is chosen, the card says what follows for 4 s, then closes */
     if (g_tc_modal && g_tc_auto && g_tc.set >= 0 && (!strcmp(g_tc.phase, "chars") || !strcmp(g_tc.phase, "go")) && !g_tc_close_at && now - g_tc_opened_at > 1500)
@@ -295,13 +308,13 @@ static void tc_draw(ImGuiIO &io) {
     ULONGLONG now = GetTickCount64();
     const NetTourney &t = g_tc;
     if (!g_tc_modal) {
-        if (now < g_tc_banner_until && !g_open) {            /* a tournament opened: once, at the top */
+        if (now < g_tc_banner_until && !g_open && !tc_fight_on()) {     /* a tournament opened / someone searches (ladder): once, at the top */
             ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.18f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
             ImGui::SetNextWindowBgAlpha(0.9f);
             ImGui::PushStyleColor(ImGuiCol_Border, TC_GOLD); ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
             ImGui::Begin("##tcbanner", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                          ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
-            ImGui::TextColored(TC_GOLD, "TOURNAMENT"); ImGui::Separator(); ImGui::TextUnformatted(g_tc_banner);
+            ImGui::TextColored(TC_GOLD, "%s", g_tc_banner_title); ImGui::Separator(); ImGui::TextUnformatted(g_tc_banner);
             ImGui::End(); ImGui::PopStyleVar(); ImGui::PopStyleColor();
         }
         if (t.known && ((t.own_id && strcmp(t.own_state, "done")) || t.lq_in) && !g_open && !tc_fight_on()) {     /* the small line at the top right */
