@@ -1039,6 +1039,13 @@ void rbn_finalize(long long cur) {
     for (long long f = g_hfinal_upto + 1; f <= upto; f++) {
         if (g_hlog && g_hframe[f % HR] == f) fprintf(g_hlog, "f %lld h %016llx\n", f, (unsigned long long)g_hash[f % HR]);
         detail_frame(f);
+        if (f % 60 == 0 && f <= 600) {                  /* (2026-11-03) the same frames on both games, to compare their logs line by line */
+            int x = (int)(f % HR2);
+            printf("[rbnet] frame %lld (final) checksum %08x:", f, g_hframe[f % HR] == f ? (uint32_t)(g_hash[f % HR] ^ (g_hash[f % HR] >> 32)) : 0u);
+            for (int q = 0; q < g_unl[x] && q < 4; q++) { struct { int k, st; uint64_t mot; float mf, fx, fy, dmg; uint64_t rh; } r3; memcpy(&r3, g_ulines[x][q], sizeof r3);
+                printf(" | fighter %d: status %x motion %llx frame %.3f x %.4f y %.4f damage %.2f gen %016llx", q, r3.st, (unsigned long long)r3.mot, (double)r3.mf, (double)r3.fx, (double)r3.fy, (double)r3.dmg, (unsigned long long)r3.rh); }
+            printf("\n"); fflush(stdout);
+        }
         g_hfinal_upto = f;
         if (g_spec) spec_final(f);                      /* (2026-11-02) the fighters' checksums of this frame */
         ladder_final(f);
