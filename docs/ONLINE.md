@@ -159,15 +159,24 @@ the room's. Each player plays with his own name-tag controls (button layout and 
 off use the game's own online netcode as before (a short message says so once), so players with different settings can
 still play together in a room.
 
-Input delay is chosen from the best measured round trip: 1 frame below about 117 ms, 2 frames from about 117 ms, 3 from 150 ms,
-4 from about 184 ms (the rest of the trip is covered by rollback).
+**Input delay** (F1 -> Gameplay, graphics.ini `input_delay`, default **auto** since 2026-11-03): each player chooses 1..6
+or Auto; the match uses the larger of the two, and the host resolves Auto from the latest measured round trips (the one
+3 of 4 stay under), so both games always play with the same number: the whole one-way trip in frames, rounded up, 1..7
+(1 under 33 ms, 2 up to 67 ms, 3 up to 100 ms, 4 up to 133 ms, 5 up to 167 ms, 6 up to 200 ms, 7 above); rollback only
+covers the spikes. The rollback
+predicts the other player's input by repeating the last one it got, so every change of that input costs a rollback of
+(one-way trip - delay) frames: with a delay too low for the ping (e.g. 3 at 120 ms) most changes cost 2-4 frames and the
+game stutters. Other details: a game without the snapshot ring (not enough memory) plays with at least the delay that
+covers the whole trip (it waits for every pad); pads that come during the frame wait are checked at once (a rollback one
+frame shorter; `SSBU_RB_NET_LATEDRAIN=0` turns it off); the game behind in time runs a little faster too, so both clocks
+meet sooner. The match report in the log says the delay and the rollback sizes (k 1..7).
 
 **Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
 because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**
 brings the sound back (graphics.ini `fight_sound = on`), at the cost of some stutter and, rarely, a crash. It is each
 player's own choice and is used from the next match.
 
-Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
+Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch: raise the delay one step);
 Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between
 real players over the internet. Please report how it feels.
 
