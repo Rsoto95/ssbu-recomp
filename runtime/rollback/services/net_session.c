@@ -1082,8 +1082,9 @@ void rbn_match_reset(void) {
         AcquireSRWLockExclusive(&g_hs_lock); g_local = g_spec_saved_local; InterlockedExchange(&g_spec, 0); ReleaseSRWLockExclusive(&g_hs_lock);
         printf("[rbnet] spectator: the watched match is over\n");
     }
-    {   void nnhid_lwr_styles(int on, int gc0, int gc1);   /* (2026-11-03) the ports in their own controller kinds again NOW: kept until */
-        nnhid_lwr_styles(0, 0, 0); }                        /* the next set-up, the menu bound a player's controller to another slot ("my controller was not taken") */
+    /* (2026-11-03) the controller ports are NOT put back here: the results screen comes after this, and the PC of player 2
+     * played on port 2, which became unconnected: nobody could press A on the results ("no pueden apretar A"). They are put
+     * back at the next set-up, as before 9a7e976 (debug_mode.c). */
     printf("[rbnet] match %d over: the session is ready for the next match (pads of an older match dropped so far: %lld)\n", g_match_n, (long long)g_rx_oldmatch);
     fflush(stdout);
 }
