@@ -593,7 +593,56 @@ def main():
     out = open(a.log, 'wb') if a.log else None
     p = subprocess.run(cmd, cwd=work, env=env, stdout=out, stderr=subprocess.STDOUT if out else None)
     print('game exited with code %d after %.0f s' % (p.returncode, time.time() - t0))
+    if out:
+        out.close()
+    if a.play and os.name == 'nt' and a.log and not os.path.exists(os.path.join(REPO, '.git')):
+        share_log(a.log, gini, a.build)
     return p.returncode
+
+
+def share_log(path, gini, build):
+    """(2026-11-03) The game's log of this session to the group's server (the arena server, our nex_server.py POST /ssbu-logs),
+    so whoever looks after the group can see what went wrong without asking for it. graphics.ini share_logs = off: never.
+    Compressed (a 10 MB log is ~1 MB); 30 s at most; any failure is only a line here."""
+    if ini_get(gini, 'share_logs') in ('off', '0', 'no', 'false'):
+        return
+    import gzip
+    import secrets
+    import urllib.request
+    try:
+        size = os.path.getsize(path)
+        if size < 2000:
+            return
+        with open(path, 'rb') as f:
+            data = f.read()
+        name, version = 'Player', ''
+        m = re.search(rb'^version: (\S+)', data[:400], re.M)
+        if m:
+            version = m.group(1).decode('ascii', 'replace')
+        m = re.search(rb'\[online\] on: .*?, name (.+?), (?:direct|online)', data[:200000])
+        if m:
+            name = m.group(1).decode('utf-8', 'replace')
+        idf = os.path.join(build, 'config', 'share_id.txt')     # (an anonymous id of this copy: two friends of the same name)
+        try:
+            sid = open(idf).read().strip()
+        except OSError:
+            sid = secrets.token_hex(4)
+            try:
+                with open(idf, 'w') as f:
+                    f.write(sid)
+            except OSError:
+                pass
+        server = ini_get(gini, 'online_menu_server') or '160.34.219.118'
+        body = gzip.compress(data, 6)
+        print('Sending this session\'s log (%.1f MB) to the group\'s server so problems can be looked at '
+              '(graphics.ini share_logs = off turns this off)...' % (len(body) / 1e6), flush=True)
+        req = urllib.request.Request('http://%s:443/ssbu-logs' % server, data=body, method='POST', headers={
+            'Content-Type': 'application/gzip', 'X-SSBU-Key': 'ssbu-logs-1', 'X-SSBU-Name': name.encode('ascii', 'replace').decode(),
+            'X-SSBU-Version': version, 'X-SSBU-Id': sid})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print('Log sent.' if r.status == 200 else 'The log was not taken (%d).' % r.status)
+    except Exception as e:                            # (no internet, the server down: nothing else happens)
+        print('The log could not be sent (%s).' % e)
 
 
 if __name__ == '__main__':

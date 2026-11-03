@@ -938,6 +938,9 @@ class Client:
         lines = req.partition(b"\r\n\r\n")[0].decode("latin-1").split("\r\n")
         hdr = {k.strip().lower(): v.strip() for k, _, v in (l.partition(":") for l in lines[1:])}
         self.log("%s %s, Host %s, protocol %s" % (self.who, lines[0], hdr.get("host"), hdr.get("sec-websocket-protocol")))
+        if lines[0].startswith("POST /ssbu-logs "):
+            log_upload(self, hdr, req.partition(b"\r\n\r\n")[2])
+            raise ConnectionError("log upload done")
         if hdr.get("upgrade", "").lower() != "websocket":
             self.s.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
             raise ConnectionError("not a WebSocket upgrade")
@@ -1091,6 +1094,51 @@ class Client:
             self.log("%s gone" % self.who)
 
 
+LOG_DIR = [""]                 # --log-dir: where players' game logs are kept (empty: uploads refused)
+LOG_MAX_BYTES = 40 << 20       # one upload (gzip) at most
+LOG_KEEP_BYTES = 3 << 30       # all kept logs at most: the oldest are deleted
+
+
+def log_upload(client, hdr, body):
+    """(2026-11-03) POST /ssbu-logs: a player's game log after the game closed (scripts/run.py share_log), gzip, with
+    X-SSBU-Name / X-SSBU-Version / X-SSBU-Id. Kept as <dir>/<YYYYMMDD>/<HHMMSS>_<name>_<id>_<version>.log.gz; the
+    oldest files go when all of them pass LOG_KEEP_BYTES."""
+    import re as _re
+    def clean(v, n):
+        return _re.sub(r"[^A-Za-z0-9._-]", "_", v or "")[:n] or "unknown"
+    try:
+        length = int(hdr.get("content-length", "0"))
+    except ValueError:
+        length = 0
+    if not LOG_DIR[0] or hdr.get("x-ssbu-key") != "ssbu-logs-1" or not 0 < length <= LOG_MAX_BYTES:
+        client.s.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        return
+    client.s.settimeout(120)
+    while len(body) < length:
+        k = client.s.recv(min(1 << 20, length - len(body)))
+        if not k:
+            return
+        body += k
+    if body[:2] != b"\x1f\x8b":
+        client.s.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+        return
+    now = time.gmtime()
+    day = os.path.join(LOG_DIR[0], time.strftime("%Y%m%d", now))
+    os.makedirs(day, exist_ok=True)
+    name = "%s_%s_%s_%s.log.gz" % (time.strftime("%H%M%S", now), clean(hdr.get("x-ssbu-name"), 32), clean(hdr.get("x-ssbu-id"), 12),
+                                   clean(hdr.get("x-ssbu-version"), 32))
+    with open(os.path.join(day, name), "wb") as f:
+        f.write(body[:length])
+    client.s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+    client.log("%s log upload: %s (%d bytes, from %s)" % (client.who, name, length, client.who))
+    files = sorted((os.path.join(dp, f) for dp, _, fs in os.walk(LOG_DIR[0]) for f in fs), key=os.path.getmtime)
+    total = sum(os.path.getsize(f) for f in files)
+    while files and total > LOG_KEEP_BYTES:
+        f = files.pop(0)
+        total -= os.path.getsize(f)
+        os.remove(f)
+
+
 NAT_PORTS = (10025, 10125)  # Pia's NAT check servers (nncs1 / nncs2): primary and secondary port (the game sends to 10025)
 NAT_HOSTS = ["127.0.0.1", "127.0.0.2"]   # nncs1, nncs2 (runtime/online_menu.inc resolves them to these); --nat-ip
 
@@ -1175,6 +1223,7 @@ def main():
                     help="the address(es) of the NAT check (nncs1[,nncs2]) as the players reach this PC: one address for a "
                          "server the players reach over a network (Radmin, a VPS: the game is told nncs2 = nncs1); two "
                          "loopback ones for copies on this PC (default)")
+    ap.add_argument("--log-dir", default="", help="keep the game logs players send (POST /ssbu-logs, scripts/run.py) here")
     ap.add_argument("--fake-ip", default="", help="the address games on this PC are told they have (two copies on one PC; "
                     "the same as their SSBU_ONLINE_MENU_FAKEIP, default there 10.200.0.1)")
     a = ap.parse_args()
@@ -1182,6 +1231,7 @@ def main():
     FAKE_IP[0] = a.fake_ip
     NAT_HOSTS[:] = [h.strip() for h in a.nat_ip.split(",") if h.strip()][:2]
     PUBLIC_IP[0] = a.public_ip
+    LOG_DIR[0] = a.log_dir
     if a.public_ip:
         NAT_HOSTS[:] = ["0.0.0.0"]                           # (one server, every interface; the answers name --public-ip)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
