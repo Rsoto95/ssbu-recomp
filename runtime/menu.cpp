@@ -2137,6 +2137,14 @@ static void upd_set_channel(int staging) {               /* written for run.py /
     _putenv_s("SSBU_UPDATE_BRANCH", staging ? "staging" : "main");
     printf("menu: update channel: %s (%s)\n", staging ? "STAGING (test versions)" : "normal (main)", d && *d ? d : "no folder known"); fflush(stdout);
 }
+/* (2026-11-03) a git checkout (the developer's copy): F1 > About switches it between main and staging. SSBU_SWITCH_BRANCH is
+ * inherited by the launcher "Update and restart" starts (run.py dev_update: git checkout, pull, the program it names). */
+static char g_switch_to[16];
+static void upd_git_switch(const char *branch) {
+    snprintf(g_switch_to, sizeof g_switch_to, "%s", branch);
+    _putenv_s("SSBU_SWITCH_BRANCH", branch);
+    printf("menu: switch this git checkout to %s (at Update and restart)\n", branch); fflush(stdout);
+}
 static DWORD WINAPI update_ask_thread(LPVOID unused) {
     (void)unused;
     char got[64] = ""; DWORD n = 0;
@@ -2165,7 +2173,7 @@ static DWORD WINAPI update_ask_thread(LPVOID unused) {
     if (!ok) { printf("menu: check for updates: GitHub could not be asked\n"); fflush(stdout); InterlockedExchange(&g_chk_state, 4); return 0; }
     snprintf(g_chk_latest, sizeof g_chk_latest, "%.7s", got);
     const char *have = getenv("SSBU_UPDATE_HAVE");
-    int newer = (have && *have && _strnicmp(have, got, 7) != 0) || g_chk_exe_old;
+    int newer = (have && *have && _strnicmp(have, got, 7) != 0) || g_chk_exe_old || g_switch_to[0];
     printf("menu: check for updates (branch %s): GitHub has %s, this copy %s; game program published %s, this one %s: %s\n", g_chk_branch, g_chk_latest, have && *have ? have : "(not known)",
            g_chk_rt[0] ? g_chk_rt : "?", g_chk_rt_have, newer ? "a NEWER version" : have && *have ? "the newest" : "?"); fflush(stdout);
     if (newer && getenv("SSBU_UPDATE_FLAG")) { FILE *f = fopen(getenv("SSBU_UPDATE_FLAG"), "w"); if (f) { fputs(g_chk_latest, f); fclose(f); } snprintf(g_upd, sizeof g_upd, "%s", g_chk_latest); }
@@ -2181,17 +2189,31 @@ static void about_update_ui(void) {
     ImGui::Separator();
     LONG st = g_chk_state;
     int staging = !strcmp(upd_branch(), "staging"), git = upd_repo_is_git();
-    if (git) ImGui::TextDisabled("Updates: this copy is a git checkout (branch %s): git decides what it runs.", upd_branch());
+    if (git && !strcmp(upd_branch(), "staging")) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Updates: this git checkout is on STAGING (the test version).");
+    else if (git) ImGui::TextDisabled("Updates: this copy is a git checkout (branch %s).", upd_branch());
     else if (staging) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Updates: STAGING (test versions: they may break; thanks for testing).");
     else ImGui::TextDisabled("Updates: normal (main).");
     if (st == 1) ImGui::BeginDisabled();
     if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) upd_start_check(upd_branch());
+    if (git && !g_switch_to[0] && (staging || !strcmp(upd_branch(), "main"))) {    /* (2026-11-03) feature branches: none */
+        ImGui::SameLine();
+        if (!staging && ImGui::Button("Switch to staging (test version)")) { upd_git_switch("staging"); upd_start_check("staging"); }
+        if (staging && ImGui::Button("Switch to main (normal version)")) { upd_git_switch("main"); upd_start_check("main"); }
+    }
     if (!git) {
         ImGui::SameLine();
         if (!staging && ImGui::Button("Check for staging updates")) { upd_set_channel(1); upd_start_check("staging"); }
         if (staging && ImGui::Button("Back to normal updates")) { upd_set_channel(0); upd_start_check("main"); }
     }
     if (st == 1) ImGui::EndDisabled();
+    if (git) {
+        const char *au = getenv("SSBU_UPDATE_AUTO");
+        bool on = au && !strcmp(au, "on");
+        if (ImGui::Checkbox("Update by itself at every start (main and staging)", &on)) {
+            gfx_ini_set("auto_update", on ? "on" : "ask"); _putenv_s("SSBU_UPDATE_AUTO", on ? "on" : "ask");
+        }
+        if (g_switch_to[0]) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Switching to %s: press \"Update and restart\" below (needs no uncommitted changes).", g_switch_to);
+    }
     if (!git && !staging) ImGui::TextDisabled("Staging = the test versions, before everyone gets them: they may break. Back to normal: the button that appears instead.");
     const char *have = getenv("SSBU_UPDATE_HAVE");
     if (st == 2 && have && *have) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "You have the latest version (%s).", g_chk_latest);
