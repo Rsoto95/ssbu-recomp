@@ -499,6 +499,17 @@ static void rbg_after_begin(void) {
     { int l = rbn_local_player();
       LOG("r1: RB NET: results screen: the other player's card is closed with this PC's A (this PC player %d; at most %d presses, %.0f s)\n", l + 1, RBG_AFTER_PRESSES, RBG_AFTER_MS / 1000.0); }
 }
+/* (2026-11-03, owner's game crashed mid-fight: the game's NetSystem thread read a list with a null link 12 frames after a
+ * load and died copying from address 0x10) The game's network threads (NetSystem, Pia: Battle Arenas keep their session
+ * open under the fight) are in the ring's state, but their sockets and the other side are not: work such a thread did
+ * after a capture is undone by a load to that capture while the packets it took are gone. os_threads.c SleepThread asks
+ * this before such a thread goes on after a sleep: in a rollback fight, only once the frame now on is final (both players'
+ * pads known up to it), so no load can go back before this point. 1 = it may go on. */
+int rbg_net_thread_may_run(void) {
+    if (g_rbg_in_match != 1 || !g_rg_ready || g_ra_off || !rbn_started()) return 1;
+    long long f = g_rgs_next;
+    return f < 1 || rb_input_finalized() >= f;
+}
 static int rbg_after(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {   /* 1 = port id's pad was given */
     if (now_ms() - g_rbg_after_t0 > RBG_AFTER_MS || rbn_started() || (g_rbg_after_n >= RBG_AFTER_PRESSES && !g_rbg_after_hold)) {
         LOG("r1: RB NET: results screen: player 2's A given %d times (port 2 read %d times with A down), done\n", g_rbg_after_n, g_rbg_after_polls);
