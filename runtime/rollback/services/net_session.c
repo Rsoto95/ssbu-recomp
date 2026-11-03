@@ -1113,6 +1113,10 @@ void rbn_report(FILE *o, long long frames) {
     fprintf(o, "[rbnet] report: pad check of the final simulations: %lld pad values differ from the final ones (first frame %lld)\n", g_padcheck_bad, g_padcheck_first);
     fprintf(o, "[rbnet] report: packets sent %lld (failed %lld), received %lld (bad %lld, queue full %lld); remote pads up to %d, local up to %d\n",
             (long long)g_tx_pkts, (long long)g_tx_fail, (long long)g_rx_pkts, (long long)g_rx_bad, (long long)g_rx_drop, rb_input_remote_newest_consecutive_frame(g_remote), rb_input_local_newest_frame());
+    {   void net_rb_path_stats(long long *dtx, long long *drx, long long *ltx, long long *lrx, int *direct_now);
+        long long dtx, drx, ltx, lrx; int dn; net_rb_path_stats(&dtx, &drx, &ltx, &lrx, &dn);
+        fprintf(o, "[rbnet] report: path (whole session): straight to the opponent sent %lld, received %lld; through the lobby sent %lld, received %lld; direct path answering now: %s\n",
+                dtx, drx, ltx, lrx, dn ? "yes" : "NO"); }
     if (g_spec) spec_report(o, frames);                 /* (2026-11-02) */
     else if (g_rbs_fighter) fprintf(o, "[arena] report: this fighter sent the arena's group %lld messages (pads every pass, answers to NACKs), received %lld; its pad history up to frame %lld\n", (long long)g_rbs_tx, (long long)g_rbs_rx, rbs_hist_upto());
     fflush(o);

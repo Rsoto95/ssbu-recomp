@@ -617,7 +617,14 @@ static SRWLOCK g_rbd_lock = SRWLOCK_INIT;
 static struct sockaddr_in g_rbd_at;                     /* (g_rbd_lock) the opponent's address; sin_port 0 = none */
 static uint32_t g_rbd_peer;                             /* (g_rbd_lock) its lobby address (10.13.x.x) */
 static volatile LONG64 g_rbd_last_rx;                   /* when a direct message of it last came */
-static volatile LONG64 g_rbd_tx, g_rbd_rx;
+static volatile LONG64 g_rbd_tx, g_rbd_rx, g_rbl_tx, g_rbl_rx;      /* (2026-11-03) and through the lobby (relayed) */
+/* (2026-11-03) for the match report (net_session.c): how many rollback messages went straight to the opponent and how many
+ * through the lobby, both ways, and whether the direct path answers now (a second Battle Arena fight ran at ~46 ms against
+ * ~10 ms in the first: it looked relayed, and nothing in the log said) */
+void net_rb_path_stats(long long *dtx, long long *drx, long long *ltx, long long *lrx, int *direct_now) {
+    int net_rb_direct(void);
+    *dtx = g_rbd_tx; *drx = g_rbd_rx; *ltx = g_rbl_tx; *lrx = g_rbl_rx; *direct_now = net_rb_direct();
+}
 static volatile LONG g_rbd_said;
 static void rbd_set(uint32_t peer, uint32_t ip, uint16_t port) {   /* (client thread) MATCH_STATE 'A' */
     AcquireSRWLockExclusive(&g_rbd_lock);
@@ -663,7 +670,7 @@ int net_rb_send(const void *p, int n) {
     }
     hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
     memcpy(b + 16, p, (size_t)n);
-    tx(b, 16 + n, &g_lobby);
+    tx(b, 16 + n, &g_lobby); InterlockedIncrement64(&g_rbl_tx);
     return 1;
 }
 
@@ -1441,6 +1448,11 @@ static void mm_state(const uint8_t *p, int n, uint64_t t) {    /* (client thread
     int direct_at = rbk && st == MM_MATCHED && g_mm.peer && n >= 49 + 7 && p[49] == 'A';
     ReleaseSRWLockExclusive(&g_mm_lock);
     if (direct_at) rbd_set(g32(p + 7), g32(p + 50), g16(p + 54));     /* (the opponent's address: the match goes player to player) */
+    if (rbk && st == MM_MATCHED && was != MM_MATCHED) {          /* (2026-11-03) every rollback pairing says whether the lobby gave the address */
+        char a[16];
+        if (direct_at) say("match: the lobby gave the opponent's address %s:%u (direct path %s now)", ip_text(g32(p + 50), a), g16(p + 54), net_rb_direct() ? "answering" : "not answering yet");
+        else say("match: the lobby gave NO address for a direct connection (this match goes through the lobby until the old direct path answers)");
+    }
     if (st >= MM_TIMEOUT) InterlockedExchange(&g_mm_want, 0);
     (void)t;
     if (rbk) {                                          /* (R3 net3) a rollback-match search: rb_net.c's box shows every step; log lines + a mark only */
@@ -2012,7 +2024,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         case T_RB:                                       /* R3: a rollback message of the other player */
             if (n > 8 && g_joined) { uint32_t src = g32(buf + 4), mp = g_rb_match_peer;
                 if (mp && src != mp && !nnldn_other_ip()) { InterlockedIncrement64(&g_rb_rx_other); break; }     /* (R3 net3) not our opponent */
-                if (src && src != g_ip) { g_rb_peer = src; rbn_rx(buf + 8, n - 8); } }
+                if (src && src != g_ip) { g_rb_peer = src; InterlockedIncrement64(&g_rbl_rx); rbn_rx(buf + 8, n - 8); } }
             break;
         }
     }
