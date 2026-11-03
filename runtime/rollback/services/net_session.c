@@ -39,6 +39,13 @@ static int g_on = -1, g_loop, g_loop_lat = 4, g_local, g_delay_cfg = -1, g_ahead
 static unsigned g_bot_seed; static int g_bot;
 static FILE *g_hlog;
 static volatile LONG64 g_cur;                          /* the frame this game is on (read by the receive thread for PONGs) */
+/* (2026-11-03) when g_cur last moved on (now_us): the clock-offset samples count whole frames AND the time into the frame.
+ * Whole frames only, the error stayed fixed while both games ran steady (+2 frames - rtt/2 = +28 ms on one PC, -1 frame -
+ * rtt/2 = -21 ms on the other at a 9 ms ping): both games took turns slowing down for a lead that was not there and both
+ * ran at ~59 fps (16.94 ms a frame), a refresh missed every second or so on a 60 Hz screen: the stutter. A PONG's time_us
+ * (never read by older games) carries the answerer's time into its frame, marked by bit 63. */
+static volatile LONG64 g_cur_t_us;
+#define PONG_PHASE_MARK (1ull << 63)
 static LARGE_INTEGER g_qpf;
 static uint64_t now_us(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); if (!g_qpf.QuadPart) QueryPerformanceFrequency(&g_qpf); return (uint64_t)(t.QuadPart / (double)g_qpf.QuadPart * 1e6); }
 
@@ -731,7 +738,9 @@ void rbn_rx(const uint8_t *p, int n) {
     }
     if (p[0] == RB_MSG_PING) {                          /* answered at once on this thread (the round trip excludes the frame wait) */
         RbMsg m, r; if (!rb_msg_parse(p, (size_t)n, &m)) { InterlockedIncrement64(&g_rx_bad); return; }
-        memset(&r, 0, sizeof r); r.type = RB_MSG_PONG; r.frame = (int32_t)g_cur; r.time_us = now_us(); r.echo_us = m.time_us;
+        memset(&r, 0, sizeof r); r.type = RB_MSG_PONG; r.frame = (int32_t)g_cur; r.echo_us = m.time_us;
+        {   uint64_t t = now_us(), t0 = (uint64_t)g_cur_t_us; uint64_t into = t0 && t >= t0 ? t - t0 : 0;
+            r.time_us = PONG_PHASE_MARK | (into < 1000000 ? into : 999999); }      /* (the time into this game's frame) */
         send_msg(&r); return;
     }
     if (p[0] == RB_MSG_PONG) {                          /* the round trip at once (also before the match: the delay is chosen from it) */
@@ -741,7 +750,15 @@ void rbn_rx(const uint8_t *p, int n) {
         InterlockedExchange(&g_rtt_us, rtt); if (g_rtt_min_us < 0 || rtt < g_rtt_min_us) InterlockedExchange(&g_rtt_min_us, rtt);
         AcquireSRWLockExclusive(&g_rq_lock);
         g_rtt_sum += rtt; g_rtt_n++;
-        if (g_started && m.frame > 0 && g_cur > 0 && g_tsq_n < TSQ) g_tsq[g_tsq_n++] = (int32_t)((g_cur - m.frame) * 16683 - rtt / 2);   /* > 0: this game runs ahead */
+        if (g_started && m.frame > 0 && g_cur > 0 && g_tsq_n < TSQ) {
+            long long off = (g_cur - m.frame) * 16683 - rtt / 2;                  /* > 0: this game runs ahead */
+            uint64_t t0 = (uint64_t)g_cur_t_us, t = now_us();
+            if ((m.time_us & PONG_PHASE_MARK) && t0 && t >= t0) {                /* both games' time into their frames (an older game: whole frames only) */
+                long long mine = (long long)(t - t0), theirs = (long long)(m.time_us & ~PONG_PHASE_MARK);
+                if (mine < 4 * 16683 && theirs < 4 * 16683) off += mine - theirs;
+            }
+            g_tsq[g_tsq_n++] = (int32_t)off;
+        }
         ReleaseSRWLockExclusive(&g_rq_lock);
         return;
     }
@@ -936,6 +953,7 @@ static RbPad loop_remote_pad(long long f) {             /* with SSBU_RB_NET_LOOP
 }
 /* main thread, at the safe point: the messages received since the last call */
 void rbn_drain(long long cur) {
+    if (cur != g_cur) InterlockedExchange64(&g_cur_t_us, (LONG64)now_us());
     InterlockedExchange64(&g_cur, cur);
     if (g_loop && g_started) {                          /* loop test: the bot's pad of frame f arrives at frame f + delay - lat */
         static long long lat2_from = -2; static int lat2;          /* (hs15, test) SSBU_RB_NET_LOOP_LAT2=<frame>,<lat>: the lateness changes at that frame */
@@ -1078,7 +1096,8 @@ double rbn_pace_extra(long long f) {
         if (g_tsbias < 0) { const char *e = getenv("SSBU_RB_NET_TSBIAS"); g_tsbias = e ? atof(e) : 8.0; }
         if (g_peerdelay && g_lockstep) est_ms += g_tsbias; else if (peer_lockstep()) est_ms -= g_tsbias;
         /* ahead: half of the lead given back over the next 30 frames (the other game, behind, does nothing; both halves meet) */
-        if (est_ms > 2.0) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; }
+        /* (2026-11-03) 8 ms, half a frame (clock_sync.c's and Slippi's threshold), not 2: the estimate's own noise is a few ms */
+        if (est_ms >= 8.0) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; }
         else g_ts_left = 0;
     }
     if (g_ts_left > 0) { g_ts_left--; return g_ts_extra; }
