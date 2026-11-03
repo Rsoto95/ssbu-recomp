@@ -300,7 +300,7 @@ class LobbyLadderTest(unittest.TestCase):
         with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.sport, path), timeout=3) as r:
             return r.read().decode()
 
-    def test_bo3_through_the_lobby(self):
+    def test_accounts_through_the_lobby(self):
         a, b = self.fake("Rob", self.inv[0]), self.fake("Fre", self.inv[1])
         self.assertEqual(a.join_ld()[0::6], (L.LD_RANKED, "Roberto"))
         self.assertEqual(b.join_ld()[0::6], (L.LD_RANKED, "FreDy"))
@@ -313,27 +313,18 @@ class LobbyLadderTest(unittest.TestCase):
         stranger = self.fake("Who")
         self.assertEqual(stranger.join_ld(signup=False)[0], L.LD_UNKNOWN)
         self.assertIsNone(self.fake("Old").join_ld(ld=False))       # an older game: no ladder, still joined
+        # (2026-11-03) a casual rollback match is never ranked: ratings change only with a whole set of the ladder queue
+        # (test_ladder_queue.py) or of a rated tournament; every RESULT is still acknowledged (the game stops resending)
         for seed, stocks in ((101, (2, 0)), (102, (0, 1)), (103, (1, 0))):
             a.result(seed, b.ip, 0, stocks)
-            self.assertEqual(a.ack(seed)[0], L.OUT_WAIT)
+            self.assertEqual(a.ack(seed)[0], L.OUT_UNRANKED)
             b.result(seed, a.ip, 1, stocks)
-            self.assertEqual(b.ack(seed)[0], L.OUT_OK)
-            got = a.ack(seed)
-            self.assertEqual(got[0], L.OUT_OK)
-        self.assertGreater(got[1], 1500)
-        self.assertEqual((got[3], got[4], got[5]), (1, 0, 1))
-        a.result(103, b.ip, 0, (1, 0))               # resent after its ACK was lost: the same outcome, counted once
-        self.assertEqual(a.ack(103)[0], L.OUT_OK)
-        a.result(104, b.ip, 0, (2, 0))
-        a.ack(104)
-        b.result(104, a.ip, 1, (2, 0), desyncs=1)
-        self.assertEqual(b.ack(104)[0], L.OUT_DISPUTED)
+            self.assertEqual(b.ack(seed)[0], L.OUT_UNRANKED)
         stranger.result(105, a.ip, 0, (2, 0))
         self.assertEqual(stranger.ack(105)[0], L.OUT_UNRANKED)
         table = json.loads(self.get("/ladder.json"))
-        self.assertEqual([(p["name"], p["wins"], p["losses"]) for p in table], [("Roberto", 1, 0), ("FreDy", 0, 1)])
-        hist = json.loads(self.get("/player/FreDy.json"))
-        self.assertEqual(hist["sets"][-1]["score"], [1, 2])
+        self.assertEqual(sorted((p["name"], p["wins"], p["losses"]) for p in table), [("FreDy", 0, 0), ("Roberto", 0, 0)])
+        self.assertEqual(json.loads(self.get("/player/FreDy.json"))["sets"], [])
         self.assertIn("<title>SSBU ladder</title>", self.get("/ladder"))
         doc = self.get("/ladder.json") + self.get("/player/Roberto.json")
         for leak in ("127.0.0.1", "10.13.", a.pid.hex(), a.key.hex(), b.pid.hex(), self.inv[0]):

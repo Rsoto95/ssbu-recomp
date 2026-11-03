@@ -1522,6 +1522,7 @@ static void tourney_tick(uint64_t t) {                  /* (client thread, joine
     if (g_t.me >= 0 && strcmp(g_t.tstate, "done") && strcmp(g_t.tstate, "cancelled")) in = 1;
     for (int i = 0; i < g_t.n; i++) if (g_t.list[i].signed_up && strcmp(g_t.list[i].state, "done") && strcmp(g_t.list[i].state, "cancelled")) in = 1;
     if (g_t.own_id && strcmp(g_t.own_state, "done")) in = 1;
+    if (g_t.lq_in) in = 1;                              /* (2026-11-03) waiting in the ladder queue: the match is seen at once */
     int off = g_t.known && g_t.off;
     ReleaseSRWLockShared(&g_t_lock);
     if (req) { if (t - g_t_tx >= 400) tourney_send(t); return; }
@@ -1551,6 +1552,7 @@ static void tourney_state(const uint8_t *p, int n) {    /* (client thread) a TOU
     a->ready_me = a->ready_them = 0; a->their_chara = 0; a->their_chara_name[0] = 0; a->go = 0; a->opp[0] = 0;
     a->own_id = a->own_in = 0; a->own_state[0] = a->own_name[0] = 0; a->br = 0; a->round = a->set_bo = 0; a->turn_secs = -1;
     a->next_br = 0; a->next_round = 0; a->next_who[0] = 0; a->feature[0] = 0;
+    a->lq_known = a->lq_in = a->lq_secs = a->lq_waiting = 0; a->own_ladder = 0; a->lr_id = 0; a->lr_opp[0] = 0;
     int focus = 0; char *ctx = NULL;
     for (char *line = strtok_s(text, "\n", &ctx); line; line = strtok_s(NULL, "\n", &ctx)) {
         char *rest = strchr(line, ' '); if (rest) *rest++ = 0; else rest = line + strlen(line);
@@ -1576,6 +1578,13 @@ static void tourney_state(const uint8_t *p, int n) {    /* (client thread) a TOU
         else if (!strcmp(line, "mt")) {                  /* (2026-11-02) the player's own tournament: id, state, checked in, name */
             if (sscanf(rest, "%d %11s %d", &a->own_id, a->own_state, &a->own_in) == 3) t_rest(rest, 3, a->own_name, sizeof a->own_name);
         } else if (!strcmp(line, "feature")) snprintf(a->feature, sizeof a->feature, "%s", rest);
+        else if (!strcmp(line, "lq")) {                  /* (2026-11-03) the ladder queue: in, waited, waiting, rating, wins, losses, place */
+            if (sscanf(rest, "%d %d %d %d %d %d %d", &a->lq_in, &a->lq_secs, &a->lq_waiting, &a->lq_rating, &a->lq_wins, &a->lq_losses, &a->lq_place) == 7) a->lq_known = 1;
+        } else if (!strcmp(line, "lk")) a->own_ladder = 1;
+        else if (!strcmp(line, "lr")) {                  /* the last ladder set: id, won, mine, theirs, rating before, after, opponent */
+            if (sscanf(rest, "%d %d %d %d %d %d", &a->lr_id, &a->lr_won, &a->lr_mine, &a->lr_theirs, &a->lr_before, &a->lr_after) == 6) t_rest(rest, 6, a->lr_opp, sizeof a->lr_opp);
+            else a->lr_id = 0;
+        }
         else if (!strcmp(line, "round")) { char br[4] = ""; if (sscanf(rest, "%3s %d %d", br, &a->round, &a->set_bo) == 3) a->br = br[0]; }
         else if (!strcmp(line, "next")) {
             char br[4] = ""; if (sscanf(rest, "%3s %d", br, &a->next_round) == 2 && br[0] != '-') { a->next_br = br[0]; t_rest(rest, 2, a->next_who, sizeof a->next_who); }
@@ -1599,7 +1608,14 @@ static void tourney_state(const uint8_t *p, int n) {    /* (client thread) a TOU
     if (now.set >= 0 && (old.set != now.set || old.game != now.game)) {
         say("tournament: set %d, game %d against %s", now.set, now.game, now.opp);     /* (2026-11-02) the cards on screen say it (tourney_card.inc) */
     }
-    if (now.set < 0 && now.me >= 0 && strcmp(now.status, old.status)) {
+    if (now.lr_id && now.lr_id != old.lr_id && old.known) {     /* (2026-11-03) a ladder set just ended */
+        snprintf(m, sizeof m, "Ladder set over: you %s %d - %d against %s.\nRating %d -> %d (%+d). F3 > Ladder: search for an opponent again.",
+                 now.lr_won ? "WON" : "lost", now.lr_mine, now.lr_theirs, now.lr_opp, now.lr_before, now.lr_after, now.lr_after - now.lr_before);
+        say("ladder: set over, %s %d-%d vs %s, rating %d -> %d", now.lr_won ? "won" : "lost", now.lr_mine, now.lr_theirs, now.lr_opp, now.lr_before, now.lr_after);
+        menu_popup("Ladder", m);
+    }
+    if (now.own_ladder && !old.own_ladder) say("ladder: matched with %s", now.opp);
+    if (now.set < 0 && now.me >= 0 && strcmp(now.status, old.status) && !old.own_ladder) {
         if (!strcmp(now.status, "wait") && old.set >= 0) { snprintf(m, sizeof m, "Set over (%d - %d). Keep the game open: a card appears when your next set is ready.", old.mine, old.theirs); menu_popup("Tournament", m); }
         else if (!strcmp(now.status, "dq")) menu_popup("Tournament", "You were disqualified by the organizer.");
     }
@@ -1672,6 +1688,7 @@ void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, in
     t_request(0, a, sizeof a);
 }
 void net_tourney_simple(int op, int tid) { uint8_t a[1] = {(uint8_t)op}; t_request(tid, a, 1); }
+void net_ladder_queue(int in) { uint8_t a[1] = {(uint8_t)(in ? 15 : 16)}; say("ladder: %s the queue", in ? "joining" : "leaving"); t_request(0, a, 1); }
 void net_tourney_seed_mode(int tid, int mode) { uint8_t a[2] = {6, (uint8_t)mode}; t_request(tid, a, 2); }
 void net_tourney_move(int tid, int from, int to) { uint8_t a[3] = {7, (uint8_t)from, (uint8_t)to}; t_request(tid, a, 3); }
 void net_tourney_dq(int tid, int entrant) { uint8_t a[2] = {8, (uint8_t)entrant}; t_request(tid, a, 2); }

@@ -126,7 +126,14 @@ AR_OUT, AR_WAITING, AR_TURN, AR_PLAYING = range(4)
 ARENA_TURN_FOR, ARENA_PLAY_FOR, ARENA_WATCH_FOR, ARENA_LIST = 120.0, 900.0, 3.0, 16
 TOURNEY, TOURNEY_STATE, TOURNEY_DOC = 29, 30, 31   # 1.7 tournaments (tournament.py; 26 is the games' own RB_DIRECT, net_relay.c)
 (T_LOOK, T_SIGNUP, T_WITHDRAW, T_CREATE, T_START, T_CANCEL, T_SEEDMODE, T_MOVE, T_DQ, T_RESULT, T_STAGE, T_READY,
- T_UNREADY, T_CHECKIN, T_OPEN_CHECKIN) = range(15)
+ T_UNREADY, T_CHECKIN, T_OPEN_CHECKIN, T_LADDER_JOIN, T_LADDER_LEAVE) = range(17)
+# (2026-11-03) the ladder queue: a player waits for an opponent; two waiting players of the same build are paired (the
+# closest ratings first) into a ladder match, a one-set tournament (tournament.py kind "ladder") played exactly as a
+# tournament set (stage strikes, fighters, the match starting by itself); when the set is over both ratings change.
+LADDER_RULES = {"kind": "ladder", "bo": 3, "bo_top8": 3, "bo_finals": 3, "bans": 2, "stocks": 3, "checkin": False,
+                "noshow": 300, "turn_for": 60, "organizer_name": "Ladder"}
+LADDER_RESULT_FOR = 180.0     # s: the game shows the last ladder set's result (rating before / after) this long
+LADDER_GONE_FOR = float(os.environ.get("SSBU_LADDER_GONE_FOR", "180"))   # s: a ladder player's game gone this long: the other wins the set (both gone: no set, no rating)
 T_PLAYER_OPS = (T_STAGE, T_READY, T_UNREADY)        # (they act on the player's own set, whatever tournament it looks at)
 T_CHUNK, T_LIST, T_REPORT_WAIT, T_ERR_FOR = 1000, 8, 60.0, 8.0
 LD_UNRANKED, LD_RANKED, LD_UNKNOWN = 0, 1, 2
@@ -304,6 +311,141 @@ class TourneyMixin:
     def t_pid(self, c):
         return c.ladder_id.hex() if c.ladder_id is not None else None
 
+    # ---- (2026-11-03) the ladder queue
+    def lq_ladder_match(self, c):
+        """c's ladder match being played (running), or None"""
+        pid = self.t_pid(c)
+        if pid is None:
+            return None
+        return next((t for t in self.t_list(c.part) if t.is_ladder() and t.state == "running" and t.find(pid) >= 0), None)
+
+    def lq_in_tournament(self, c):
+        """c is still in a tournament (signed up, or running and not knocked out): no ladder for it meanwhile"""
+        pid = self.t_pid(c)
+        for t in self.t_list(c.part):
+            e = t.find(pid) if pid else -1
+            if t.is_ladder() or e < 0 or t.state in ("done", "cancelled"):
+                continue
+            if t.state in ("signup", "checkin"):
+                return t
+            if not t.entrants[e]["dq"] and all(x != e for _, x in t.standings()):
+                return t
+        return None
+
+    def lq_join(self, c, now):
+        if self.ladder is None or self.tourneys is None:
+            return "this server has no ladder"
+        if self.lq_ladder_match(c) is not None:
+            return "you are playing a ladder set now"
+        t = self.lq_in_tournament(c)
+        if t is not None:
+            return "you are in the tournament %s: the ladder opens again when you are out of it" % t.name
+        if c not in self.lq:
+            self.lq[c] = now
+            self.say("ladder: %s waits for an opponent (%d in the queue)" % (c.ladder_why, sum(1 for x in self.lq if x.part == c.part)))
+        return None
+
+    def lq_leave(self, c, why):
+        if self.lq.pop(c, None) is not None:
+            self.say("ladder: %s left the queue (%s)" % (c.ladder_why, why))
+
+    def lq_guard(self, now):
+        """running ladder matches whose players' games are gone: one gone LADDER_GONE_FOR s, the other wins the set (it
+        counts); both gone that long, the match is cancelled (no rating)"""
+        if self.tourneys is None:
+            return
+        for t in [x for x in self.tourneys.all.values() if x.is_ladder() and x.state == "running"]:
+            gone = []
+            for e in (0, 1):
+                key = (t.id, e)
+                if self.t_client(t, e) is None:
+                    self.lq_gone.setdefault(key, now)
+                    if now - self.lq_gone[key] >= LADDER_GONE_FOR:
+                        gone.append(e)
+                else:
+                    self.lq_gone.pop(key, None)
+            if not gone:
+                continue
+            if len(gone) == 2:
+                t.cancel()
+                self.say("ladder: match %d cancelled: both games left" % t.id)
+            else:
+                v = t.view[0]
+                t.override(0, 1 - v["p"].index(gone[0]), by="left")
+                self.say("ladder: match %d: %s left, %s wins the set" % (t.id, t.entrants[gone[0]]["name"], t.entrants[1 - gone[0]]["name"]))
+            for e in (0, 1):
+                self.lq_gone.pop((t.id, e), None)
+            self.t_changed(t, now)
+
+    def lq_sweep(self, now):
+        """pair the waiting players of each build: the one waiting longest with the closest rating among the others"""
+        self.lq_guard(now)
+        if not self.lq:
+            return
+        alive = set(self.by_at.values())
+        for c in list(self.lq):
+            if c not in alive or c.ladder_id is None:
+                self.lq_leave(c, "left the lobby")
+            elif self.t_active(c) is not None:
+                self.lq_leave(c, "a tournament set is ready")
+        parts = {}
+        for c, since in sorted(self.lq.items(), key=lambda kv: kv[1]):
+            parts.setdefault(c.part, []).append(c)
+        for part, waiting in parts.items():
+            while len(waiting) >= 2:
+                a = waiting.pop(0)
+                ra = (self.ladder.player(a.ladder_id) or (None, 1500.0))[1]
+                b = min(waiting, key=lambda x: abs((self.ladder.player(x.ladder_id) or (None, 1500.0))[1] - ra))
+                waiting.remove(b)
+                self.lq_match(a, b, now)
+
+    def lq_match(self, a, b, now):
+        self.lq.pop(a, None)
+        self.lq.pop(b, None)
+        rules = dict(LADDER_RULES, part=[a.part[0].decode("ascii", "replace"), a.part[1]])
+        t = self.tourneys.create("Ladder: %s vs %s" % (a.ladder_why, b.ladder_why), "", rules)
+        for x in (a, b):
+            row = self.ladder.player(x.ladder_id)
+            t.sign_up(x.ladder_id.hex(), x.ladder_why, row[1] if row else None)
+        t.start()
+        self.say("ladder: match %d: %s vs %s" % (t.id, a.ladder_why, b.ladder_why))
+        self.t_changed(t, now)
+
+    def t_rate(self, t):
+        """(2026-11-03) the ratings of finished sets: a ladder match's set, and every set of a rated tournament won by
+        playing it (not a bye, a forfeit or the organizer's result). Each set once (rules["rated_sets"])."""
+        if self.ladder is None or not t.sets or not (t.is_ladder() or t.rules.get("rated")):
+            return
+        done = t.rules.setdefault("rated_sets", [])
+        for i, v in enumerate(t.view):
+            r = t.results.get(str(i)) or {}
+            ok = v["state"] == "done" and (r.get("by") == "games" or (t.is_ladder() and r.get("by") in ("noshow", "left")))
+            if not ok or i in done or None in v["p"] or tournament_mod.BYE in v["p"]:
+                continue
+            done.append(i)
+            ea, eb = v["p"]
+            pa, pb = t.entrants[ea]["pid"], t.entrants[eb]["pid"]
+            sc = t.score(i)
+            games = []
+            for g in r.get("games", []):
+                ch = list(g.get("chara") or [None, None]) + [None, None]
+                games.append((g.get("winner"), ch[0] if isinstance(ch[0], int) else None, ch[1] if isinstance(ch[1], int) else None))
+            try:
+                out = self.ladder.record_set(bytes.fromhex(pa), bytes.fromhex(pb), 1 if v["winner"] == ea else 2, sc[0], sc[1],
+                                             t.id if t.is_ladder() else None, games)
+            except ValueError:
+                out = None
+            if out is None:
+                continue
+            names = [t.entrants[ea]["name"], t.entrants[eb]["name"]]
+            self.say("ladder: %s %d - %d %s: ratings %d -> %d, %d -> %d" % (names[0], sc[0], sc[1], names[1],
+                                                                         out[0][0], out[0][1], out[1][0], out[1][1]))
+            if t.is_ladder():
+                for k, (pid, e) in enumerate(((pa, ea), (pb, eb))):
+                    self.lq_last[pid] = {"tid": t.id, "won": v["winner"] == e, "mine": sc[k], "theirs": sc[1 - k],
+                                         "before": out[k][0], "after": out[k][1], "opp": names[1 - k], "at": time.monotonic()}
+            t.changed()
+
     def t_list(self, part):
         if self.tourneys is None:
             return []
@@ -380,6 +522,11 @@ class TourneyMixin:
         pid = self.t_pid(c)
         if pid is None:
             return "you need an account on this lobby first (F1 > Online > Your account)"
+        if op == T_LADDER_JOIN:                       # (2026-11-03) the ladder queue
+            return self.lq_join(c, now)
+        if op == T_LADDER_LEAVE:
+            self.lq_leave(c, "left by the player")
+            return None
         if op == T_CREATE:
             if self.tourney_admins is not None and c.ladder_why.lower() not in self.tourney_admins:
                 return "only the lobby's organizers can make tournaments here"
@@ -456,6 +603,7 @@ class TourneyMixin:
 
     def t_changed(self, t, now):
         """save t, and send the new state to its players (and to whoever looks at it)"""
+        self.t_rate(t)
         self.tourneys.save(t)
         for x in list(self.by_at.values()):
             if x.t_focus == t.id or (x.ladder_id is not None and t.find(x.ladder_id.hex()) >= 0):
@@ -490,7 +638,7 @@ class TourneyMixin:
             out.append("off")
         if c.t_err and time.monotonic() - c.t_err_at < T_ERR_FOR:     # (an error is shown a few seconds, then it is gone)
             out.append("err %s" % c.t_err)
-        ts = self.t_list(c.part)
+        ts = [t for t in self.t_list(c.part) if not t.is_ladder()]
         mine = [t for t in ts if pid and t.find(pid) >= 0]
         focus = self.tourneys.get(c.t_focus) if self.tourneys is not None and c.t_focus else None
         if focus not in ts:
@@ -503,8 +651,21 @@ class TourneyMixin:
             out.append("f %d %d %d" % (focus.id, focus.version, (len(self.t_doc(focus)) + T_CHUNK - 1) // T_CHUNK))
         # (2026-11-02) the player's own tournament (its set, check-in, place), whatever tournament the list shows:
         # "mt <id> <state> <checked in 0/1> <name>" then the "me" lines of it
-        own = next((t for t in mine if t.state == "running"), None) or next((t for t in mine if t.state == "checkin"), None) \
+        own = self.lq_ladder_match(c) or next((t for t in mine if t.state == "running"), None) or next((t for t in mine if t.state == "checkin"), None) \
             or next((t for t in reversed(mine) if t.state == "done"), None) or next((t for t in mine if t.state == "signup"), None)
+        # (2026-11-03) the ladder: "lq <in the queue 0/1> <seconds waited> <players waiting> <rating> <wins> <losses> <place>",
+        # "lk" (the own tournament is a ladder match), "lr <match id> <won 0/1> <mine> <theirs> <rating before> <after> <opponent>"
+        if self.ladder is not None and pid:
+            row = self.ladder.player(c.ladder_id)
+            out.append("lq %d %d %d %d %d %d %d" % (1 if c in self.lq else 0, int(time.monotonic() - self.lq[c]) if c in self.lq else 0,
+                                                   sum(1 for x in self.lq if x.part == c.part), round(row[1]) if row else 0,
+                                                   row[4] if row else 0, row[5] if row else 0, self.ladder.rank(c.ladder_id) if row else 0))
+            last = self.lq_last.get(pid)
+            if last is not None and time.monotonic() - last["at"] < LADDER_RESULT_FOR:
+                out.append("lr %d %d %d %d %d %d %s" % (last["tid"], 1 if last["won"] else 0, last["mine"], last["theirs"],
+                                                        round(last["before"]), round(last["after"]), last["opp"]))
+        if own is not None and own.is_ladder():
+            out.append("lk")
         if own is not None:
             e = own.find(pid)
             out.append("mt %d %s %d %s" % (own.id, own.state, 1 if own.entrants[e].get("in") else 0, own.name))
@@ -800,11 +961,6 @@ class TourneyMixin:
         self.t_changed(t, now)
         return {"ok": True}
 
-    def t_unrated(self, c):
-        """c plays a set of a tournament whose games do not count for the ladder"""
-        a = self.t_active(c)
-        return a is not None and not a[0].rules.get("rated")
-
 
 class Lobby(TourneyMixin):
     def __init__(self, sock, verbose, search_for=SEARCH_FOR, match_for=MATCH_FOR, ladder=None, arena_streak=3, tourney_admins=None):
@@ -814,6 +970,9 @@ class Lobby(TourneyMixin):
         self.tourney_admins = {x.lower() for x in tourney_admins} if tourney_admins else None   # (None: any account may organize)
         self.t_reports = {}       # match seed -> {"at", "tid", "sid", "by": {side: report}}
         self.t_counted = set()    # match seeds already counted (both games send their RESULT)
+        self.lq = {}              # (2026-11-03) the ladder queue: client -> when it began waiting (monotonic)
+        self.lq_last = {}         # account id hex -> its last ladder set's result (the game shows it a few minutes)
+        self.lq_gone = {}         # (ladder match id, entrant) -> since when its game is gone (lq_guard)
         self.web_q = queue.Queue()   # (2026-11-02) the web page's organizer actions, done on the lobby's own thread
         self.web_tokens = {}      # token -> (account id hex, name, until): an organizer logged in on the web page
         self.arenas = {}          # 1.6: part (build, code) -> Arena
@@ -821,7 +980,6 @@ class Lobby(TourneyMixin):
         self.search_for, self.match_for = search_for, match_for
         self.by_at, self.by_ip, self.rooms = {}, {}, {}
         self.next_ip = SUBNET + 2
-        self.ladder_said = {}     # match seed -> outcome already logged
         self.stats = {"relayed game datagrams": 0, "ldn messages": 0, "dropped": 0}
 
     def say(self, *what):
@@ -875,13 +1033,12 @@ class Lobby(TourneyMixin):
 
     def drop(self, c, why):
         self.arena_leave(c, why)
+        self.lq_leave(c, why)
         if c.match is not None:
             other = c.match.other(c)
             c.match = None
             self.match_end(other, MS_PEER_LEFT, "%s left the lobby" % c.name)
         c.search_since = None
-        if self.ladder is not None and c.ladder_id is not None and self.ladder.void_sets(c.ladder_id):
-            self.say("ladder: the open set of %s is void (%s)" % (c.ladder_why, why))
         if c.room is not None:
             self.close_room(c.room, "host left")
         if c.claim:
@@ -965,8 +1122,6 @@ class Lobby(TourneyMixin):
                     h, g = m.host, m.guest
                     self.arena_playing(h, g, now)
                     self.t_playing(h, g, now)
-                    if not self.t_unrated(h):
-                        self.ladder_open_set(h, g)
                     self.match_end(h, MS_TOGETHER, "playing a rollback match with %s" % g.name)
                     self.match_end(g, MS_TOGETHER, "playing a rollback match with %s" % h.name)
         elif kind == RB_GROUP and 20 <= len(p) <= 1500 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
@@ -982,13 +1137,11 @@ class Lobby(TourneyMixin):
                     if x is not c and x.part == c.part and x.rb_group == key:
                         self.send(out, x.at)
         elif kind == RESULT and len(p) >= RESULT_LEN and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
-            unrated = self.t_unrated(c)             # (before t_result: it may end the set)
+            # (2026-11-03) ratings change only with a whole set of the ladder queue (or of a rated tournament: t_rate);
+            # a casual rollback match (Smash, a Battle Arena) is never ranked. The ack ends the game's resending.
             self.arena_result(c, p, now)
             self.t_result(c, p, now)
-            if unrated:
-                self.ladder_ack(c, struct.unpack_from(">Q", p, 12)[0], OUT_UNRANKED)
-            else:
-                self.on_result(c, p)
+            self.ladder_ack(c, struct.unpack_from(">Q", p, 12)[0], OUT_UNRANKED)
         elif kind == TOURNEY and len(p) >= 23 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.on_tourney(c, p, now)
         elif kind == ARENA and len(p) >= 13 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
@@ -1080,43 +1233,6 @@ class Lobby(TourneyMixin):
             if st is not None:
                 mine, theirs = (st[3], st[4]) if st[1] == c.ladder_id else (st[4], st[3])
         self.send(hdr(RESULT_ACK) + struct.pack(">QB", seed, outcome) + self.ladder_numbers(c) + bytes((mine, theirs)), c.at)
-
-    def ladder_open_set(self, a, b):
-        """a (player 1) and b play a rollback match: their set, if both are ranked"""
-        if self.ladder is not None and a.ladder_id is not None and b.ladder_id is not None and a.ladder_id != b.ladder_id:
-            if self.ladder.open_set_of(a.ladder_id, b.ladder_id) is None:
-                self.ladder.open_set(a.ladder_id, b.ladder_id)
-                self.say("ladder: set opened: %s vs %s" % (a.ladder_why, b.ladder_why))
-
-    def on_result(self, c, p):
-        """RESULT: cookie u64, match seed u64, the other player's address u32, slot u8 (0: player 1), rule kind u8, stocks of
-        the rule u8, flags u8 (1 abandoned, 2 disconnected), stage u32, chara u64 x 2, stocks left u8 x 2, damage (tenths of
-        a percent) u16 x 2, frames u32, desyncs u32"""
-        seed, peer, slot, rule_kind, stock, flags, stage = struct.unpack_from(">QIBBBBI", p, 12)
-        c0, c1, s0, s1, d0, d1, frames, desyncs = struct.unpack_from(">QQBBHHII", p, 32)
-        opp = self.by_ip.get(peer)
-        if (self.ladder is None or c.ladder_id is None or opp is None or opp is c or opp.ladder_id is None
-                or opp.ladder_id == c.ladder_id or opp.part[1] != c.part[1] or slot > 1):
-            self.log("ladder: the result of %s is not ranked" % c.name)
-            return self.ladder_ack(c, seed, OUT_UNRANKED)
-        a, b = (c, opp) if slot == 0 else (opp, c)
-        self.ladder_open_set(a, b)
-        r = {"seed": seed, "slot": slot, "stage": stage, "chara": (c0, c1), "stocks": (s0, s1), "dmg": (d0, d1), "frames": frames,
-             "rule_kind": rule_kind, "stock": stock, "desyncs": desyncs, "flags": flags}
-        out = self.ladder.report(c.ladder_id, opp.ladder_id, r)
-        if out is None:
-            return self.ladder_ack(c, seed, OUT_WAIT, opp)
-        code = OUT_OK if out == "ok" else OUT_DRAW if out == "draw" else OUT_DISPUTED
-        if seed not in self.ladder_said:
-            self.ladder_said[seed] = out
-            self.say("ladder: game %016x, %s vs %s: %s" % (seed, a.ladder_why, b.ladder_why, out))
-        for x, o in ((c, opp), (opp, c)):
-            self.ladder_ack(x, seed, code, o)
-
-    def ladder_sweep(self):
-        if self.ladder is not None:
-            for out in self.ladder.sweep():
-                self.say("ladder: a game without its second report: %s" % out)
 
     def on_list(self, c, seq, now, other=False):
         """The game's Rooms List. other (flag 1, a newer game): the rooms of every build of this code, each LISTING ending
@@ -1367,8 +1483,8 @@ class Lobby(TourneyMixin):
         for r in list(self.rooms.values()):
             if now - r.updated > ROOM_TIMEOUT:
                 self.close_room(r, "no advertisement for %d s" % ROOM_TIMEOUT)
-        self.ladder_sweep()
         self.t_sweep(now)
+        self.lq_sweep(now)
         for a in list(self.arenas.values()):
             if a.pair and not a.playing and now - a.at > ARENA_TURN_FOR:
                 # (a turn not started in time: whoever did not even search is away and leaves the arena; the other keeps its place)
@@ -1515,38 +1631,77 @@ def status_json(lobby, started, now):
 
 
 LADDER_PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SSBU ladder</title>
 <style>
-:root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --line: #ddddd6; --accent: #c2410c; --win: #15803d; --loss: #b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a93; --line: #2e2e2b; --accent: #fb923c; --win: #4ade80; --loss: #f87171; } }
+:root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --line: #ddddd6; --card: #ffffff; --accent: #c2410c; --win: #15803d; --loss: #b91c1c; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a93; --line: #2e2e2b; --card: #1f1f1d; --accent: #fb923c; --win: #4ade80; --loss: #f87171; } }
+* { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
-main { max-width: 760px; margin: 0 auto; padding: 24px 16px; }
-h1 { font-size: 22px; margin: 0 0 4px; } p.sub { color: var(--muted); margin: 0 0 20px; }
-table { width: 100%; border-collapse: collapse; } th, td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; }
-th { color: var(--muted); font-weight: 600; font-size: 13px; } td.n { text-align: right; font-variant-numeric: tabular-nums; }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
+h1 { font-size: 22px; margin: 0 0 4px; } h2 { font-size: 17px; margin: 26px 0 8px; } p.sub { color: var(--muted); margin: 0 0 18px; }
+a { color: var(--accent); }
+.wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; } th, td { padding: 7px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; } td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 tr.p { cursor: pointer; } tr.p:hover td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .rd { color: var(--muted); font-size: 12px; } .w { color: var(--win); } .l { color: var(--loss); }
-#hist { margin-top: 28px; } #hist h2 { font-size: 17px; margin: 0 0 8px; }
+.fi { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; color: #fff;
+      font-size: 9px; font-weight: 700; vertical-align: middle; }
+img.fi { background: transparent; border-radius: 0; object-fit: contain; }
+.fis { display: inline-flex; gap: 3px; margin-left: 7px; vertical-align: middle; }
+.how { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 0 0 8px; }
+.how ol { margin: 6px 0; padding-left: 20px; }
 </style></head><body><main>
-<h1>Ladder</h1><p class="sub">Glicko-2, Bo3 sets, 3 stocks. Ordered by rating minus twice the deviation.</p>
-<table><thead><tr><th>#</th><th>Player</th><th class="n">Rating</th><th class="n">Sets W-L</th></tr></thead><tbody id="t"></tbody></table>
+<h1>Ladder</h1><p class="sub">Rating Glicko-2. Cada set (mejor de 3, 3 stocks) suma puntos al ganador y le quita al perdedor.
+Ordenado por rating menos dos veces la desviación (quien jugó poco sube despacio).</p>
+<div class="how"><b>Cómo jugar</b><ol>
+<li>En el juego presiona <b>F3</b> (o mantén <b>&minus;</b> un segundo) y elige <b>Ladder: buscar rival</b>.</li>
+<li>Cuando alguien más busca, el servidor los junta (el rating más parecido primero). La pantalla se abre sola.</li>
+<li>Tachen escenarios, vayan a <b>Smash</b>, elijan personaje y presionen <b>start</b>: la pelea empieza sola.</li>
+<li>Al terminar el set cambia el rating de los dos.</li></ol></div>
+<h2>Tabla</h2>
+<div class="wrap"><table><thead><tr><th>#</th><th>Jugador</th><th class="n">Rating</th><th class="n">Sets G-P</th></tr></thead><tbody id="t"></tbody></table></div>
 <section id="hist"></section>
+<h2>Últimos sets</h2>
+<div class="wrap"><table><thead><tr><th>Set</th><th class="n">Marcador</th><th class="n">Rating</th></tr></thead><tbody id="ms"></tbody></table></div>
 </main><script>
-const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let ICONS = new Set();
+function fi(c) {                                     // c: {key, name}
+  if (!c || !c.name) return "";
+  if (c.key && ICONS.has(c.key)) return "<img class=fi src='icons/" + c.key + ".png' alt='" + esc(c.name) + "' title='" + esc(c.name) + "'>";
+  const w = c.name.replace(/[^A-Za-z0-9 ]/g, " ").trim().split(/\\s+/).filter(Boolean);
+  const ini = w.length > 1 ? w[0][0] + w[1][0] : (w[0] || "?").slice(0, 2);
+  let h = 0; for (const ch of c.name) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return "<span class=fi style='background:hsl(" + h + " 55% 42%)' title='" + esc(c.name) + "'>" + esc(ini) + "</span>";
+}
+const when = t => t ? new Date(t * 1000).toLocaleString("es", {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}) : "";
+const delta = r => { const d = r[1] - r[0]; return "<span class=" + (d >= 0 ? "w" : "l") + ">" + (d >= 0 ? "+" : "") + d + "</span>"; };
 async function show(name) {
   const r = await fetch("player/" + encodeURIComponent(name) + ".json"); if (!r.ok) return;
   const h = await r.json(), el = document.getElementById("hist");
-  el.innerHTML = "<h2>" + esc(h.name) + "</h2><table><thead><tr><th>Opponent</th><th>Result</th><th class=n>Score</th><th class=n>Rating</th></tr></thead><tbody>" +
-    h.sets.map(s => "<tr><td>" + esc(s.opponent) + "</td><td class=" + (s.won === true ? "w" : s.won === false ? "l" : "") + ">" +
-      (s.state === "done" ? (s.won ? "won" : "lost") : s.state) + "</td><td class=n>" + s.score.join("-") + "</td><td class=n>" +
-      (s.rating ? s.rating[0] + " &rarr; " + s.rating[1] : "") + "</td></tr>").join("") + "</tbody></table>";
+  el.innerHTML = "<h2>" + esc(h.name) + "</h2><div class=wrap><table><thead><tr><th>Rival</th><th>Resultado</th><th class=n>Marcador</th><th class=n>Rating</th></tr></thead><tbody>" +
+    (h.sets.map(s => "<tr><td>" + (s.tid ? "<a href='tournament/" + s.tid + "'>" + esc(s.opponent) + "</a>" : esc(s.opponent)) + "</td><td class=" +
+      (s.won === true ? "w" : s.won === false ? "l" : "") + ">" + (s.state === "done" ? (s.won ? "ganó" : "perdió") : esc(s.state)) + "</td><td class=n>" +
+      s.score.join(" - ") + "</td><td class=n>" + (s.rating ? s.rating[0] + " &rarr; " + s.rating[1] + " (" + delta(s.rating) + ")" : "") + "</td></tr>").join("") ||
+     "<tr><td colspan=4 class=rd>Todavía no jugó sets de ladder.</td></tr>") + "</tbody></table></div>";
+  el.scrollIntoView({behavior: "smooth"});
 }
-fetch("ladder.json").then(r => r.json()).then(rows => {
-  document.getElementById("t").innerHTML = rows.map((p, i) => "<tr class=p data-n=\"" + esc(p.name) + "\"><td>" + (i + 1) + "</td><td>" + esc(p.name) +
-    "</td><td class=n>" + p.rating + " <span class=rd>&plusmn;" + p.rd + "</span></td><td class=n>" + p.wins + "-" + p.losses + "</td></tr>").join("");
+(async () => {
+  try { ICONS = new Set(await (await fetch("icons.json")).json()); } catch (e) {}
+  const rows = await (await fetch("ladder.json")).json();
+  document.getElementById("t").innerHTML = rows.map((p, i) => "<tr class=p data-n=\\"" + esc(p.name) + "\\"><td>" + (i + 1) + "</td><td>" + esc(p.name) +
+    "<span class=fis>" + (p.fighters || []).map(fi).join("") + "</span></td><td class=n>" + p.rating + " <span class=rd>&plusmn;" + p.rd + "</span></td><td class=n>" +
+    p.wins + " - " + p.losses + "</td></tr>").join("") || "<tr><td colspan=4 class=rd>Nadie todavía.</td></tr>";
   document.querySelectorAll("tr.p").forEach(tr => tr.onclick = () => show(tr.dataset.n));
-});
+  const ms = await (await fetch("ladder_matches.json")).json();
+  document.getElementById("ms").innerHTML = ms.map(m => {
+    const w = m.winner === 1 ? 0 : 1;
+    return "<tr><td><a href='tournament/" + m.tid + "'><span class=" + (w === 0 ? "w" : "") + ">" + esc(m.players[0]) + "</span> vs <span class=" + (w === 1 ? "w" : "") + ">" +
+      esc(m.players[1]) + "</span></a> <span class=rd>" + when(m.closed) + "</span></td><td class=n>" + m.score.join(" - ") + "</td><td class=n>" +
+      (m.rating ? delta(m.rating[0]) + " / " + delta(m.rating[1]) : "") + "</td></tr>";
+  }).join("") || "<tr><td colspan=3 class=rd>Todavía no hay sets.</td></tr>";
+})();
 </script></body></html>
 """
 
@@ -1556,7 +1711,7 @@ def tourney_list_json(path):
     db = sqlite3.connect(path)
     try:
         return [{"id": tid, "name": name, "state": state} for tid, name, state in
-                db.execute("SELECT id, name, state FROM tournaments ORDER BY id DESC LIMIT 30")]
+                db.execute("SELECT id, name, state FROM tournaments WHERE data NOT LIKE '%\"kind\": \"ladder\"%' ORDER BY id DESC LIMIT 30")]
     except sqlite3.Error:
         return []
     finally:
@@ -1609,7 +1764,7 @@ def tourney_json(path, tid):
                                 "chars": [tournament_mod.chara_name(x) if isinstance(x, int) else "" for x in game_charas(g)],
                                 "keys": [tournament_mod.chara_key(x) if isinstance(x, int) else "" for x in game_charas(g)]}
                                for g in r.get("games", [])]})
-    return {"id": t.id, "name": t.name, "state": t.state, "organizer": t.rules.get("organizer_name", ""),
+    return {"id": t.id, "name": t.name, "state": t.state, "organizer": t.rules.get("organizer_name", ""), "kind": t.rules.get("kind", ""),
             "seed_mode": t.seed_mode,
             "rules": {k: t.rules.get(k) for k in ("bo", "bo_top8", "bo_finals", "bans", "stocks", "checkin", "rated", "noshow", "turn_for")},
             "stages": {"starters": [tournament_mod.STAGE_NAMES.get(x, x) for x in t.rules["starters"]],
@@ -1875,6 +2030,7 @@ function players(t, org) {
 }
 // (2026-11-03) the rounds' usual names: the last three of each bracket are its Final, Semifinal and Quarterfinal
 function roundTitle(t, br, r) {
+  if (t.kind === "ladder") return "Set de ladder";
   if (br === "G") return r === 1 ? "Grand Final" : "Grand Final Reset";
   const last = Math.max(...t.sets.filter(x => x.bracket === br).map(x => x.round)), side = br === "W" ? "Winners " : "Losers ";
   return side + (r === last ? "Final" : r === last - 1 ? "Semifinal" : r === last - 2 ? "Quarterfinal" : "Round " + r);
@@ -1936,6 +2092,15 @@ async function load() {
   t.sets.forEach(s => (s.games || []).forEach(g => [0, 1].forEach(i => { if (g.chars && g.chars[i] && g.keys && g.keys[i]) NKEY[g.chars[i]] = g.keys[i]; })));
   const org = !!(me && me.name.toLowerCase() === String(t.organizer).toLowerCase());
   const mn = mains(t);
+  if (t.kind === "ladder") {                         // (2026-11-03) a ladder match: no organizer, no bracket
+    m.innerHTML = "<p><a href='../ladder'>&larr; Ladder</a></p><h1>" + esc(t.name) + "</h1><p class=sub>" + esc(ST[t.state] || t.state) +
+      " &middot; ladder &middot; mejor de " + t.rules.bo + " &middot; " + t.rules.stocks + " stocks &middot; " + t.rules.bans + " bans</p>" +
+      (t.standings.length ? "<h2>Resultado</h2><ol>" + t.standings.map(s => "<li value=" + s.place + ">" + esc(s.name) + "<span class=fis>" + (mn[s.name] || []).map(fi).join("") + "</span></li>").join("") + "</ol>" : "") +
+      bracket(t, "W", "Set", false);
+    wire(t);
+    if (t.state === "running") timer = setTimeout(autoLoad, 5000);
+    return;
+  }
   m.innerHTML = "<p><a href='../tournaments'>&larr; Torneos</a></p><h1>" + esc(t.name) + "</h1><p class=sub>" + esc(ST[t.state] || t.state) + " &middot; organiza " + esc(t.organizer) +
     " &middot; mejor de " + t.rules.bo + " (top 8: " + t.rules.bo_top8 + ", finales: " + t.rules.bo_finals + ") &middot; " + t.rules.stocks + " stocks &middot; " + t.rules.bans + " bans &middot; " +
     (t.rules.noshow ? "no se presentó: " + Math.round(t.rules.noshow / 60) + " min" : "no se presentó: lo decide el organizador") + "</p>" +
@@ -1987,7 +2152,13 @@ def start_status_server(lobby, bind, port, started):
             if ld is not None and path == "/ladder":
                 return 200, LADDER_PAGE.encode(), "text/html; charset=utf-8"
             if ld is not None and path == "/ladder.json":
-                return 200, json.dumps(ld.table()).encode(), "application/json"
+                rows = ld.table()
+                for row in rows:                    # (2026-11-03) the fighters each player used most, for the icons
+                    row["fighters"] = [{"key": tournament_mod.chara_key(x), "name": tournament_mod.chara_name(x)}
+                                       for x in row.pop("mains", []) if isinstance(x, int) and tournament_mod is not None]
+                return 200, json.dumps(rows).encode(), "application/json"
+            if ld is not None and path == "/ladder_matches.json":
+                return 200, json.dumps(ld.matches()).encode(), "application/json"
             if lobby.tourneys is not None and path == "/tournaments":
                 return 200, TOURNEY_PAGE.encode(), "text/html; charset=utf-8"
             if lobby.tourneys is not None and path == "/icons.json":

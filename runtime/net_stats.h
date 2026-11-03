@@ -147,12 +147,19 @@ typedef struct {
     char br; int round, set_bo, turn_secs;         /* its set: W / L / G, round, best of; seconds left of a stage step (-1 none) */
     char next_br; int next_round; char next_who[80];   /* without a set: the next one (next_br 0: none known) */
     char feature[12];                              /* the set is on stream: played in the Battle Arena with this code ("" no) */
+    /* (2026-11-03) the ladder queue (lobby: "lq", "lk", "lr"): wait for an opponent, the set is played as a tournament set */
+    int lq_known;                                  /* the lobby has the ladder queue (an older lobby: 0) */
+    int lq_in, lq_secs, lq_waiting;                /* this player waits in the queue, for how long (s), players waiting (with it) */
+    int lq_rating, lq_wins, lq_losses, lq_place;   /* its standing (place 0: none yet) */
+    int own_ladder;                                /* the own "tournament" is a ladder match (its one set) */
+    int lr_id, lr_won, lr_mine, lr_theirs, lr_before, lr_after; char lr_opp[33];   /* the last ladder set (lr_id 0: none lately) */
 } NetTourney;
 void net_tourney_get(NetTourney *out);           /* never blocks; while F1 > Tournament asks, the lobby is asked every second */
 void net_tourney_peek(NetTourney *out);          /* the same, without asking the lobby more often (the cards on screen, every frame) */
 void net_tourney_look(int tid);
 void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks, int noshow_min);   /* noshow_min: 0 = never */
 void net_tourney_simple(int op, int tid);        /* 1 sign up, 2 withdraw, 4 start, 5 cancel, 13 check in, 14 open the check-in */
+void net_ladder_queue(int in);                   /* (2026-11-03) 1: into the ladder queue (wait for an opponent), 0: out of it */
 void net_tourney_seed_mode(int tid, int mode);   /* 0 rating, 1 random, 2 manual */
 void net_tourney_move(int tid, int from, int to);
 void net_tourney_dq(int tid, int entrant);

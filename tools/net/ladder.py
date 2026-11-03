@@ -133,6 +133,8 @@ class Ladder:
         self.db.executescript(SCHEMA)
         if "banned" not in [r[1] for r in self.db.execute("PRAGMA table_info(players)")]:       # (a database of lobby 1.5 / 1.6)
             self.db.execute("ALTER TABLE players ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
+        if "tid" not in [r[1] for r in self.db.execute("PRAGMA table_info(sets)")]:            # (2026-11-03) the set's match page
+            self.db.execute("ALTER TABLE sets ADD COLUMN tid INTEGER")
         self.db.execute("UPDATE sets SET state = 'void', closed = ? WHERE state = 'open'", (self.now(),))   # (a restarted lobby: those sets' games are lost)
         if self.db.execute("SELECT COUNT(*) FROM seasons WHERE ended IS NULL").fetchone()[0] == 0:
             self.db.execute("INSERT INTO seasons (name, started) VALUES (?, ?)", ("Season 1", self.now()))
@@ -346,6 +348,39 @@ class Ladder:
         self.db.execute("UPDATE sets SET state = 'done', closed = ?, winner = ?, r1_before = ?, r1_after = ?, r2_before = ?, r2_after = ?"
                         " WHERE id = ?", (self.now(), winner, a[1], na[0], b[1], nb[0], set_id))
 
+    # ---- (2026-11-03) a whole set at once: the ladder queue's matches and rated tournament sets (tournament.py)
+    def record_set(self, p1, p2, winner, w1, w2, tid=None, games=()):
+        """p1 / p2 (ladder ids) played a set that winner (1 / 2) won w1 - w2; games: [(winner slot 0 / 1, chara1, chara2)].
+        Both ratings change (one Glicko-2 period). Returns ((p1 rating before, after), (p2 rating before, after)), or
+        None when one of the two has no account."""
+        a, b = self.player(p1), self.player(p2)
+        if a is None or b is None or p1 == p2:
+            return None
+        cur = self.db.execute("INSERT INTO sets (season, p1, p2, opened, w1, w2, tid) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (self.season(), p1, p2, self.now(), w1, w2, tid))
+        set_id = cur.lastrowid
+        for k, (gw, c1, c2) in enumerate(games):
+            self.db.execute("INSERT INTO games (set_id, seed, at, state, chara1, chara2, winner) VALUES (?, ?, ?, 'ok', ?, ?, ?)",
+                            (set_id, (tid or 0) * 100 + k, self.now(), c1 & 0x7FFFFFFFFFFFFFFF if c1 else None,
+                             c2 & 0x7FFFFFFFFFFFFFFF if c2 else None, gw))
+        self.close_set(set_id, winner)
+        self.db.commit()
+        na, nb = self.player(p1), self.player(p2)
+        return (a[1], na[1]), (b[1], nb[1])
+
+    def matches(self, n=30):
+        """the latest sets with a match page (the ladder queue's): names, score, winner, ratings (the web page)"""
+        db = sqlite3.connect(self.path)
+        try:
+            rows = db.execute("SELECT s.tid, a.name, b.name, s.w1, s.w2, s.winner, s.closed, s.r1_before, s.r1_after, s.r2_before, s.r2_after"
+                              " FROM sets s JOIN players a ON a.id = s.p1 JOIN players b ON b.id = s.p2"
+                              " WHERE s.state = 'done' AND s.tid IS NOT NULL ORDER BY s.id DESC LIMIT ?", (n,)).fetchall()
+            return [{"tid": tid, "players": [n1, n2], "score": [w1, w2], "winner": winner, "closed": closed,
+                     "rating": [[round(r1b), round(r1a)], [round(r2b), round(r2a)]] if r1b is not None else None}
+                    for tid, n1, n2, w1, w2, winner, closed, r1b, r1a, r2b, r2a in rows]
+        finally:
+            db.close()
+
     # ---- web (never ids, keys or addresses)
     def table(self):
         db = sqlite3.connect(self.path)
@@ -353,11 +388,11 @@ class Ladder:
             rows = db.execute("SELECT id, name, rating, rd, wins, losses FROM players ORDER BY rating - 2 * rd DESC, name").fetchall()
             out = []
             for pid, name, rating, rd, w, l in rows:
-                main = db.execute("SELECT c, COUNT(*) n FROM (SELECT g.chara1 c FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p1 = ?"
-                                  " UNION ALL SELECT g.chara2 FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p2 = ?)"
-                                  " GROUP BY c ORDER BY n DESC LIMIT 1", (pid, pid)).fetchone()
+                mains = db.execute("SELECT c, COUNT(*) n FROM (SELECT g.chara1 c FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p1 = ?"
+                                   " UNION ALL SELECT g.chara2 FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p2 = ?)"
+                                   " WHERE c IS NOT NULL GROUP BY c ORDER BY n DESC LIMIT 3", (pid, pid)).fetchall()
                 out.append({"name": name, "rating": round(rating), "rd": round(rd), "wins": w, "losses": l,
-                            "main": "%016x" % main[0] if main else None})
+                            "main": "%016x" % mains[0][0] if mains else None, "mains": [m[0] for m in mains]})
             return out
         finally:
             db.close()
@@ -369,13 +404,13 @@ class Ladder:
             if row is None:
                 return None
             pid = row[0]
-            sets = db.execute("SELECT s.id, s.p1, a.name, b.name, s.state, s.winner, s.w1, s.w2, s.closed, s.r1_before, s.r1_after, s.r2_before, s.r2_after"
+            sets = db.execute("SELECT s.id, s.p1, a.name, b.name, s.state, s.winner, s.w1, s.w2, s.closed, s.r1_before, s.r1_after, s.r2_before, s.r2_after, s.tid"
                               " FROM sets s JOIN players a ON a.id = s.p1 JOIN players b ON b.id = s.p2 WHERE s.p1 = ? OR s.p2 = ?"
                               " ORDER BY s.id DESC LIMIT 100", (pid, pid)).fetchall()
             out = []
-            for sid, p1, n1, n2, state, winner, w1, w2, closed, r1b, r1a, r2b, r2a in sets:
+            for sid, p1, n1, n2, state, winner, w1, w2, closed, r1b, r1a, r2b, r2a, tid in sets:
                 me1 = p1 == pid
-                out.append({"opponent": n2 if me1 else n1, "state": state, "score": [w1, w2] if me1 else [w2, w1],
+                out.append({"opponent": n2 if me1 else n1, "state": state, "score": [w1, w2] if me1 else [w2, w1], "tid": tid,
                             "won": None if winner is None else (winner == 1) == me1, "closed": closed,
                             "rating": [round(r1b), round(r1a)] if me1 and r1b is not None else [round(r2b), round(r2a)] if r2b is not None else None})
             return {"name": row[1], "sets": out}

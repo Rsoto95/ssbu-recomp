@@ -217,6 +217,14 @@ class Tournament:
             self.entrants = [e for e in self.entrants if e.get("in")]
         if len(self.entrants) < 2:
             raise Error("at least 2 players are needed")
+        if self.is_ladder():                          # (2026-11-03) a ladder match: one set between its two players, no bracket
+            if len(self.entrants) != 2:
+                raise Error("a ladder match has two players")
+            self.sets, self.state = [{"id": 0, "br": "W", "round": 1, "src": [["E", 0], ["E", 1]]}], "running"
+            self.results, self.procs = {}, {}
+            self.resolve()
+            self.changed()
+            return
         n = len(self.entrants)
         size = 2
         while size < n:
@@ -320,16 +328,25 @@ class Tournament:
         if self.sets and self.state in ("running", "done"):
             self.state = "done" if view[-1]["state"] in ("done", "skipped", "forfeit", "bye") else "running"
 
+    def is_ladder(self):
+        """(2026-11-03) a ladder match (the lobby's ladder queue paired its two players): one set, no bracket"""
+        return self.rules.get("kind") == "ladder"
+
     def champion(self):
         """the winner (entrant), once the tournament is over"""
         if self.state != "done":
             return None
+        if len(self.view) == 1:                       # (a ladder match)
+            return self.view[0]["winner"]
         g1, g2 = self.view[-2], self.view[-1]
         return g2["winner"] if g2["state"] != "skipped" else g1["winner"]
 
     def standings(self):
         """[(place, entrant)] of the players placed so far: the champion, then by how late they were knocked out (a
         loss in the losers bracket or the grand final); players knocked out in the same round share a place"""
+        if len(self.sets) == 1:                       # (a ladder match: the winner, then the loser)
+            v = self.view[0]
+            return [(1, v["winner"]), (2, v["loser"])] if v["state"] in ("done", "forfeit") and v["loser"] not in (None, BYE) else []
         depth = {}
         for i, s in enumerate(self.sets):
             v = self.view[i]
@@ -363,8 +380,9 @@ class Tournament:
             self.resolve()
         self.changed()
 
-    def override(self, sid, winner):
-        """the organizer's result for set sid: winner 0 / 1 (side), or None to clear it (the set is played again)"""
+    def override(self, sid, winner, by="organizer"):
+        """the organizer's result for set sid: winner 0 / 1 (side), or None to clear it (the set is played again).
+        by: "organizer", or (the lobby's ladder: the other player's game left) "left\""""
         if not 0 <= sid < len(self.sets):
             raise Error("no such set")
         v = self.view[sid]
@@ -374,7 +392,7 @@ class Tournament:
             self.results.pop(str(sid), None)
         else:
             r = self.results.setdefault(str(sid), {"players": v["p"], "games": [], "winner": None})
-            r["winner"], r["by"], r["players"] = winner, "organizer", v["p"]
+            r["winner"], r["by"], r["players"] = winner, by, v["p"]
         self.procs.pop(str(sid), None)
         self.resolve()
         self.changed()

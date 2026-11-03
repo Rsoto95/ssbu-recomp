@@ -1,5 +1,7 @@
 /* (2026-11-02) Tournaments on screen, without F1 (included by menu.cpp): the player's own tournament (lobby 1.7,
- * tools/net/tournament.py) as cards over the game, driven by the controller.
+ * tools/net/tournament.py) as cards over the game, driven by the controller. (2026-11-03) Also the ladder queue: the first
+ * line of the list, "Ladder: search for an opponent"; the lobby pairs two waiting players into a ladder match, a one-set
+ * "tournament" played with the same cards (stage strikes, Smash, start), and both ratings change when it is over.
  *
  *   - a small line at the top right while the player is in a tournament (not during a fight): what to do now;
  *   - the tournament screen (F3, or hold - (Minus) for about a second; B / Esc closes it): sign up / withdraw, check in,
@@ -154,13 +156,21 @@ static void tc_tick(uint64_t b, uint64_t down) {
         else if (k_a) tc_open(0, 0);
         return;
     }
-    if (!g_tc.own_id || !strcmp(g_tc.own_state, "done")) {     /* the list: sign up */
-        int idx[NET_T_LIST], n = tc_open_list(idx);
-        if (n) {
-            if (k_u) g_tc_list_sel = (g_tc_list_sel + n - 1) % n;
-            if (k_d) g_tc_list_sel = (g_tc_list_sel + 1) % n;
-            if (g_tc_list_sel >= n) g_tc_list_sel = 0;
-            if (k_a && !g_tc.pending) { const NetTourneyItem &it = g_tc.list[idx[g_tc_list_sel]]; net_tourney_simple(1, it.id); printf("menu: tournament: sign up for %d\n", it.id); fflush(stdout); }
+    if (g_tc.lq_in) {                                   /* (2026-11-03) waiting in the ladder queue: X leaves it */
+        if (k_x && !g_tc.pending) { net_ladder_queue(0); printf("menu: ladder: leave the queue\n"); fflush(stdout); }
+        else if (k_a) tc_open(0, 0);
+        return;
+    }
+    if (!g_tc.own_id || !strcmp(g_tc.own_state, "done")) {     /* the list: the ladder (first), then sign up */
+        int idx[NET_T_LIST], n = tc_open_list(idx), lad = g_tc.lq_known ? 1 : 0, total = n + lad;
+        if (total) {
+            if (k_u) g_tc_list_sel = (g_tc_list_sel + total - 1) % total;
+            if (k_d) g_tc_list_sel = (g_tc_list_sel + 1) % total;
+            if (g_tc_list_sel >= total) g_tc_list_sel = 0;
+            if (k_a && !g_tc.pending) {
+                if (lad && g_tc_list_sel == 0) { net_ladder_queue(1); printf("menu: ladder: join the queue\n"); fflush(stdout); }
+                else { const NetTourneyItem &it = g_tc.list[idx[g_tc_list_sel - lad]]; net_tourney_simple(1, it.id); printf("menu: tournament: sign up for %d\n", it.id); fflush(stdout); }
+            }
         } else if (k_a) tc_open(0, 0);
         return;
     }
@@ -168,7 +178,7 @@ static void tc_tick(uint64_t b, uint64_t down) {
 }
 static int tc_visible(void) {
     if (g_tc_modal || GetTickCount64() < g_tc_banner_until) return 1;
-    return g_tc.known && g_tc.own_id && strcmp(g_tc.own_state, "done") && !g_open;
+    return g_tc.known && ((g_tc.own_id && strcmp(g_tc.own_state, "done")) || g_tc.lq_in) && !g_open;
 }
 
 /* ---- drawing */
@@ -178,6 +188,7 @@ static void tc_hint(const char *text) { ImGui::Spacing(); ImGui::TextColored(TC_
 static void tc_status_line(char *out, int n) {
     const NetTourney &t = g_tc;
     out[0] = 0;
+    if (t.lq_in && t.set < 0) { snprintf(out, (size_t)n, "searching for an opponent (%d:%02d, %d waiting) - F3 to stop", t.lq_secs / 60, t.lq_secs % 60, t.lq_waiting); return; }
     if (t.set >= 0) {
         if (tc_is_stage_phase(t)) snprintf(out, (size_t)n, t.my_turn ? "YOUR TURN: %s a stage (F3)" : "%s is choosing the stage", t.my_turn ? t.phase : t.opp);
         else if (t.feature[0]) snprintf(out, (size_t)n, "vs %s (%d-%d) ON STREAM: Battle Arena %s", t.opp, t.mine, t.theirs, t.feature);
@@ -197,7 +208,7 @@ static void tc_draw_set(void) {
     ImGui::SetWindowFontScale(1.5f);
     ImGui::TextColored(TC_GOLD, "vs %s", t.opp);
     ImGui::SetWindowFontScale(1.0f);
-    ImGui::Text("%s  -  best of %d  -  game %d  -  score %d - %d", tc_round_name(t, t.br, t.round, rn, sizeof rn), t.set_bo ? t.set_bo : t.need * 2 - 1, t.game, t.mine, t.theirs);
+    ImGui::Text("%s  -  best of %d  -  game %d  -  score %d - %d", t.own_ladder ? "Ladder set" : tc_round_name(t, t.br, t.round, rn, sizeof rn), t.set_bo ? t.set_bo : t.need * 2 - 1, t.game, t.mine, t.theirs);
     ImGui::Separator();
     if (tc_is_stage_phase(t)) {
         const char *verb = !strcmp(t.phase, "strike") ? "STRIKE" : !strcmp(t.phase, "ban") ? "BAN" : "PICK";
@@ -238,14 +249,25 @@ static void tc_draw_set(void) {
         return;
     }
     ImGui::TextColored(TC_GREEN, "Now: close this (A or B), go to Smash, pick your fighter and press start.");
-    ImGui::Text("The match starts by itself with the tournament's rules (%d stocks, no items).", t.rule_stocks > 0 ? t.rule_stocks : 3);
+    ImGui::Text("The match starts by itself with the %s rules (%d stocks, no items).", t.own_ladder ? "ladder's" : "tournament's", t.rule_stocks > 0 ? t.rule_stocks : 3);
+    if (t.own_ladder) ImGui::TextColored(TC_DIM, "When the set is over, the winner gains rating and the loser loses some.");
     if (t.first == 2) ImGui::Text("You lost the last game: %s picks first; you see that fighter and can change yours.", t.opp);
     else if (t.first == 1) ImGui::Text("You won the last game: you pick your fighter first.");
     if (t.ready_them) ImGui::TextColored(TC_DIM, "%s is ready%s%s.", t.opp, t.their_chara_name[0] ? " with " : "", t.their_chara_name);
     tc_hint("A / B: close   Y: bracket");
 }
+static void tc_draw_ladder_standing(void) {             /* (2026-11-03) the ladder's Y page: the player's standing */
+    const NetTourney &t = g_tc;
+    ImGui::TextColored(TC_GOLD, "Your ladder standing");
+    if (t.lq_place) ImGui::Text("Rating %d   sets won %d, lost %d   place #%d", t.lq_rating, t.lq_wins, t.lq_losses, t.lq_place);
+    else ImGui::Text("Rating %d   (no sets yet)", t.lq_rating);
+    if (t.lr_id) ImGui::Text("Last set: %s %d - %d against %s, rating %d -> %d.", t.lr_won ? "won" : "lost", t.lr_mine, t.lr_theirs, t.lr_opp, t.lr_before, t.lr_after);
+    ImGui::TextColored(TC_DIM, "The whole table, and every set with its stages and fighters: the server's ladder web page.");
+    tc_hint("Y / Tab: back   B: close");
+}
 static void tc_draw_bracket(void) {
     const NetTourney &t = g_tc;
+    if (t.own_ladder || (t.lq_in && t.set < 0)) { tc_draw_ladder_standing(); return; }
     ImGui::TextColored(TC_GOLD, "Your path");
     int shown = 0;
     for (int i = 0; i < t.nsets; i++) {
@@ -282,7 +304,7 @@ static void tc_draw(ImGuiIO &io) {
             ImGui::TextColored(TC_GOLD, "TOURNAMENT"); ImGui::Separator(); ImGui::TextUnformatted(g_tc_banner);
             ImGui::End(); ImGui::PopStyleVar(); ImGui::PopStyleColor();
         }
-        if (t.known && t.own_id && strcmp(t.own_state, "done") && !g_open && !tc_fight_on()) {     /* the small line at the top right */
+        if (t.known && ((t.own_id && strcmp(t.own_state, "done")) || t.lq_in) && !g_open && !tc_fight_on()) {     /* the small line at the top right */
             char line[200]; tc_status_line(line, sizeof line);
             if (line[0]) {
                 ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - ImGui::GetFontSize(), io.DisplaySize.y * 0.02f + (S.stats ? io.DisplaySize.y * 0.12f : 0.0f)), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
@@ -290,7 +312,7 @@ static void tc_draw(ImGuiIO &io) {
                 ImGui::Begin("##tcline", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
                 int act = (t.set >= 0 && t.my_turn) || (!strcmp(t.own_state, "checkin") && !t.own_in);
-                ImGui::TextColored(act ? TC_GOLD : TC_DIM, "Tournament"); ImGui::SameLine(); ImGui::TextUnformatted(line);
+                ImGui::TextColored(act ? TC_GOLD : TC_DIM, "%s", t.own_ladder || (t.lq_in && t.set < 0) ? "Ladder" : "Tournament"); ImGui::SameLine(); ImGui::TextUnformatted(line);
                 ImGui::End();
             }
         }
@@ -304,12 +326,20 @@ static void tc_draw(ImGuiIO &io) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ImGui::GetFontSize() * 1.4f, ImGui::GetFontSize() * 1.0f));
     ImGui::Begin("##tcscreen", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                  ImGuiWindowFlags_NoSavedSettings);
-    ImGui::TextColored(TC_GOLD, "TOURNAMENT"); ImGui::SameLine(); ImGui::Text("%s", t.own_id ? t.own_name : "");
+    if (t.own_ladder || (t.lq_in && t.set < 0)) ImGui::TextColored(TC_GOLD, "LADDER");
+    else { ImGui::TextColored(TC_GOLD, "TOURNAMENT"); ImGui::SameLine(); ImGui::Text("%s", t.own_id ? t.own_name : ""); }
     if (t.err[0]) ImGui::TextColored(TC_RED, "%s", t.err);
     else if (t.pending) ImGui::TextColored(TC_DIM, "Sending...");
     ImGui::Separator();
     if (g_tc_tab) tc_draw_bracket();
     else if (t.set >= 0) tc_draw_set();
+    else if (t.lq_in) {                                  /* (2026-11-03) waiting in the ladder queue */
+        ImGui::SetWindowFontScale(1.3f); ImGui::TextColored(TC_GOLD, "Searching for an opponent...  %d:%02d", t.lq_secs / 60, t.lq_secs % 60); ImGui::SetWindowFontScale(1.0f);
+        ImGui::Text("%d player%s in the queue (you included). Your rating: %d (sets %d-%d).", t.lq_waiting, t.lq_waiting == 1 ? "" : "s", t.lq_rating, t.lq_wins, t.lq_losses);
+        ImGui::TextColored(TC_GREEN, "Keep the game open: when someone else searches, this screen opens by itself with your set.");
+        ImGui::Text("Meanwhile you can stay in the menus or play Training; the set card opens when your fight is over.");
+        tc_hint("X: stop searching   A / B: close   Y: your standing");
+    }
     else if (t.own_id && !strcmp(t.own_state, "checkin")) {
         if (!t.own_in) {
             ImGui::SetWindowFontScale(1.4f); ImGui::TextColored(TC_GOLD, "CHECK-IN"); ImGui::SetWindowFontScale(1.0f);
@@ -342,19 +372,26 @@ static void tc_draw(ImGuiIO &io) {
         tc_hint("A / B: close   Y: bracket");
     } else {                                             /* not in a tournament (or the last one is over): the open ones */
         if (t.own_id && !strcmp(t.own_state, "done")) { ImGui::Text("%s is over: you placed %d.", t.own_name, t.place); ImGui::Separator(); }
-        int idx[NET_T_LIST], n = tc_open_list(idx);
+        int idx[NET_T_LIST], n = tc_open_list(idx), lad = t.lq_known ? 1 : 0;
+        if (lad) {                                       /* (2026-11-03) the ladder: always the first line */
+            ImGui::TextColored(g_tc_list_sel == 0 ? TC_GOLD : ImVec4(1, 1, 1, 1), "%s Ladder: search for an opponent  (your rating %d, %d waiting now)",
+                               g_tc_list_sel == 0 ? ">" : " ", t.lq_rating, t.lq_waiting);
+            if (t.lr_id) ImGui::TextColored(TC_DIM, "   Last ladder set: %s %d - %d against %s, rating %d -> %d", t.lr_won ? "won" : "lost", t.lr_mine, t.lr_theirs, t.lr_opp, t.lr_before, t.lr_after);
+            ImGui::Spacing();
+        }
         if (!n) {
             ImGui::Text("No tournament is open for sign-ups right now.");
             ImGui::TextColored(TC_DIM, "The organizer makes them on the tournament server's web page; a note appears here when one opens.");
-            tc_hint("A / B: close");
+            tc_hint(lad ? "A: search for a ladder opponent   B: close" : "A / B: close");
         } else {
             ImGui::Text("Open tournaments:");
             for (int k = 0; k < n; k++) {
                 const NetTourneyItem &it = t.list[idx[k]];
-                ImGui::TextColored(k == g_tc_list_sel ? TC_GOLD : ImVec4(1, 1, 1, 1), "%s %s  (%d players)%s", k == g_tc_list_sel ? ">" : " ", it.name, it.players,
+                int sel = k + lad == g_tc_list_sel;
+                ImGui::TextColored(sel ? TC_GOLD : ImVec4(1, 1, 1, 1), "%s %s  (%d players)%s", sel ? ">" : " ", it.name, it.players,
                                    it.signed_up ? "  - signed up" : !strcmp(it.state, "checkin") ? "  - check-in open" : "");
             }
-            tc_hint("up / down: choose   A: sign up   B: close");
+            tc_hint(lad ? "up / down: choose   A: search (ladder) or sign up   B: close" : "up / down: choose   A: sign up   B: close");
         }
     }
     ImGui::End();

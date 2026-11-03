@@ -9,6 +9,9 @@ uno en su propia pelea, sin códigos de sala.
 Todo vive en **el servidor del grupo** (el mismo de las Battle Arenas, en Oracle). El organizador maneja el torneo desde
 una **página web**.
 
+También hay **ladder** (sección 8): entras a una cola, el servidor te junta con el siguiente que busca y juegan un set
+igual que en un torneo. El que gana sube de rating.
+
 ---
 
 ## 1. Conectarte al servidor de torneos (una sola vez)
@@ -140,3 +143,32 @@ En la página del torneo (**http://160.34.219.118:8080/tournaments**, cualquiera
 - Al lado de cada jugador salen los **personajes que usó** (en el set, y en Posiciones y Jugadores los de todo el torneo).
 - Un set ya jugado dice abajo **"ver escenarios y personajes"**: dale clic y se abre una ventana con cada game, el
   escenario y el personaje de cada uno (el ganador en verde). Se cierra con la ×, con Esc o dando clic afuera.
+
+## 8. Ladder (rating)
+
+El ladder es un servicio aparte de los torneos: juegas cuando quieras, contra quien esté buscando en ese momento, y tu
+**rating** sube o baja con cada set.
+
+1. Conéctate al servidor como en la sección 1 (Tournaments en ON).
+2. Presiona **F3** (o mantén **−** un segundo). La primera línea de la lista es **Ladder: search for an opponent**:
+   déjala marcada y presiona **A**. (También en **F1 > Tournament > Search for a ladder opponent**.)
+3. Quedas **buscando rival**. Arriba a la derecha dice "Ladder: searching for an opponent (tiempo, cuántos esperan)".
+   Deja el juego abierto; puedes estar en los menús o en Training.
+4. Cuando otra persona busca, el servidor los junta (si hay varios esperando, primero a los de rating más parecido) y la
+   pantalla se abre sola con tu set: **mejor de 3, 3 stocks**.
+5. Se juega **igual que un set de torneo** (sección 3, pasos 4 a 6): tachar escenarios (game 1: 1-2-1), desde el game 2
+   el ganador banea y el perdedor elige, el ganador elige personaje primero; vas a **Smash**, eliges personaje,
+   presionas **start** y la pelea empieza sola.
+6. Al terminar el set sale un aviso con el resultado y tu rating nuevo ("Rating 1500 -> 1562"). Para jugar otro, vuelve
+   a buscar (paso 2).
+
+- **Dejar de buscar:** en la pantalla del ladder presiona **X** (o en F1, **Stop searching**).
+- **Si tu rival no llega** a Smash en **5 minutos** y tú sí, ganas el set (cuenta para el rating).
+- **Si alguien cierra el juego** a mitad del set y no vuelve en **3 minutos**, el otro gana el set. Si se van los dos, el
+  set se cancela y no cuenta.
+- Mientras estás inscrito en un torneo (o sigues vivo en uno) no puedes buscar en el ladder.
+- Las partidas casuales (Smash normal, Battle Arenas) **no cambian el rating**: solo los sets del ladder.
+- **Y** en la pantalla del ladder muestra tu rating, tus sets ganados y perdidos y tu lugar.
+
+La tabla y todos los sets (con escenarios y personajes de cada game) están en **http://160.34.219.118:8080/ladder**. Dale
+clic a un jugador para ver su historial, o a un set para ver sus games.

@@ -1202,7 +1202,8 @@ static void sec_online(void) {
         if (ld.state == NET_LADDER_RANKED) {
             ImGui::Text("Ladder:"); ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1), "%s  %d (+/- %d)  #%d  sets %d-%d", ld.text, ld.rating, ld.rd, ld.place, ld.wins, ld.losses);
-            if (ld.last_outcome >= 0 && ld.last_outcome <= 4) { ImGui::SameLine(); ImGui::TextDisabled("  last match: %s, set %d-%d", out[ld.last_outcome], ld.set_mine, ld.set_theirs); }
+            if (ld.last_outcome >= 0 && ld.last_outcome < 4) { ImGui::SameLine(); ImGui::TextDisabled("  last match: %s, set %d-%d", out[ld.last_outcome], ld.set_mine, ld.set_theirs); }
+            ImGui::SameLine(); ImGui::TextDisabled("  (rating changes only with ladder sets: F3 > Ladder)");
         } else if (ld.state == NET_LADDER_UNRANKED) ImGui::TextDisabled("Ladder: not ranked (%s)", ld.text);
     }
     ImGui::Indent();
@@ -1695,6 +1696,20 @@ static void sec_tourney(void) {
     if (T.err[0]) ImGui::TextColored(strstr(T.err, "not counted") ? amber : red, "%s", T.err);
     if (T.pending) ImGui::TextDisabled("Sending...");
     float bw = ImGui::GetFontSize() * 11;
+    /* ---- (2026-11-03) the ladder queue (the same as F3 > Ladder) */
+    if (T.lq_known) {
+        ImGui::TextColored(head, "Ladder");
+        if (T.lq_place) ImGui::Text("Your rating %d, sets won %d, lost %d, place #%d", T.lq_rating, T.lq_wins, T.lq_losses, T.lq_place);
+        else ImGui::Text("Your rating %d (no ladder sets yet)", T.lq_rating);
+        if (T.lr_id) ImGui::TextDisabled("Last set: %s %d - %d against %s, rating %d -> %d", T.lr_won ? "won" : "lost", T.lr_mine, T.lr_theirs, T.lr_opp, T.lr_before, T.lr_after);
+        if (T.own_ladder) ImGui::TextColored(green, "Your ladder set against %s is being played: see Your set below.", T.opp);
+        else if (T.lq_in) {
+            ImGui::TextColored(amber, "Searching for an opponent...  %d:%02d  (%d waiting)", T.lq_secs / 60, T.lq_secs % 60, T.lq_waiting);
+            if (ImGui::Button("Stop searching##lq", ImVec2(bw, 0))) net_ladder_queue(0);
+        } else if (ImGui::Button("Search for a ladder opponent##lq", ImVec2(bw * 1.5f, 0))) net_ladder_queue(1);
+        help("The server pairs you with the next player who searches (the closest rating first). The set (best of 3) is played like a tournament set: stage strikes, then Smash and start. When it is over the winner gains rating and the loser loses some. Only ladder sets change the rating.");
+        ImGui::Separator();
+    }
     /* ---- your set */
     if (T.set >= 0) {
         ImGui::SetWindowFontScale(1.3f);
