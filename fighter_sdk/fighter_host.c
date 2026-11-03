@@ -1166,6 +1166,16 @@ static ImportFn g_fh_orig;
 static struct { uint64_t boma; int entry; long long frame; } g_fh_f[8];
 static int g_fh_n, g_fh_det, g_fh_detoff;
 static FILE *g_fh_out;
+/* (2026-11-03) A new match: the fighter table starts empty again (net_session.c, at every handshake). It was filled once
+ * per process, so the second fight's fighters took slots 2 and 3, slot 0 never came again, and the script random
+ * generators were NOT set from the new match's seed: an online match played second in a game session desynced from
+ * frame 1 against a game whose first match it was (both checksums of every frame differed; one game's fight ended,
+ * the other's waited for its moves: "frozen"). After 4 fights the table was full and no fighter was tracked at all. */
+void fh_new_fight(void) {
+    if (g_fh_n) printf("[fight] new match: the fighter table (%d fighters of the last fight) starts empty again\n", g_fh_n);
+    memset(g_fh_f, 0, sizeof g_fh_f);
+    g_fh_n = 0;
+}
 /* (2026-11-03) online rollback fights: each frame's checksum is made and compared with the other game's (net_session.c
  * on_check: "DESYNC: frame N" in the log) WITHOUT the per-frame lines of SSBU_FIGHT_HASH (thousands a minute): every log
  * said "checksums compared 0", and a desync showed only as a game waiting for ever. SSBU_FIGHT_CHECK=0: off. */

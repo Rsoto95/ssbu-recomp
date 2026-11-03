@@ -643,6 +643,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     printf("[rbnet] handshake %ld: input delay %d frames for this match (%s; here %d, 0 = auto)\n", (long)round, g_hs_delay,
            g_hs_delay ? "the larger of the two players' settings" : "both on auto: from the round trip", my_delay());
     host_fixed_random_reseed(g_hs_seed);
+    { void fh_new_fight(void); fh_new_fight(); }     /* (fighter_host.c) this match's first fighter sets the generators from its seed */
     printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld; match id %08x; notice updates %llu, frames shown again %llu)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx, g_match_id,
            (unsigned long long)notes, (unsigned long long)redraws);
     hs_print("the match", out);
@@ -1221,6 +1222,7 @@ static int rbs_spectate(long round, uint32_t gid, int players, int seat, const i
     g_hs_lwr = 1;
     g_hs_seed = out->seed; g_match_id = mid; g_hs_delay = out->pad0;
     host_fixed_random_reseed(g_hs_seed);
+    { void fh_new_fight(void); fh_new_fight(); }     /* (fighter_host.c) as a fighter's game: the generators from this match's seed */
     printf("[rbnet] spectator: handshake %ld: MATCH from player 1 after %.2f s (HELLO sent %lld; match id %08x; players' controls %s): this game shows the match as a local match fed with both fighters' final pads (no ring, no guesses; buffer %d frames)\n",
            round, (GetTickCount64() - t0) / 1000.0, hellos, g_match_id, mm.ctl_ok ? "exchanged" : "NOT exchanged by the fighters (each with the defaults)", RBS_B);
     hs_print("the match (spectator)", out);
