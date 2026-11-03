@@ -900,7 +900,11 @@ static void on_check(long long cf, uint32_t ck) {
     if (cf <= 0 || cf > g_hfinal_upto || g_hframe[cf % HR] != cf) { g_peer_check_f = cf; g_peer_check = ck; return; }      /* not final here yet: kept for later */
     uint32_t mine = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32));
     if (mine == ck) g_check_ok++;
-    else { g_desync++; if (g_desync_first < 0) { g_desync_first = cf; printf("[rbnet] DESYNC: frame %lld checksum here %08x, the other game %08x\n", cf, mine, ck); fflush(stdout); } }
+    else { g_desync++; if (g_desync_first < 0) { g_desync_first = cf; printf("[rbnet] DESYNC: frame %lld checksum here %08x, the other game %08x\n", cf, mine, ck); fflush(stdout);
+            /* (2026-11-03, owner: "you should send an advice when that happens") the players are told at once */
+            void menu_popup(const char *title, const char *text);
+            menu_popup("Desync", "The two games no longer show the same fight (desync detected).\nWhat you see is not what the other player sees: finish or leave this fight.\nThe log has the details (it is sent to the group's server when the game closes).");
+        } }
 }
 /* (hs15, test) SSBU_RB_NET_LOOP_BOT2=<seed>: the loop test's other player is the bot of that seed (11 = the joiner of a pair) */
 static unsigned loop_bot2(void) {
