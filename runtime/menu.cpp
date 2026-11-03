@@ -1282,9 +1282,10 @@ static void sec_gameplay(void) {
     }
     ImGui::SetWindowFontScale(1.0f);
     tag(0, 0);
-    help("The time between pressing a button and your fighter moving, in online fights. 3 is the usual. Lower: quicker to respond, "
-         "but with a slow connection fighters jump around more. Higher: smoother, but slower to respond. "
-         "You and the other player do not need the same number: each match uses the larger of the two. Used from your next match.");
+    help("The time between pressing a button and your fighter moving, in online fights. Auto (recommended) chooses it from the ping: "
+         "1 under 33 ms, 2 up to 67 ms, 3 up to 100 ms, 4 up to 133 ms, 5 up to 167 ms, 6 up to 200 ms, 7 above. Lower: quicker to respond, but fighters jump around more "
+         "and the game can stutter. Higher: smoother, but slower to respond. "
+         "You and the other player do not need the same setting: each match uses the larger of the two. Used from your next match.");
     if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, e.g. \"Play SSBU (delay 4).bat\"): it wins over this setting. Start the game with \"Play SSBU.bat\" to use it.", getenv("SSBU_RB_NET_DELAY"));
     ImGui::Separator();
     static int fs = -1;
@@ -1980,6 +1981,8 @@ static void sec_about(void) {
     ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Linux");
 #endif
     ImGui::Text("Version %s (runtime built %s %s)", ssbu_version(), __DATE__, __TIME__);
+    {   char exe[MAX_PATH] = ""; GetModuleFileNameA(NULL, exe, sizeof exe); const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe;
+        if (!_stricmp(base, "ssbu_staging.exe")) ImGui::TextColored(ImVec4(1.0f, 0.67f, 0.16f, 1), "This is the STAGING copy (ssbu_staging.exe, \"Play SSBU (STAGING).bat\"): the normal game is \"Play SSBU.bat\"."); }
     ImGui::Text("Renderer: Vulkan on %s", nvn_vk_device_name());
     ImGui::Text("Settings menu: Dear ImGui %s (MIT licence, Omar Cornut and contributors)", ImGui::GetVersion());
     ImGui::Text("graphics.ini: %s", gfx_options()->path);
@@ -2407,7 +2410,15 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !tc_visible()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    /* (2026-11-03) the test version (ssbu_staging.exe, or the staging update channel) shows a label all the time: owner, "not
+     * to confuse staging and the normal one" */
+    static int staging = -1;
+    if (staging < 0) {
+        char exe[MAX_PATH] = ""; GetModuleFileNameA(NULL, exe, sizeof exe);
+        const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *br = getenv("SSBU_UPDATE_BRANCH");
+        staging = !_stricmp(base, "ssbu_staging.exe") || (br && !_stricmp(br, "staging"));
+    }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !tc_visible() && !staging) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -2492,6 +2503,15 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::End();
     }
     tc_draw(io);                                         /* (2026-11-02) the tournament's line, note and screen */
+    if (staging) {                                       /* (2026-11-03) top left, small, over everything, never takes input */
+        char t[96]; const char *v = ssbu_version(), *dash = v ? strrchr(v, '-') : NULL;
+        snprintf(t, sizeof t, "STAGING (test version) %.12s", dash ? dash + 1 : "");
+        ImDrawList *dl = ImGui::GetForegroundDrawList();
+        float fs = ImGui::GetFontSize() * 0.85f; ImVec2 p(8.0f, 6.0f);
+        ImVec2 sz = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, t);
+        dl->AddRectFilled(ImVec2(p.x - 4, p.y - 2), ImVec2(p.x + sz.x + 4, p.y + sz.y + 2), IM_COL32(0, 0, 0, 170), 4.0f);
+        dl->AddText(ImGui::GetFont(), fs, p, IM_COL32(255, 170, 40, 255), t);
+    }
     if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();
 #ifndef _WIN32
