@@ -72,6 +72,11 @@ typedef struct {
     int set_mine, set_theirs;               /* the set's games won by each, after that result */
 } NetLadder;
 void net_ladder_get(NetLadder *out);        /* never blocks */
+/* Accounts (the ladder identity: graphics.ini ladder_id / ladder_key; F1 > Online > Your account). The account code is
+ * the id and the key as "SSBU-" + Crockford base32 with a check: whoever has it IS this account (like a password). */
+int net_account_code(char *out, int n);     /* this game's account code; 0 without an identity (online or the ladder off); n >= 96 */
+int net_account_use_code(const char *code); /* 1: a valid code, written to graphics.ini, used from the next start; 0: not a valid code */
+const char *net_online_name(void);          /* the name this game sends to the lobby ("" with online play off) */
 enum { NET_LADDER_F_ABANDON = 1, NET_LADDER_F_DISCONNECT = 2 };
 typedef struct {
     uint64_t seed;                          /* the match handshake's seed: the same on both games */
@@ -106,6 +111,59 @@ typedef struct {
     int why;                                /* why this player was last taken out: 0 none, 1 removed by the host, 2 the room closed, 3 turn not started */
     int making;                             /* this game is making a room (becoming the network's lobby first) */
 } NetArena;
+
+/* Tournaments (lobby 1.7, tools/net/tournament.py; F1 > Tournament): what the lobby last said (TOURNEY_STATE: the list and
+ * this player's set; TOURNEY_DOC: the bracket of the tournament looked at), and the requests (each sent until the lobby
+ * acknowledges it). The rollback search (net_session.c) holds a tournament player at the set-up until its set may start. */
+#define NET_T_LIST 8
+#define NET_T_MAX 256
+#define NET_T_SETS 512
+#define NET_T_STAGES 16
+typedef struct { int id, players, signed_up, organizer; char state[12]; char name[33]; } NetTourneyItem;
+typedef struct { int dq, rating; char name[33]; } NetTourneyEntrant;          /* rating -1: none yet */
+typedef struct { int id, round, p[2], winner, score[2], bo; char br; char state[10]; } NetTourneySet;   /* br W / L / G; p: entrant, -1 a bye, -2 not known yet */
+typedef struct {
+    int known, off, account, can_create, pending;  /* off: the lobby has none; pending: a request not acknowledged yet */
+    char err[160];                                 /* the lobby's answer to the last request ("" = done) */
+    int n; NetTourneyItem list[NET_T_LIST];
+    int focus, version;                            /* the tournament looked at (0 none), its bracket's version here (0: not here yet) */
+    char tstate[12], seed_mode[10], organizer[33], name[33];
+    int bo, bo_top8, bo_finals, bans, stocks;
+    int nstarters, ncps; char starters[NET_T_STAGES][24], cps[NET_T_STAGES][24];
+    int nent; NetTourneyEntrant ent[NET_T_MAX];
+    int nsets; NetTourneySet sets[NET_T_SETS];
+    int nplaces; int places[NET_T_MAX][2];         /* place, entrant */
+    /* this player in the tournament looked at */
+    int me, set, side, host;                       /* entrant (-1: not in it), its set now (-1: none), its side, it hosts the match */
+    char status[8]; int place;                     /* without a set now: "wait", "out", "dq" or "done" (place) */
+    char opp[33]; int mine, theirs, need, game, rule_stocks;
+    char phase[8]; int my_turn, left; char stage[24];   /* phase strike / ban / pick / chars / go; my_turn: a stage step is ours */
+    int npool, nstruck; char pool[NET_T_STAGES][24], struck[NET_T_STAGES][24];
+    int first;                                     /* the fighter order: 0 both blind (game 1), 1 this player first, 2 the other first */
+    int ready_me, ready_them; uint64_t their_chara; char their_chara_name[33];   /* (their fighter: when they chose first) */
+    int go;                                        /* both ready: the match may start */
+    /* (2026-11-02) the player's own tournament, whatever the list looks at ("mt"): the cards on screen (tourney_card.inc) */
+    int own_id, own_in; char own_state[12], own_name[33];   /* own_id 0: in none; own_in: checked in */
+    char br; int round, set_bo, turn_secs;         /* its set: W / L / G, round, best of; seconds left of a stage step (-1 none) */
+    char next_br; int next_round; char next_who[80];   /* without a set: the next one (next_br 0: none known) */
+    char feature[12];                              /* the set is on stream: played in the Battle Arena with this code ("" no) */
+} NetTourney;
+void net_tourney_get(NetTourney *out);           /* never blocks; while F1 > Tournament asks, the lobby is asked every second */
+void net_tourney_peek(NetTourney *out);          /* the same, without asking the lobby more often (the cards on screen, every frame) */
+void net_tourney_look(int tid);
+void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks);
+void net_tourney_simple(int op, int tid);        /* 1 sign up, 2 withdraw, 4 start, 5 cancel, 13 check in, 14 open the check-in */
+void net_tourney_seed_mode(int tid, int mode);   /* 0 rating, 1 random, 2 manual */
+void net_tourney_move(int tid, int from, int to);
+void net_tourney_dq(int tid, int entrant);
+void net_tourney_result(int tid, int set, int winner);   /* the organizer's: side 0 / 1 won, -1 clears it */
+void net_tourney_stage(int tid, int set, const char *stage);
+const char *net_tourney_stage_name(const char *stage);   /* "battle_field" -> "Battlefield" */
+int net_tourney_queued(void);                    /* (net_session.c) this player has a set to play now */
+int net_tourney_turn(void);                      /* ... and both players are ready: the match may start */
+void net_tourney_ready(uint64_t chara, int confirm);     /* at the set-up with that fighter (sent until acknowledged) */
+void net_tourney_unready(void);
+int net_tourney_match(char *stage, int n, int *stocks);  /* the set's stage (internal name) and stocks for the host's proposal; 0: none */
 void net_arena_get(NetArena *out);          /* never blocks; while it is called the state is asked for every second */
 void net_arena_join(int in);                /* 1 = into the queue, 0 = out of the arena */
 int net_arena_turn(void);                   /* 1 = this player's turn (or match) in the arena now */

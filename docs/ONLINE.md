@@ -128,6 +128,41 @@ folder name) and the DLLs of `SSBU_MODS`. Two copies of a mod match when their f
 An older lobby server lists only rooms of your own build (F1 says so); an older game keeps working as before and only
 sees rooms of its own build.
 
+## Accounts and tournaments (the tournament screen, lobby server 1.7)
+
+These live on a lobby server that keeps them: the group's Oracle server (`tools/net/deploy_arenas.sh` installs the lobby
+with accounts and tournaments on, `LADDER=on LADDER_OPEN=1`), not a room inside a player's game. The Spanish
+step-by-step guide for players and organizers: [GUIA_TORNEOS.md](GUIA_TORNEOS.md).
+
+- **Connect:** F1 -> Experimental -> **Tournaments** ON (graphics.ini `tournaments = on`), then restart: the game joins
+  the lobby of `online_menu_server` (port 39500) instead of the group's Radmin network (`gfx_online_menu_env`).
+- **Your account** (F1 -> Online): made by itself the first time your game joins such a server. Its name follows
+  F1 -> Experimental -> Your name (if no other account has it). The **account code** moves it to another PC, and logs
+  the organizer in on the web page. Whoever has the code is you: keep it secret.
+- **The tournament screen, no F1** (`runtime/tourney_card.inc`): F3, or hold - (Minus) about a second; B closes it. It
+  opens by itself when the player must act (check-in, a new set, its stage turn; never during a fight) and a line at the
+  top right always says what is next. While it is open the game gets no input (`menu_input_blocked`).
+- **Tournaments:** double elimination (winners and losers brackets, grand final with reset), up to 256 players, every set
+  in parallel (the lobby pairs each set's two players: no room codes). Sign-up, then a check-in (who does not check in is
+  left out at the start), then the bracket.
+- **A set:** game 1, the players strike the five starter stages (1-2-1); later games, the winner bans stages and the
+  loser picks one (starters and counterpicks), with the d-pad and A on the tournament screen, 60 s per step (then the
+  first stage left is chosen). Then both go to Smash, choose a fighter and press start: the game waits there and the match
+  starts by itself with the chosen stage, the tournament's stocks, no items and no hazards. From game 2 the winner chooses
+  a fighter first; the loser sees it and has 10 s to go back and change.
+- **Results** count by themselves when both games report the same winner of a fight between the set's two players. A
+  draw, a desync, a disconnection, a player who left or two different reports: the game is played again. One report
+  alone counts only when the other game is gone. A player never seen at the set-up in 10 minutes while the other was:
+  the other wins the set (the organizer can undo it). Tournament games count for the ladder only when the organizer
+  chose "rated".
+- **On stream:** the organizer can put a set in a Battle Arena (its code on the web page): the two players are told on
+  their tournament screen, the others watch it there as spectators; its result counts for the set.
+- **Web:** `http://<server>:8080/tournaments`: every bracket (names only), and the **organizer's tools** after logging
+  in with the account code (the page signs a challenge with it; the code never travels): create, seeding, check-in,
+  start, results, replay, DQ, on stream, cancel.
+- **Server admin:** `sudo ssbu-account list | rename | ban | unban | delete`; `TOURNAMENT_ADMINS="Name1,Name2"` limits who
+  may make tournaments.
+
 ## Status and limits
 
 - Experimental.

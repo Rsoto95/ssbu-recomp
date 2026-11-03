@@ -23,19 +23,26 @@
 #       sudo LADDER_OPEN=1 bash deploy_lobby.sh       any new player is ranked (no invitation needed)
 #       sudo ssbu-ladder-invite <name>                a one-use invitation code for a player (it goes in the game's
 #                                                     graphics.ini as ladder_invite = <code>)
-# Remove: systemctl disable --now ssbu-lobby; rm -r /opt/ssbu-lobby /usr/local/bin/ssbu-ladder-invite; userdel ssbu-lobby
+#       sudo ssbu-account list | rename <old> <new> | ban <name> | unban <name> | delete <name>    the players' accounts
+# Tournaments (tournament.py, next to ssbu_lobby.py; with the ladder): made and played in the game (F1 > Tournament), the
+#   brackets on https://<domain>/tournaments. By default any account may make one; to allow only some:
+#       sudo LADDER_OPEN=1 TOURNAMENT_ADMINS="Rober,napky" bash deploy_lobby.sh
+# Remove: systemctl disable --now ssbu-lobby; rm -r /opt/ssbu-lobby /usr/local/bin/ssbu-ladder-invite /usr/local/bin/ssbu-account; userdel ssbu-lobby
 #   (the ladder's data: rm -r /var/lib/ssbu-lobby) (and, if it was added: apt-get remove caddy)
 set -euo pipefail
 PORT="${1:-39500}"
 STATUS_PORT="${STATUS_PORT:-8080}"
+STATUS_BIND="${STATUS_BIND:-127.0.0.1}"   # (0.0.0.0: the pages straight on http://<ip>:$STATUS_PORT, no domain: deploy_arenas.sh)
 DOMAIN="${DOMAIN:-}"
 ACME_EMAIL="${ACME_EMAIL:-}"
 LADDER="${LADDER:-auto}"
 LADDER_OPEN="${LADDER_OPEN:-}"
+TOURNAMENT_ADMINS="${TOURNAMENT_ADMINS:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 [ -f "$HERE/ssbu_lobby.py" ] || { echo "ssbu_lobby.py not found next to this script"; exit 1; }
 [[ "$PORT" =~ ^[0-9]+$ && "$STATUS_PORT" =~ ^[0-9]+$ ]] || { echo "ports must be numbers"; exit 1; }
+[[ "$STATUS_BIND" =~ ^[0-9.]+$ ]] || { echo "STATUS_BIND must be an IPv4 address (127.0.0.1 or 0.0.0.0)"; exit 1; }
 DOMAIN_RE='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$'
 if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ $DOMAIN_RE ]]; then
     echo "DOMAIN must be a plain host name such as lobby.example.org (no https://, no path)"; exit 1
@@ -52,8 +59,14 @@ fi
 if [ "$LADDER" != off ] && [ "$LADDER" != 0 ]; then
     [ -f "$HERE/ladder.py" ] || { echo "ladder.py not found next to this script (LADDER=off: no ladder)"; exit 1; }
     install -m 644 "$HERE/ladder.py" /opt/ssbu-lobby/ladder.py
+    if [ -f "$HERE/tournament.py" ]; then install -m 644 "$HERE/tournament.py" /opt/ssbu-lobby/tournament.py   # (tournaments: with the ladder)
+    else echo "note: tournament.py is not next to this script: no tournaments"; fi
     LADDER_ARGS=" --ladder-db /var/lib/ssbu-lobby/ladder.db"
     [ -n "$LADDER_OPEN" ] && [ "$LADDER_OPEN" != 0 ] && LADDER_ARGS="$LADDER_ARGS --ladder-open"
+    if [ -n "$TOURNAMENT_ADMINS" ]; then
+        [[ "$TOURNAMENT_ADMINS" =~ ^[^\"]+$ ]] || { echo "TOURNAMENT_ADMINS: account names, comma-separated, without quotes"; exit 1; }
+        LADDER_ARGS="$LADDER_ARGS --tournament-admins \"$TOURNAMENT_ADMINS\""
+    fi
 fi
 # a fixed system user (not DynamicUser): the ladder's database is written both by the service and by ssbu-ladder-invite
 id ssbu-lobby >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ssbu-lobby
@@ -64,6 +77,18 @@ cat > /usr/local/bin/ssbu-ladder-invite <<'EOF'
 exec sudo -u ssbu-lobby /usr/bin/python3 /opt/ssbu-lobby/ssbu_lobby.py --ladder-db /var/lib/ssbu-lobby/ladder.db --ladder-invite "$1"
 EOF
 chmod 755 /usr/local/bin/ssbu-ladder-invite
+cat > /usr/local/bin/ssbu-account <<'EOF'
+#!/bin/sh
+# the players' accounts: ssbu-account list | rename <old name> <new name> | ban <name> | unban <name> | delete <name>
+L="sudo -u ssbu-lobby /usr/bin/python3 /opt/ssbu-lobby/ssbu_lobby.py --ladder-db /var/lib/ssbu-lobby/ladder.db"
+case "$1" in
+  list)   exec $L --account-list ;;
+  rename) [ -n "$2" ] && [ -n "$3" ] || { echo "usage: ssbu-account rename <old name> <new name>"; exit 1; }; exec $L --account-rename "$2" "$3" ;;
+  ban|unban|delete) [ -n "$2" ] || { echo "usage: ssbu-account $1 <name>"; exit 1; }; exec $L --account-$1 "$2" ;;
+  *) echo "usage: ssbu-account list | rename <old> <new> | ban <name> | unban <name> | delete <name>"; exit 1 ;;
+esac
+EOF
+chmod 755 /usr/local/bin/ssbu-account
 
 cat > /etc/systemd/system/ssbu-lobby.service <<EOF
 [Unit]
@@ -72,7 +97,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/ssbu-lobby/ssbu_lobby.py --bind 0.0.0.0 --port $PORT --status-port $STATUS_PORT --status-bind 127.0.0.1$LADDER_ARGS
+ExecStart=/usr/bin/python3 /opt/ssbu-lobby/ssbu_lobby.py --bind 0.0.0.0 --port $PORT --status-port $STATUS_PORT --status-bind $STATUS_BIND$LADDER_ARGS
 Restart=always
 RestartSec=3
 User=ssbu-lobby
@@ -141,7 +166,7 @@ GLOBAL=""
 }
 "
 cat > /etc/caddy/Caddyfile <<EOF
-${GLOBAL}# written by deploy_lobby.sh: the lobby's status endpoint (counts only) and the ladder's table (names and ratings), nothing else
+${GLOBAL}# written by deploy_lobby.sh: the lobby's status endpoint (counts only), the ladder's table and the tournaments' brackets (names and ratings), nothing else
 $DOMAIN {
 	encode gzip
 	handle /status {
@@ -151,6 +176,12 @@ $DOMAIN {
 		reverse_proxy 127.0.0.1:$STATUS_PORT
 	}
 	handle /player/* {
+		reverse_proxy 127.0.0.1:$STATUS_PORT
+	}
+	handle /tournament* {
+		reverse_proxy 127.0.0.1:$STATUS_PORT
+	}
+	handle /api/* {
 		reverse_proxy 127.0.0.1:$STATUS_PORT
 	}
 	handle {
@@ -179,4 +210,4 @@ echo
 echo "Caddy serves https://$DOMAIN/status (the certificate is fetched on first use; DNS must already point here)."
 echo "Open TCP 80 and 443 in the cloud firewall too. Check: curl -s https://$DOMAIN/status"
 echo "Site: set STATUS_URL = \"https://$DOMAIN/status\" in config.js."
-if [ -n "$LADDER_ARGS" ]; then echo "Ladder table: https://$DOMAIN/ladder"; fi
+if [ -n "$LADDER_ARGS" ]; then echo "Ladder table: https://$DOMAIN/ladder"; echo "Tournaments: https://$DOMAIN/tournaments"; fi

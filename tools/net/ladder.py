@@ -4,6 +4,10 @@
 A closed group: a player is ranked only once the lobby knows its ladder id (a game's random 16-byte id, with a 32-byte
 key that proves it, see the 'L''D' block of JOIN). An id is admitted by a one-use invitation code (--ladder-invite) or,
 with --ladder-open, the first time it is seen; its key is then kept (trust on first use) and its name is bound to it.
+That id is the player's ACCOUNT (the game shows it, and an "account code" moves it to another PC). With --ladder-open the
+name follows the game's: a JOIN with another valid name renames the account when no other account has it (a name already
+taken at the sign-up gets a free variant, "Name 2"); the game's own placeholder "Player-xxxx" never renames one. The
+admin renames, bans and deletes accounts (ssbu_lobby.py --account-*).
 
 A set opens when two ranked players are paired for a rollback match; each game of it is counted only when BOTH games
 reported the same result for the same match seed (the handshake's) without a desync, under the ladder's rules (stock,
@@ -15,6 +19,7 @@ Python 3.8+, standard library only (sqlite3). No game content."""
 import hashlib
 import hmac
 import math
+import re
 import secrets
 import sqlite3
 import time
@@ -25,6 +30,8 @@ RULE_STOCK = 1                    # handshake rule_kind of a stock match (debug_
 LADDER_STOCKS, LADDER_TO = 3, 2   # 3 stocks, best of 3
 REPORT_WAIT = 60.0                # seconds the second report of a game is waited for
 ID_LEN, KEY_LEN = 16, 32
+NAME_MIN, NAME_MAX = 2, 24        # an account name: printable, no spaces at its ends
+PLACEHOLDER = re.compile(r"^Player-[0-9a-fA-F]{4}$")   # (net_relay.c: the name of a game without one, new at each start)
 F_ABANDON, F_DISCONNECT = 1, 2    # RESULT flags
 
 
@@ -83,6 +90,14 @@ def game_winner(stocks, dmg):
     return None
 
 
+def clean_name(name):
+    """name as an account name, or "" when it cannot be one (too short or long, control characters)"""
+    name = " ".join(str(name or "").split())
+    if not NAME_MIN <= len(name) <= NAME_MAX or not name.isprintable():
+        return ""
+    return name
+
+
 def join_proof(key, nonce):
     """The 'L''D' proof of a JOIN: HMAC-SHA256(key, the JOIN's nonce)."""
     return hmac.new(key, nonce, hashlib.sha256).digest()
@@ -93,7 +108,7 @@ CREATE TABLE IF NOT EXISTS seasons (id INTEGER PRIMARY KEY, name TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS players (
     id BLOB PRIMARY KEY, key BLOB NOT NULL, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
     rating REAL NOT NULL, rd REAL NOT NULL, vol REAL NOT NULL,
-    wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
+    wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, banned INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS invites (code TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL, used_by BLOB);
 CREATE TABLE IF NOT EXISTS sets (
     id INTEGER PRIMARY KEY, season INTEGER NOT NULL, p1 BLOB NOT NULL, p2 BLOB NOT NULL,
@@ -116,6 +131,8 @@ class Ladder:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")      # (the web thread reads while the lobby writes)
         self.db.executescript(SCHEMA)
+        if "banned" not in [r[1] for r in self.db.execute("PRAGMA table_info(players)")]:       # (a database of lobby 1.5 / 1.6)
+            self.db.execute("ALTER TABLE players ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
         self.db.execute("UPDATE sets SET state = 'void', closed = ? WHERE state = 'open'", (self.now(),))   # (a restarted lobby: those sets' games are lost)
         if self.db.execute("SELECT COUNT(*) FROM seasons WHERE ended IS NULL").fetchone()[0] == 0:
             self.db.execute("INSERT INTO seasons (name, started) VALUES (?, ?)", ("Season 1", self.now()))
@@ -139,10 +156,17 @@ class Ladder:
         (proof = join_proof(key, nonce)); an unknown one is admitted with its key by an invitation code or --ladder-open."""
         if len(pid) != ID_LEN:
             return None, "bad id"
-        row = self.db.execute("SELECT key, name FROM players WHERE id = ?", (pid,)).fetchone()
+        row = self.db.execute("SELECT key, name, banned FROM players WHERE id = ?", (pid,)).fetchone()
         if row is not None:
             if proof is None or nonce is None or not hmac.compare_digest(join_proof(row[0], nonce), proof):
                 return None, "wrong key"
+            if row[2]:
+                return None, "banned"
+            want = clean_name(name)
+            if self.open_signup and want and want != row[1] and not PLACEHOLDER.match(want) and self.name_free(want, pid):
+                self.db.execute("UPDATE players SET name = ? WHERE id = ?", (want, pid))
+                self.db.commit()
+                return pid, want
             return pid, row[1]
         if key is None or len(key) != KEY_LEN:
             return None, "unknown id"
@@ -154,6 +178,8 @@ class Ladder:
             name = inv[0]
         elif not self.open_signup:
             return None, "not invited"
+        else:
+            name = self.free_variant(clean_name(name) or "Player")
         if self.db.execute("SELECT 1 FROM players WHERE name = ?", (name,)).fetchone():
             return None, "name taken"
         self.db.execute("INSERT INTO players (id, key, name, rating, rd, vol, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -162,6 +188,50 @@ class Ladder:
             self.db.execute("UPDATE invites SET used_by = ? WHERE code = ?", (pid, invite))
         self.db.commit()
         return pid, name
+
+    def name_free(self, name, pid=None):
+        row = self.db.execute("SELECT id FROM players WHERE name = ?", (name,)).fetchone()
+        return row is None or row[0] == pid
+
+    def free_variant(self, name):
+        """name, or "name 2", "name 3"... : the first no account has"""
+        n, cand = 1, name
+        while not self.name_free(cand):
+            n += 1
+            suffix = " %d" % n
+            cand = name[:NAME_MAX - len(suffix)] + suffix
+        return cand
+
+    # ---- accounts (the admin: ssbu_lobby.py --account-*)
+    def accounts(self):
+        """[(name, rating, wins, losses, banned, created)] by name"""
+        return self.db.execute("SELECT name, rating, wins, losses, banned, created FROM players ORDER BY name").fetchall()
+
+    def rename(self, old, new):
+        """-> None, or why not"""
+        want = clean_name(new)
+        if not want:
+            return "not a valid name (%d to %d characters, printable)" % (NAME_MIN, NAME_MAX)
+        row = self.db.execute("SELECT id FROM players WHERE name = ?", (old,)).fetchone()
+        if row is None:
+            return "no account called %s" % old
+        if not self.name_free(want, row[0]):
+            return "another account is called %s" % want
+        self.db.execute("UPDATE players SET name = ? WHERE id = ?", (want, row[0]))
+        self.db.commit()
+        return None
+
+    def ban(self, name, on=True):
+        """-> None, or why not. A banned account is not ranked (its game plays on, unranked) until unbanned."""
+        cur = self.db.execute("UPDATE players SET banned = ? WHERE name = ?", (1 if on else 0, name))
+        self.db.commit()
+        return None if cur.rowcount else "no account called %s" % name
+
+    def delete(self, name):
+        """-> None, or why not. Its games and sets stay (without a name); the game signs up again as a new account."""
+        cur = self.db.execute("DELETE FROM players WHERE name = ?", (name,))
+        self.db.commit()
+        return None if cur.rowcount else "no account called %s" % name
 
     def rank(self, pid):
         """pid's place in the table (1 = first), 0 = not ranked"""

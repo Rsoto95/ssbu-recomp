@@ -81,6 +81,7 @@ enum { NET_MODE_LOBBY, NET_MODE_LAN, NET_MODE_HOST, NET_MODE_JOIN };      /* net
 
 /* ------------------------------------------------------------------ state shared between threads */
 static volatile LONG g_open, g_guard, g_toggle_req;
+static volatile LONG g_tc_modal, g_tc_toggle_req, g_tc_key;    /* (2026-11-02) the tournament screen (tourney_card.inc): open; F3 asked; a key while open */
 static int g_enabled = -1;
 extern "C" int menu_enabled(void) {
     if (g_enabled < 0) {
@@ -93,7 +94,7 @@ extern "C" int menu_enabled(void) {
     return g_enabled;
 }
 extern "C" int menu_is_open(void) { return g_enabled > 0 && g_open; }
-extern "C" int menu_input_blocked(void) { return g_enabled > 0 && (g_open || g_guard); }
+extern "C" int menu_input_blocked(void) { return g_enabled > 0 && (g_open || g_guard || g_tc_modal); }
 extern "C" void menu_request_toggle(void) { InterlockedIncrement(&g_toggle_req); }
 /* R3: the online match's message (any thread; copied under a lock, read by the render thread) */
 static SRWLOCK g_notice_lock = SRWLOCK_INIT;
@@ -173,6 +174,11 @@ extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
     if (!menu_enabled()) return 0;
     if (m == WM_KEYDOWN && w == VK_F1) { if (!(l & (1 << 30))) menu_request_toggle(); return 1; }
     if (m == WM_KEYDOWN && w == VK_F2) { if (!(l & (1 << 30))) InterlockedIncrement(&g_stats_req); return 1; }      /* the stats overlay */
+    if (m == WM_KEYDOWN && w == VK_F3) { if (!(l & (1 << 30))) InterlockedIncrement(&g_tc_toggle_req); return 1; }   /* (2026-11-02) the tournament screen */
+    if (g_tc_modal && !g_open) {                      /* (the tournament screen open: its keys, none to the game) */
+        if (m == WM_KEYDOWN) InterlockedExchange(&g_tc_key, (LONG)w);
+        return m == WM_KEYDOWN || m == WM_KEYUP || m == WM_CHAR;
+    }
     if (!g_open || osk_active()) return 0;
     switch (m) {
     case WM_MOUSEMOVE: q_push(EV_MOVE, (short)LOWORD(l), (short)HIWORD(l)); return 0;
@@ -245,6 +251,8 @@ static bool SDLCALL menu_sdl_watch(void *user, SDL_Event *e) {
         int down = e->type == SDL_EVENT_KEY_DOWN;
         if (down && e->key.scancode == SDL_SCANCODE_F1) { if (!e->key.repeat) menu_request_toggle(); return true; }
         if (down && e->key.scancode == SDL_SCANCODE_F2) { if (!e->key.repeat) InterlockedIncrement(&g_stats_req); return true; }      /* the stats overlay */
+        if (down && e->key.scancode == SDL_SCANCODE_F3) { if (!e->key.repeat) InterlockedIncrement(&g_tc_toggle_req); return true; }   /* (2026-11-02) the tournament screen */
+        if (g_tc_modal && !g_open) { if (down) { int vk = sdl_vk(e->key.scancode); if (vk) InterlockedExchange(&g_tc_key, vk); } return true; }
         if (!g_open || osk_active()) return true;
         int vk = sdl_vk(e->key.scancode);
         if (vk) q_push(EV_KEY, vk, down);
@@ -493,8 +501,8 @@ static uint64_t g_pad_prev;
 static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
-enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_GAMEPLAY, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_ARENA, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Gameplay", "Experimental", "Online", "Arena", "Add-on content", "Language", "Log", "About"};
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_GAMEPLAY, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_ARENA, SEC_TOURNEY, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Gameplay", "Experimental", "Online", "Arena", "Tournament", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -1135,6 +1143,17 @@ static void sec_experimental(void) {
     help("ON: the game's own Online > Battle Arenas work, on the project's server: make an arena (it gets a 5-character code), "
          "your friends find it by its code or in the list. 1-on-1 fights use rollback; the others in the arena watch them. "
          "While it is ON the Local Wireless rooms are not available: turn it OFF to play in them again. Used when the game starts again.");
+    {   /* (2026-11-02) tournaments: graphics.ini tournaments, read at the start (gfx_options.c gfx_online_menu_env). [restart] */
+        static int tn = -1, tn0;
+        if (tn < 0) { tn = gfx_tournaments(); tn0 = tn; }
+        if (onoff("tourn", tn != 0, true)) { tn = !tn; ini("tournaments", tn ? "on" : "off"); printf("menu: tournaments (the tournament server): %s (at the next start)\n", tn ? "on" : "off"); fflush(stdout); }
+        ImGui::SameLine(); ImGui::Text("Tournaments");
+        tag(1, tn != tn0);
+        help("ON: the game connects to the tournament server (the same server as Battle Arenas) instead of your group's Radmin network. "
+             "Then press F3 (or hold - for a second) for the tournament screen: sign up, check in and play your sets; it also opens by itself "
+             "when you must act. Turn it OFF to play in your group's rooms again. Used when the game starts again.");
+        if (tn != tn0 && ImGui::Button("Restart the game now##tourn")) restart_game();
+    }
     if (getenv("SSBU_ONLINE_MENU")) {                   /* (2026-11-02) the server's state, asked in the background (online_menu.inc) */
         int players = 0, ms = 0, na = 0, mem[32], most[32]; char codes[32][6];
         int st = online_menu_status(&players, &ms, &na, codes, mem, most, 32);
@@ -1636,7 +1655,250 @@ static void sec_arena(void) {
     help(rule);
 }
 
+/* ------------------------------------------------------------------ tournaments (lobby 1.7: net_relay.c net_tourney_*, tools/net/tournament.py) */
+static const char *t_set_name(const NetTourney &T, int i) {      /* "Winners round 2", "Losers final", "Grand final" ... */
+    static char b[48];
+    const NetTourneySet &s = T.sets[i];
+    int last = 0;
+    for (int k = 0; k < T.nsets; k++) if (T.sets[k].br == s.br && T.sets[k].round > last) last = T.sets[k].round;
+    if (s.br == 'G') snprintf(b, sizeof b, s.round == 1 ? "Grand final" : "Grand final reset");
+    else if (s.round == last) snprintf(b, sizeof b, "%s final", s.br == 'W' ? "Winners" : "Losers");
+    else snprintf(b, sizeof b, "%s round %d", s.br == 'W' ? "Winners" : "Losers", s.round);
+    return b;
+}
+static const char *t_player(const NetTourney &T, int e) {
+    return e == -1 ? "(bye)" : e < 0 || e >= T.nent ? "-" : T.ent[e].name;
+}
+static void sec_tourney(void) {
+    static NetTourney T;                                    /* (big: not on the stack) */
+    net_tourney_get(&T);
+    const ImVec4 green(0.45f, 0.9f, 0.45f, 1), amber(1, 0.8f, 0.2f, 1), gold(1.0f, 0.75f, 0.25f, 1), head(1.0f, 0.55f, 0.35f, 1.0f), red(1, 0.45f, 0.45f, 1);
+    NetStats ns;
+    net_stats_get(&ns);
+    if (ns.state != NET_CONNECTED) { help("Not connected to the tournament server. Turn on Experimental > Tournaments (just below Battle Arenas), then Restart the game now."); return; }
+    if (!T.known) { ImGui::TextDisabled("Asking the lobby..."); help("No answer after a few seconds: this lobby is an older version without tournaments."); return; }
+    if (T.off) { help("This lobby has no tournaments. They run on a lobby server that keeps accounts (your group's own server), not on a room inside a player's game."); return; }
+    /* the steps, always on top (owner: the players must manage alone) */
+    ImGui::TextColored(head, "How it works");
+    ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.25f, 1.0f), "You do not need this page to play: press F3 (or hold - for a second) for the tournament screen.");
+    ImGui::TextWrapped("1. Sign up: the tournament screen (F3) lists the open tournaments; a note appears when one opens.");
+    ImGui::TextWrapped("2. Check-in: before it starts, the screen opens by itself: press A to confirm you are here.");
+    ImGui::TextWrapped("3. Your set: the screen opens by itself. Strike / ban / pick stages with the d-pad and A when it is your turn (game 1: 1-2-1 strikes; later games: the winner bans, the loser picks).");
+    ImGui::TextWrapped("4. Then go to Smash, choose your fighter and press start: the match starts by itself with the chosen stage. After each game, press start again at the character select.");
+    ImGui::TextWrapped("5. Results count by themselves. Keep the game open between sets: the next one opens the screen by itself.");
+    ImGui::Separator();
+    if (!T.account) { ImGui::TextColored(amber, "You need an account on this lobby first: F1 > Online > Your account."); return; }
+    if (T.err[0]) ImGui::TextColored(strstr(T.err, "not counted") ? amber : red, "%s", T.err);
+    if (T.pending) ImGui::TextDisabled("Sending...");
+    float bw = ImGui::GetFontSize() * 11;
+    /* ---- your set */
+    if (T.set >= 0) {
+        ImGui::SetWindowFontScale(1.3f);
+        ImGui::TextColored(green, "Your set: against %s", T.opp);
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::Text("Game %d  -  you %d, %s %d  (first to %d)", T.game, T.mine, T.opp, T.theirs, T.need);
+        bool stage_phase = !strcmp(T.phase, "strike") || !strcmp(T.phase, "ban") || !strcmp(T.phase, "pick");
+        if (stage_phase) {
+            const char *verb = !strcmp(T.phase, "strike") ? "STRIKE" : !strcmp(T.phase, "ban") ? "BAN" : "PICK";
+            if (T.my_turn) ImGui::TextColored(amber, "YOUR TURN: %s %s.", verb, !strcmp(T.phase, "pick") ? "the stage to play" : T.left == 1 ? "1 stage" : "2 stages, one at a time");
+            else ImGui::TextDisabled("%s's turn to %s.", T.opp, !strcmp(T.phase, "strike") ? "strike" : !strcmp(T.phase, "ban") ? "ban" : "pick the stage");
+            for (int i = 0; i < T.npool; i++) {
+                bool gone = false;
+                for (int k = 0; k < T.nstruck; k++) if (!strcmp(T.struck[k], T.pool[i])) gone = true;
+                ImGui::PushID(i);
+                if (gone || !T.my_turn || T.pending) ImGui::BeginDisabled();
+                char lab[64]; snprintf(lab, sizeof lab, "%s%s", net_tourney_stage_name(T.pool[i]), gone ? " (out)" : "");
+                if (ImGui::Button(lab, ImVec2(bw * 1.4f, 0))) net_tourney_stage(T.focus, T.set, T.pool[i]);
+                if (gone || !T.my_turn || T.pending) ImGui::EndDisabled();
+                ImGui::PopID();
+                if (i % 3 != 2 && i + 1 < T.npool) ImGui::SameLine();
+            }
+        } else {
+            ImGui::TextColored(gold, "Stage: %s", net_tourney_stage_name(T.stage));
+            if (T.first == 2 && !T.ready_them) help("You lost the last game: the winner chooses a fighter first. Go to Smash and press start: you will see their fighter there and can still change yours.");
+            else if (T.first == 2) { ImGui::Text("%s chose %s.", T.opp, T.their_chara_name[0] ? T.their_chara_name : "a fighter"); help("Choose your fighter and press start (or, waiting already: hold B to go back and change)."); }
+            else help("Close F1, go to Smash, choose your fighter and press start: the match starts by itself when both of you are ready.");
+            ImGui::Text("You: %s   %s: %s", T.ready_me ? "ready" : "not ready", T.opp, T.ready_them ? "ready" : "not ready");
+        }
+        ImGui::Separator();
+    } else if (T.me >= 0 && T.status[0]) {
+        if (!strcmp(T.status, "wait")) ImGui::TextColored(amber, "No set to play now: your next one starts when its other player is known. Keep the game open.");
+        else if (!strcmp(T.status, "out")) ImGui::Text("You are out of this tournament. Thanks for playing!");
+        else if (!strcmp(T.status, "dq")) ImGui::TextColored(red, "You were disqualified.");
+        else if (!strcmp(T.status, "done")) ImGui::TextColored(gold, "Tournament over: you placed %d.", T.place);
+        ImGui::Separator();
+    }
+    /* ---- the list */
+    ImGui::TextColored(head, "Tournaments");
+    if (!T.n) ImGui::TextDisabled("None yet.");
+    for (int i = 0; i < T.n; i++) {
+        const NetTourneyItem &it = T.list[i];
+        ImGui::PushID(it.id);
+        bool sel = it.id == T.focus;
+        char lab[96]; snprintf(lab, sizeof lab, "%s%s", it.name, it.organizer ? "  (yours)" : "");
+        if (ImGui::Selectable(lab, sel, 0, ImVec2(ImGui::GetFontSize() * 16, 0))) net_tourney_look(it.id);
+        ImGui::SameLine(); ImGui::TextDisabled("%s, %d player%s", !strcmp(it.state, "signup") ? "sign-ups open" : it.state, it.players, it.players == 1 ? "" : "s");
+        if (!strcmp(it.state, "signup")) {
+            ImGui::SameLine();
+            if (it.signed_up) { if (ImGui::SmallButton("Withdraw")) net_tourney_simple(2, it.id); ImGui::SameLine(); ImGui::TextColored(green, "signed up"); }
+            else if (ImGui::SmallButton("Sign up")) net_tourney_simple(1, it.id);
+        }
+        ImGui::PopID();
+    }
+    if (T.can_create && ImGui::TreeNode("Make a tournament##tmk")) {
+        static char tname[33] = "";
+        static int bo = 1, b8 = 1, bf = 2, bans = 2, stocks = 2;     /* (indices: Bo3, Bo3, Bo5, 2 bans, 3 stocks) */
+        static const char *const k_bo[] = {"Best of 1", "Best of 3", "Best of 5", "Best of 7"};
+        static const char *const k_n[] = {"0", "1", "2", "3", "4", "5"};
+        ImGui::SetNextItemWidth(260); ImGui::InputTextWithHint("Name##tmk", "e.g. Friday weekly", tname, sizeof tname);
+        ImGui::SetNextItemWidth(160); ImGui::Combo("Sets##tmk", &bo, k_bo, 4);
+        ImGui::SetNextItemWidth(160); ImGui::Combo("Top 8 sets##tmk", &b8, k_bo, 4);
+        ImGui::SetNextItemWidth(160); ImGui::Combo("Finals (winners, losers, grand)##tmk", &bf, k_bo, 4);
+        ImGui::SetNextItemWidth(160); ImGui::Combo("Stage bans after game 1##tmk", &bans, k_n, 5);
+        ImGui::SetNextItemWidth(160); ImGui::Combo("Stocks##tmk", &stocks, k_n + 1, 5);
+        help("Stages: Battlefield, Small Battlefield, Final Destination, Pokemon Stadium 2 and Smashville to start; Town and City, Kalos, Yoshi's Story, Lylat Cruise, Hollow Bastion and Northern Cave as counterpicks. No items, no hazards.");
+        if (ImGui::Button("Make it##tmk", ImVec2(bw, 0))) net_tourney_create(tname, 2 * bo + 1, 2 * b8 + 1, 2 * bf + 1, bans, stocks + 1);
+        ImGui::TreePop();
+    }
+    ImGui::Separator();
+    if (!T.focus || !T.version) { if (T.focus) ImGui::TextDisabled("Loading the bracket..."); else help("Select a tournament above to see it."); return; }
+    /* ---- the tournament looked at */
+    bool org = false;
+    for (int i = 0; i < T.n; i++) if (T.list[i].id == T.focus && T.list[i].organizer) org = true;
+    ImGui::SetWindowFontScale(1.2f); ImGui::TextColored(head, "%s", T.name); ImGui::SetWindowFontScale(1.0f);
+    ImGui::TextDisabled("Organizer %s.  Sets best of %d (top 8: %d, finals: %d), %d stocks, %d bans.  %s", T.organizer, T.bo, T.bo_top8, T.bo_finals, T.stocks, T.bans,
+                        !strcmp(T.tstate, "signup") ? "Sign-ups open." : !strcmp(T.tstate, "running") ? "Running." : !strcmp(T.tstate, "done") ? "Over." : "Cancelled.");
+    if (!strcmp(T.tstate, "signup")) {
+        ImGui::TextColored(head, "Players (%d) - seeding: %s", T.nent, T.seed_mode);
+        if (org) {
+            static const char *const k_mode[] = {"By ladder rating", "Random", "Manual (as below)"};
+            int m = !strcmp(T.seed_mode, "random") ? 1 : !strcmp(T.seed_mode, "manual") ? 2 : 0, m0 = m;
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::Combo("Seeding##tsm", &m, k_mode, 3) && m != m0) net_tourney_seed_mode(T.focus, m);
+            help("Move players with Up / Down (the seeding becomes manual). Seed 1 meets the last seed first; 1 and 2 can only meet in a final.");
+        }
+        for (int i = 0; i < T.nent; i++) {
+            ImGui::PushID(1000 + i);
+            ImGui::Text("%2d. %s", i + 1, T.ent[i].name);
+            ImGui::SameLine(); if (T.ent[i].rating >= 0) ImGui::TextDisabled("(%d)", T.ent[i].rating); else ImGui::TextDisabled("(no rating)");
+            if (org) {
+                ImGui::SameLine(); if (i == 0) ImGui::BeginDisabled(); if (ImGui::SmallButton("Up")) net_tourney_move(T.focus, i, i - 1); if (i == 0) ImGui::EndDisabled();
+                ImGui::SameLine(); if (i + 1 == T.nent) ImGui::BeginDisabled(); if (ImGui::SmallButton("Down")) net_tourney_move(T.focus, i, i + 1); if (i + 1 == T.nent) ImGui::EndDisabled();
+                ImGui::SameLine(); if (ImGui::SmallButton("Remove")) net_tourney_dq(T.focus, i);
+            }
+            ImGui::PopID();
+        }
+        if (org) {
+            if (T.nent < 2) ImGui::BeginDisabled();
+            if (ImGui::Button("Start the tournament##tst", ImVec2(bw, 0))) net_tourney_simple(4, T.focus);
+            if (T.nent < 2) ImGui::EndDisabled();
+            ImGui::SameLine(); if (ImGui::Button("Cancel it##tcx", ImVec2(bw, 0))) net_tourney_simple(5, T.focus);
+            help("Start makes the bracket with this order and closes the sign-ups.");
+        }
+        return;
+    }
+    if (T.nplaces) {
+        ImGui::TextColored(head, "Standings");
+        for (int i = 0; i < T.nplaces; i++) ImGui::Text("%3d. %s", T.places[i][0], t_player(T, T.places[i][1]));
+    }
+    static int pick_set = -1;
+    static const char k_br[] = "WLG";
+    for (const char *bp = k_br; *bp; bp++) {
+        char br = *bp;
+        bool any = false;
+        for (int i = 0; i < T.nsets; i++) if (T.sets[i].br == br && strcmp(T.sets[i].state, "bye") && strcmp(T.sets[i].state, "skipped")) any = true;
+        if (!any) continue;
+        ImGui::TextColored(head, "%s", br == 'W' ? "Winners bracket" : br == 'L' ? "Losers bracket" : "Grand final");
+        for (int i = 0; i < T.nsets; i++) {
+            const NetTourneySet &s = T.sets[i];
+            if (s.br != br || !strcmp(s.state, "bye") || !strcmp(s.state, "skipped")) continue;
+            ImGui::PushID(2000 + i);
+            bool live = !strcmp(s.state, "ready") || !strcmp(s.state, "playing");
+            ImVec4 c = live ? amber : !strcmp(s.state, "done") || !strcmp(s.state, "forfeit") ? ImVec4(0.85f, 0.85f, 0.85f, 1) : ImVec4(0.55f, 0.55f, 0.55f, 1);
+            char lab[200];
+            snprintf(lab, sizeof lab, "%-22s %s %d - %d %s%s%s", t_set_name(T, i), t_player(T, s.p[0]), s.score[0], s.score[1], t_player(T, s.p[1]),
+                     s.winner >= 0 ? "   winner: " : live ? "   (playing)" : "", s.winner >= 0 ? t_player(T, s.winner) : "");
+            ImGui::PushStyleColor(ImGuiCol_Text, c);
+            if (ImGui::Selectable(lab, pick_set == i) && org && s.p[0] >= 0 && s.p[1] >= 0) pick_set = pick_set == i ? -1 : i;
+            ImGui::PopStyleColor();
+            if (org && pick_set == i) {
+                ImGui::Indent();
+                help("Organizer: set the result of this set by hand (a no-show, a mistake). Later sets follow by themselves.");
+                char b1[64], b2[64]; snprintf(b1, sizeof b1, "%s won", t_player(T, s.p[0])); snprintf(b2, sizeof b2, "%s won", t_player(T, s.p[1]));
+                if (ImGui::SmallButton(b1)) { net_tourney_result(T.focus, s.id, 0); pick_set = -1; }
+                ImGui::SameLine(); if (ImGui::SmallButton(b2)) { net_tourney_result(T.focus, s.id, 1); pick_set = -1; }
+                ImGui::SameLine(); if (ImGui::SmallButton("Play it again (clear)")) { net_tourney_result(T.focus, s.id, -1); pick_set = -1; }
+                char d1[48], d2[48]; snprintf(d1, sizeof d1, "DQ %s", t_player(T, s.p[0])); snprintf(d2, sizeof d2, "DQ %s", t_player(T, s.p[1]));
+                ImGui::SameLine(); if (ImGui::SmallButton(d1)) { net_tourney_dq(T.focus, s.p[0]); pick_set = -1; }
+                ImGui::SameLine(); if (ImGui::SmallButton(d2)) { net_tourney_dq(T.focus, s.p[1]); pick_set = -1; }
+                ImGui::Unindent();
+            }
+            ImGui::PopID();
+        }
+    }
+    if (org && !strcmp(T.tstate, "running")) { ImGui::Separator(); if (ImGui::Button("Cancel the tournament##tcx2", ImVec2(bw, 0))) net_tourney_simple(5, T.focus); }
+    help("The whole bracket is also on the lobby's web page: <lobby address>/tournaments");
+}
+
 /* ------------------------------------------------------------------ O1: Online rooms (net_relay.c net_rooms_get) */
+/* Your account (net_relay.c net_account_*; the lobby's side: tools/net/ladder.py): what the lobby calls this player, and the
+ * account code that moves the account to another PC */
+static void sec_account(void) {
+    NetLadder ld; net_ladder_get(&ld);
+    const char *name = net_online_name();
+    ImGui::TextColored(ImVec4(1, .55f, .35f, 1), "Your account");
+    if (ld.state == NET_LADDER_RANKED) {
+        ImGui::SameLine(); ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "%s", ld.text);
+        ImGui::SameLine(); ImGui::TextDisabled("  rating %d  #%d  sets %d-%d", ld.rating, ld.place, ld.wins, ld.losses);
+        if (name[0] && _stricmp(name, ld.text) && strncmp(name, "Player-", 7))
+            help("Your name here is not the account's: another account already has it, or it is not a valid name (2 to 24 characters). "
+                 "Choose another one in Experimental > Your name and restart the game.");
+        else if (!strncmp(ld.text, "Player", 6))
+            help("Give your account your own name: Experimental > Your name, then restart the game. The lobby renames the account if no one else has that name.");
+    } else if (ld.state == NET_LADDER_UNRANKED && !strcmp(ld.text, "banned")) {
+        ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "banned by the lobby's admin");
+    } else if (ld.state == NET_LADDER_UNRANKED) {
+        ImGui::SameLine(); ImGui::TextDisabled("none on this lobby (%s)", ld.text);
+        help("Accounts (and tournaments) live on a lobby server that keeps them, such as your group's own server: "
+             "Experimental > Online play > Lobby server. A room inside a player's game has none.");
+    } else if (ld.state == NET_LADDER_UNKNOWN) {
+        ImGui::SameLine(); ImGui::TextDisabled("asking the lobby...");
+    } else {
+        ImGui::SameLine(); ImGui::TextDisabled("off");
+        ImGui::Separator();
+        return;
+    }
+    static char code[128], typed[128], said[160];
+    static bool show;
+    if (ImGui::TreeNode("Account code: keep it, or move your account to another PC##acc")) {
+        help("The account code IS your account: whoever has it plays as you. Keep it like a password and never post it. "
+             "To use your account on another PC (or after installing again): copy the code here, then on the other PC "
+             "paste it below, press \"Use this code\" and restart the game.");
+        if (!code[0]) net_account_code(code, sizeof code);
+        if (!code[0]) ImGui::TextDisabled("This game has no account yet (it is made the first time online play is on).");
+        else {
+            if (show) ImGui::TextUnformatted(code); else ImGui::TextDisabled("SSBU-********-********-...  (hidden)");
+            if (ImGui::SmallButton(show ? "Hide##acc" : "Show##acc")) show = !show;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy##acc")) { ImGui::SetClipboardText(code); snprintf(said, sizeof said, "Copied: paste it somewhere safe (a note only you can read)."); }
+        }
+        ImGui::SetNextItemWidth(420);
+        ImGui::InputTextWithHint("##acc_typed", "paste an account code (SSBU-...)", typed, sizeof typed, ImGuiInputTextFlags_Password);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Paste##acc")) { const char *c = ImGui::GetClipboardText(); snprintf(typed, sizeof typed, "%s", c ? c : ""); }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Use this code##acc")) {
+            if (!typed[0]) snprintf(said, sizeof said, "Paste a code first.");
+            else if (code[0] && !strcmp(typed, code)) snprintf(said, sizeof said, "That is already this game's account.");
+            else if (net_account_use_code(typed)) { snprintf(said, sizeof said, "Done: restart the game to play with that account."); typed[0] = 0; }
+            else snprintf(said, sizeof said, "Not a valid account code: copy the whole code again (it starts with SSBU-).");
+        }
+        if (said[0]) { ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "%s", said); if (strstr(said, "restart")) { ImGui::SameLine(); if (ImGui::SmallButton("Restart the game now##acc")) restart_game(); } }
+        ImGui::TreePop();
+    }
+    ImGui::Separator();
+}
+
 static void sec_rooms(void) {
     static NetRoom rooms[32];
     static int sel = -1;
@@ -1646,6 +1908,7 @@ static void sec_rooms(void) {
         help("Online play is off: Experimental > Online play.");
         return;
     }
+    sec_account();
     {   const char *b = net_build_id(), *plus = strchr(b, '+'), *end = plus ? plus : b + strlen(b), *d = end;
         while (d > b && d[-1] != '-') d--;
         ImGui::Text("This game: version"); ImGui::SameLine();
@@ -1939,6 +2202,7 @@ static void draw_menu(int cw, int ch) {
     case SEC_EXPERIMENTAL: sec_experimental(); break;
     case SEC_ROOMS: sec_rooms(); break;
     case SEC_ARENA: sec_arena(); break;
+    case SEC_TOURNEY: sec_tourney(); break;
     case SEC_DLC: sec_dlc(); break;
     case SEC_LANG: sec_lang(); break;
     case SEC_LOG: sec_log(); break;
@@ -2103,6 +2367,7 @@ extern "C" void menu_shot_done(const char *path, int w, int h, int ok) {
 }
 
 /* ------------------------------------------------------------------ once per presented frame (render thread) */
+#include "tourney_card.inc"                      /* (2026-11-02) the tournament's cards and screen, without F1 */
 extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (!menu_enabled() || width <= 0 || height <= 0) return 0;
     long long fr = nvn_front_presents();
@@ -2138,10 +2403,11 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
     update_check();
+    tc_tick(b, down);                                    /* (2026-11-02) the tournament screen: its state, F3 / - held, what opens it by itself */
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !tc_visible()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -2225,6 +2491,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::TextUnformatted(text);
         ImGui::End();
     }
+    tc_draw(io);                                         /* (2026-11-02) the tournament's line, note and screen */
     if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();
 #ifndef _WIN32

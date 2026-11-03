@@ -36,6 +36,25 @@ void net_match_cancel(void) {}
 void net_match_get(NetMatch *o) { memset(o, 0, sizeof *o); o->state = MM_OFFLINE; o->players = o->searching = o->code_players = -1; }
 void net_ladder_get(NetLadder *o) { memset(o, 0, sizeof *o); o->state = NET_LADDER_OFF; o->last_outcome = -1; }   /* (ladder: off without online play) */
 void net_ladder_result(const NetLadderResult *r) { (void)r; }
+void net_tourney_get(NetTourney *o) { memset(o, 0, sizeof *o); o->me = o->set = -1; }   /* (tournaments: none without online play) */
+void net_tourney_peek(NetTourney *o) { net_tourney_get(o); }
+void net_tourney_look(int tid) { (void)tid; }
+void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks) { (void)name; (void)bo; (void)bo_top8; (void)bo_finals; (void)bans; (void)stocks; }
+void net_tourney_simple(int op, int tid) { (void)op; (void)tid; }
+void net_tourney_seed_mode(int tid, int mode) { (void)tid; (void)mode; }
+void net_tourney_move(int tid, int from, int to) { (void)tid; (void)from; (void)to; }
+void net_tourney_dq(int tid, int entrant) { (void)tid; (void)entrant; }
+void net_tourney_result(int tid, int set, int winner) { (void)tid; (void)set; (void)winner; }
+void net_tourney_stage(int tid, int set, const char *stage) { (void)tid; (void)set; (void)stage; }
+const char *net_tourney_stage_name(const char *stage) { return stage; }
+int net_tourney_queued(void) { return 0; }
+int net_tourney_turn(void) { return 0; }
+void net_tourney_ready(uint64_t chara, int confirm) { (void)chara; (void)confirm; }
+void net_tourney_unready(void) {}
+int net_tourney_match(char *stage, int n, int *stocks) { (void)stage; (void)n; (void)stocks; return 0; }
+int net_account_code(char *out, int n) { if (n > 0) out[0] = 0; return 0; }      /* (accounts: none without online play) */
+int net_account_use_code(const char *code) { (void)code; return 0; }
+const char *net_online_name(void) { return ""; }
 void net_arena_get(NetArena *o) { memset(o, 0, sizeof *o); }            /* (arena: nothing without online play) */
 void net_arena_join(int in) { (void)in; }
 int net_arena_turn(void) { return 0; }
