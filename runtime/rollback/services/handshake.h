@@ -22,6 +22,8 @@ typedef struct {
     uint32_t ctx_seed;
     uint8_t ctx_hist[0x60];
     uint8_t ctx_stage[0xb0];
+    uint8_t ctx_rules[0xb0];       /* (2026-11-03) match block + 0x4d0 .. 0x57f, the rest of the rules before the player records: two
+                                    * games with + 0x501 / + 0x503 different desynced from frame 1 (the host's copied, as ctx_stage) */
 } RbhMatch;
 #pragma pack(pop)
 int rbn_handshake_wanted(void);                         /* SSBU_RB_NET=net (not loop) and SSBU_RB_NET_HANDSHAKE not 0: env only */

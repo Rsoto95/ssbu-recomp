@@ -106,7 +106,7 @@ int rbn_bot_on(void) { return g_bot; }
  * (seconds, default 120). No agreement = this match is played locally (Final Destination, one stock) and left at once
  * (rb_rollback.c: player 1 walks off the stage), back to the menus; the other game is told (REFUSE) so that it stops waiting. */
 #include "handshake.h"
-#define RBH_PROTO 6                                     /* 3 (hs12): RbhMatch carries the stage set-up context; 4 (hs14): PADS end with a mode byte, the stage is drawn from both picks; 5 (R3 lwr): Local Wireless room matches, LAYOUT; 6 (2026-11-02): a Battle Arena's spectators (RBS_*; an older game refuses: native) */
+#define RBH_PROTO 7                                     /* 3 (hs12): RbhMatch carries the stage set-up context; 4 (hs14): PADS end with a mode byte, the stage is drawn from both picks; 5 (R3 lwr): Local Wireless room matches, LAYOUT; 6 (2026-11-02): a Battle Arena's spectators (RBS_*; an older game refuses: native) */
 enum { RBH_CHOICE = 0x48, RBH_PROPOSE = 0x49, RBH_ACCEPT = 0x4a, RBH_REFUSE = 0x4b, RBH_BLOCK = 0x4c, RBH_LAYOUT = 0x4d };      /* (R3 lwr) LAYOUT: a room match, each game's own player's control layout */
 #pragma pack(push, 1)
 typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t nonce, echo; RbhMatch m; } RbhMsg;

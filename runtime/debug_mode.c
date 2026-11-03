@@ -523,7 +523,7 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         me.chara[0] = rd64(st + 0x88); me.colour[0] = rd8(st + 0x90); me.has_layout[0] = (uint8_t)hs_layout(st, me.layout[0]);
         safe_read(sel, me.stage, sizeof me.stage);
         me.hazards = rd8(GA(0x7105309985ULL)); me.items = rd32(MELEE_INFO + 0x54); me.rule_kind = rd8(st + 5); me.stock = rd8(st + 0xa);
-        me.ctx_seed = rd32(GA(0x710530d380ULL)); safe_read(GA(0x71050c5ad0ULL), me.ctx_hist, sizeof me.ctx_hist); safe_read(MELEE_INFO + 0x420, me.ctx_stage, sizeof me.ctx_stage);   /* (hs12) the stage set-up's inputs (rb_hs.h) */
+        me.ctx_seed = rd32(GA(0x710530d380ULL)); safe_read(GA(0x71050c5ad0ULL), me.ctx_hist, sizeof me.ctx_hist); safe_read(MELEE_INFO + 0x420, me.ctx_stage, sizeof me.ctx_stage); safe_read(MELEE_INFO + 0x4d0, me.ctx_rules, sizeof me.ctx_rules);   /* (hs12) the stage set-up's inputs (rb_hs.h) */
         if (getenv("SSBU_RB_NET_WATCH")) { uint64_t off = strtoull(getenv("SSBU_RB_NET_WATCH"), NULL, 16); if (off <= 1) off = 0x98;      /* (hs12: =<hex offset in the match block>) */
             uint64_t w[1] = {MELEE_INFO + (off & ~7ull)}; printf("[rbnet] research: match block + 0x%llx at the handshake = %016llx\n", (unsigned long long)(off & ~7ull), (unsigned long long)rd64(w[0])); debug_watch(w, 1); }
         {   void rbn_arena_hint(int p1_is_network); rbn_arena_hint(rd8(st + 0x451) != 0); }      /* (2026-11-02, arenas) */
@@ -549,6 +549,10 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
                 wr32(GA(0x710530d380ULL), g_hs_m.ctx_seed);
                 for (int k = 0; k < (int)sizeof g_hs_m.ctx_hist; k++) wr8(GA(0x71050c5ad0ULL) + (uint64_t)k, g_hs_m.ctx_hist[k]);
                 for (int k = 0; k < (int)sizeof g_hs_m.ctx_stage; k++) wr8(MELEE_INFO + 0x420 + (uint64_t)k, g_hs_m.ctx_stage[k]);
+                {   uint8_t rl[0xb0]; safe_read(MELEE_INFO + 0x4d0, rl, sizeof rl);       /* (2026-11-03) the rest of the rules too */
+                    if (memcmp(rl, g_hs_m.ctx_rules, sizeof rl)) { int first = -1, cnt = 0; for (int k = 0; k < (int)sizeof rl; k++) if (rl[k] != g_hs_m.ctx_rules[k]) { if (first < 0) first = k; cnt++; }
+                        printf("[rbnet] handshake: the rules (match block + 0x4d0 .. 0x57f) taken from the host: %d bytes differed here (first + 0x%x: here %02x, host %02x)\n", cnt, 0x4d0 + first, rl[first], g_hs_m.ctx_rules[first]); }
+                    for (int k = 0; k < (int)sizeof g_hs_m.ctx_rules; k++) wr8(MELEE_INFO + 0x4d0 + (uint64_t)k, g_hs_m.ctx_rules[k]); }
                 printf("[rbnet] handshake: the stage set-up's inputs taken from the host (here they differed: seed word %s, history %s, stage block %s)\n", d & 1 ? "yes" : "no", d & 2 ? "yes" : "no", d & 4 ? "yes" : "no"); }
             /* the match's random seed: after this hook the game's set-up 0x71014d8620 stores the next value of the global
              * xorshift128 at 0x71052381c0 (4 words; advanced by the menus, so different on the two PCs) in match block
