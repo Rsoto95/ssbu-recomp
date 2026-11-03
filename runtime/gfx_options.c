@@ -39,6 +39,11 @@ static int gfx_ipv4(const char *v) { int a, b, c, d; char x; return sscanf(v, "%
 void gfx_online_menu_env(void) {
     gfx_options();
     if (!g_gfx_online_menu || getenv("SSBU_ONLINE_MENU")) return;
+    {   const char *was = getenv("SSBU_ONLINE");             /* (2026-11-03) a run asked to be offline stays offline: the installer's */
+        if (was && !_stricmp(was, "off")) {                 /* self-tests (SSBU_ONLINE=off) ran on the live server with Battle Arenas */
+            printf("graphics.ini online_menu = on, but this run is offline (SSBU_ONLINE=off): Battle Arenas off\n");     /* on: 19 SDK failures */
+            return;
+        } }
     char lobby[96]; snprintf(lobby, sizeof lobby, "%s:39500", g_gfx_online_menu_server);
     _putenv_s("SSBU_ONLINE_MENU", "1");
     _putenv_s("SSBU_ONLINE_MENU_SERVER", g_gfx_online_menu_server);
