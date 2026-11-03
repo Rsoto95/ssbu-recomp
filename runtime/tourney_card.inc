@@ -108,7 +108,7 @@ static void tc_tick(uint64_t b, uint64_t down) {
     {   int idx[NET_T_LIST], n = tc_open_list(idx);      /* a tournament open for sign-ups that the player is not in: a note at the top, once */
         for (int k = 0; k < n; k++) {
             const NetTourneyItem &it = g_tc.list[idx[k]];
-            if (!it.signed_up && it.id > g_tc_invite_for && !g_tc.own_id && !fight && !g_open) {     /* (never over a fight: after it) */
+            if (!it.signed_up && it.id > g_tc_invite_for && !g_tc.own_id && !fight && !g_open && gfx_online_notes()) {     /* (never over a fight: after it) */
                 g_tc_invite_for = it.id;
                 snprintf(g_tc_banner_title, sizeof g_tc_banner_title, "TOURNAMENT");
                 snprintf(g_tc_banner, sizeof g_tc_banner, "Tournament open: %s (%d players).\nTo sign up: press F3, or hold - (Minus) for a second.", it.name, it.players);
@@ -120,7 +120,7 @@ static void tc_tick(uint64_t b, uint64_t down) {
      * on): a short note at the top, once per wait, never over a fight (it comes after it) nor over F1 */
     if (g_tc.lq_known && g_tc.lq_waiting == 0) g_tc_lq_told = 0;
     else if (g_tc.lq_known && !g_tc.lq_in && g_tc.set < 0 && !g_tc.own_ladder && !g_tc_lq_told && !fight && !g_open && !g_tc_modal &&
-             !(g_tc.own_id && !strcmp(g_tc.own_state, "running")) && now >= g_tc_banner_until) {
+             !(g_tc.own_id && !strcmp(g_tc.own_state, "running")) && now >= g_tc_banner_until && gfx_online_notes()) {
         g_tc_lq_told = 1;
         snprintf(g_tc_banner_title, sizeof g_tc_banner_title, "LADDER");
         snprintf(g_tc_banner, sizeof g_tc_banner, "%d player%s searching for a ladder opponent right now.\nTo play: press F3 (or hold - for a second), then A on Ladder.",

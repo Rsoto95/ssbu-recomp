@@ -38,6 +38,8 @@ void gfx_online_menu_env(void);          /* (boot.c, first thing) online_menu = 
 int gfx_tournaments(void);               /* tournaments = off 0 | on 1: the game joins the tournament server's lobby (F1 > Online; from the next start) */
 int gfx_fight_sound(void);                /* fight_sound = off 0 | on 1: music and effects in online rollback fights (snapshot_ring.c) */
 void gfx_set_fight_sound(int on);         /* (the F1 menu: used from the next match) */
+int gfx_online_notes(void);               /* (2026-11-03) online_notes = on 1 | off 0: the notes at the top (someone searches the ladder, a tournament opened) */
+void gfx_set_online_notes(int on);        /* (the F1 menu: at once) */
 int gfx_sharpening(void);                 /* sharpening = 0 (off, default) .. 100 (nvn_vk_draw.c sharpen_present) */
 int gfx_screenshot_key(void);             /* screenshot_key = F1..F24 (a virtual key code) | off 0; default F12 (nvn_vk_draw.c) */
 const char *gfx_screenshot_dir(void);     /* screenshot_dir = a folder (UTF-8) | "" = <exe>\..\screenshots (nvn_vk_draw.c) */

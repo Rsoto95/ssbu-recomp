@@ -1696,6 +1696,18 @@ static void sec_tourney(void) {
     if (T.err[0]) ImGui::TextColored(strstr(T.err, "not counted") ? amber : red, "%s", T.err);
     if (T.pending) ImGui::TextDisabled("Sending...");
     float bw = ImGui::GetFontSize() * 11;
+    {   /* (2026-11-03) the notes at the top of the screen: someone searches the ladder, a tournament opened */
+        static int nt = -1;
+        if (nt < 0) nt = gfx_online_notes();
+        if (onoff("onotes", nt != 0, true)) {
+            nt = !nt; gfx_set_online_notes(nt); ini("online_notes", k_onoff[nt]);
+            printf("menu: online notes on screen: %s\n", k_onoff[nt]); fflush(stdout);
+        }
+        ImGui::SameLine(); ImGui::Text("Notes on screen (someone searches the ladder, a tournament opened)");
+        help("ON: a short note at the top for a few seconds when someone starts searching for a ladder opponent or a tournament opens. "
+             "It never shows during a fight (it waits for the fight's end). OFF: no notes; F3 still shows everything.");
+        ImGui::Separator();
+    }
     /* ---- (2026-11-03) the ladder queue (the same as F3 > Ladder) */
     if (T.lq_known) {
         ImGui::TextColored(head, "Ladder");

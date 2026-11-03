@@ -178,5 +178,5 @@ Arriba dice **cuántos están buscando rival ahora** (y en el juego, en F3 y en 
 
 **Avisos en el juego:** cuando alguien empieza a buscar en el ladder (y tú no estás buscando ni jugando un set), sale un
 aviso chico arriba por unos segundos ("1 player is searching for a ladder opponent right now"). Lo mismo cuando se abre un
-torneo. Estos avisos **nunca salen durante una pelea**: si estás peleando, aparecen cuando termina. Dale clic a un jugador
+torneo. Estos avisos **nunca salen durante una pelea**: si estás peleando, aparecen cuando termina. Para apagarlos: **F1 > Tournament > Notes on screen: OFF** (la pantalla F3 sigue mostrando todo). Dale clic a un jugador
 para ver su historial, o a un set para ver sus games.

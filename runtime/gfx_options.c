@@ -68,6 +68,9 @@ void gfx_online_menu_env(void) {
 static volatile int g_gfx_fight_sound;                /* fight_sound = off | on (snapshot_ring.c); the F1 menu changes it while running */
 int gfx_fight_sound(void) { gfx_options(); return g_gfx_fight_sound; }
 void gfx_set_fight_sound(int on) { gfx_options(); g_gfx_fight_sound = on; }
+static volatile int g_gfx_online_notes = 1;           /* (2026-11-03) online_notes = on | off (tourney_card.inc); the F1 menu changes it */
+int gfx_online_notes(void) { gfx_options(); return g_gfx_online_notes; }
+void gfx_set_online_notes(int on) { gfx_options(); g_gfx_online_notes = on; }
 static int g_gfx_sharpening;                         /* sharpening = 0 .. 100 */
 int gfx_sharpening(void) { gfx_options(); return g_gfx_sharpening; }
 static char g_gfx_shot_dir[400];                     /* screenshot_dir = a folder (UTF-8) | empty: <install>\screenshots */
@@ -223,6 +226,11 @@ static const char *const k_default_ini =
 ";   game. Used from the next match.\r\n"
 "fight_sound = off\r\n"
 "\r\n"
+"; online_notes = on | off\r\n"
+";   The short notes at the top of the screen (F1 > Tournament): someone is searching for a ladder opponent, a tournament\r\n"
+";   opened. They never show during a fight. off: no notes (the F3 screen still shows everything).\r\n"
+"online_notes = on\r\n"
+"\r\n"
 "; online_menu = off | on\r\n"
 ";   The game's own Online menu (Online > Battle Arenas) on the project's server (F1 > Experimental). on: arenas with\r\n"
 ";   rollback 1-on-1 fights and spectators; Local Wireless rooms are not available then. Used from the next start.\r\n"
@@ -370,6 +378,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
         else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
+        else if (!_stricmp(key, "online_notes")) g_gfx_online_notes = !(!_stricmp(val, "off") || !strcmp(val, "0"));   /* tourney_card.inc */
         else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
         else if (!_stricmp(key, "tournaments")) g_gfx_tournaments = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
         else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }
