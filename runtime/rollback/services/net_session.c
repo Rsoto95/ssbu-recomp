@@ -259,7 +259,8 @@ static int hs_rx(const uint8_t *p, int n) {
     case RBH_LAYOUT:                                    /* (R3 lwr) the other game's own player's control layout for this match; answered once with ours */
         if (m.nonce != g_match_id || !g_match_id || m.proto != RBH_PROTO) break;
         memcpy(g_lay_peer, m.m.layout[0], sizeof g_lay_peer); g_lay_peer_has = m.m.has_layout[0]; memcpy(g_lay_peer_ctl, m.m.ctx_hist, sizeof g_lay_peer_ctl); g_lay_have_peer = 1;
-        if (g_lay_have_mine && !m.echo) hs_send(&g_lay_mine, sizeof g_lay_mine);
+        if (g_lay_have_mine && !m.echo) { RbhMsg a = g_lay_mine; a.echo = 1; hs_send(&a, sizeof a); }     /* (2026-11-03) the answer is marked as one (echo 1): answered
+                                                         * with echo 0, each game answered the other's answer for ever (~21,000 messages a second, the ping ~60 ms) */
         break;
     case RBH_REFUSE:                                    /* about our wait, or from the other game's wait we deal with */
         if (!waiting || !((m.echo && m.echo == g_hs_nonce) || (g_hs_peer_nonce && m.nonce == g_hs_peer_nonce))) break;
@@ -901,6 +902,13 @@ static void on_check(long long cf, uint32_t ck) {
     uint32_t mine = (uint32_t)(g_hash[cf % HR] ^ (g_hash[cf % HR] >> 32));
     if (mine == ck) g_check_ok++;
     else { g_desync++; if (g_desync_first < 0) { g_desync_first = cf; printf("[rbnet] DESYNC: frame %lld checksum here %08x, the other game %08x\n", cf, mine, ck); fflush(stdout);
+            /* (2026-11-03) what each fighter had in that frame on THIS game (the other game's log has its own): position, damage,
+             * status, motion, motion frame, the script generators' hash; compared by hand, the first value that differs is the cause */
+            {   int x = (int)(cf % HR2);
+                for (int q = 0; q < g_unl[x] && q < 4; q++) { struct { int k, st; uint64_t mot; float mf, fx, fy, dmg; uint64_t rh; } r3; memcpy(&r3, g_ulines[x][q], sizeof r3);
+                    printf("[rbnet] DESYNC frame %lld, fighter line %d here: entry %d status %x motion %llx motion frame %.3f x %.4f y %.4f damage %.2f generators %016llx\n",
+                           cf, q, r3.k, r3.st, (unsigned long long)r3.mot, (double)r3.mf, (double)r3.fx, (double)r3.fy, (double)r3.dmg, (unsigned long long)r3.rh); }
+                fflush(stdout); }
             /* (2026-11-03, owner: "you should send an advice when that happens") the players are told at once */
             void menu_popup(const char *title, const char *text);
             menu_popup("Desync", "The two games no longer show the same fight (desync detected).\nWhat you see is not what the other player sees: finish or leave this fight.\nThe log has the details (it is sent to the group's server when the game closes).");
