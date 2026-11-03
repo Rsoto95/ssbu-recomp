@@ -85,6 +85,7 @@ import json
 import os
 import secrets
 import queue
+import re
 import hashlib
 import hmac
 import select
@@ -389,7 +390,8 @@ class TourneyMixin:
                     return "a set is a best of 1, 3, 5 or 7"
             if bans > 4 or not 1 <= stocks <= 5:
                 return "0 to 4 bans, 1 to 5 stocks"
-            t = self.tourneys.create(name, pid, {"bo": bo, "bo_top8": b8, "bo_finals": bf, "bans": bans, "stocks": stocks,
+            noshow = args[37] * 60 if len(args) > 37 else 600     # (2026-11-03) the game's no-show minutes (an older game: 10)
+            t = self.tourneys.create(name, pid, {"bo": bo, "bo_top8": b8, "bo_finals": bf, "bans": bans, "stocks": stocks, "noshow": min(noshow, 7200),
                                                  "part": [c.part[0].decode("ascii", "replace"), c.part[1]], "organizer_name": c.ladder_why})
             c.t_focus = t.id
             self.say("tournament %d \"%s\" made by %s" % (t.id, name, c.ladder_why))
@@ -789,6 +791,8 @@ class TourneyMixin:
         elif action == "result":
             w = int(a["winner"])
             t.override(int(a["set"]), None if w < 0 else w)
+        elif action == "noshow":
+            t.set_noshow(int(a.get("minutes", 10)))
         elif action == "feature":
             t.feature(int(a["set"]), str(a.get("code", "")))
         else:
@@ -806,6 +810,7 @@ class Lobby(TourneyMixin):
     def __init__(self, sock, verbose, search_for=SEARCH_FOR, match_for=MATCH_FOR, ladder=None, arena_streak=3, tourney_admins=None):
         self.sock, self.verbose, self.ladder = sock, verbose, ladder
         self.tourneys = tournament_mod.Store(ladder.db) if ladder is not None and tournament_mod is not None else None
+        self.icons_dir = ""           # (2026-11-03) the tournament pages' fighter icons (main: --icons-dir)
         self.tourney_admins = {x.lower() for x in tourney_admins} if tourney_admins else None   # (None: any account may organize)
         self.t_reports = {}       # match seed -> {"at", "tid", "sid", "by": {side: report}}
         self.t_counted = set()    # match seeds already counted (both games send their RESULT)
@@ -1558,6 +1563,25 @@ def tourney_list_json(path):
         db.close()
 
 
+def game_charas(g):
+    """a recorded game's two fighters (ui_chara ids by side; None when not known)"""
+    c = g.get("chara")
+    return (list(c) + [None, None])[:2] if isinstance(c, (list, tuple)) else [None, None]
+
+
+# (2026-11-03) fighter icons for the tournament pages: PNG files the server's admin puts in the icons folder
+# (--icons-dir; default: "icons" beside the ladder's database), named by the fighter's internal name (mario.png,
+# captain.png, ...: tournament.FIGHTERS). Nothing of the game ships with this file; a missing icon shows the initials.
+ICON_NAME_RE = re.compile(r"^[a-z0-9_]{1,24}$")
+
+
+def icon_list(folder):
+    try:
+        return sorted(f[:-4] for f in os.listdir(folder) if f.endswith(".png") and ICON_NAME_RE.match(f[:-4]))
+    except OSError:
+        return []
+
+
 def tourney_json(path, tid):
     """/tournament/<id>.json: the bracket for the web page (names, never account ids)"""
     db = sqlite3.connect(path)
@@ -1578,7 +1602,13 @@ def tourney_json(path, tid):
         sets.append({"id": i, "bracket": st["br"], "round": st["round"], "state": v["state"], "bo": v["bo"], "score": t.score(i),
                      "by": r.get("by", ""), "featured": t.featured(i),
                      "players": [None if x is None else "(bye)" if x == tournament_mod.BYE else names[x] for x in v["p"]],
-                     "winner": None if v["winner"] in (None, tournament_mod.BYE) else names[v["winner"]]})
+                     "winner": None if v["winner"] in (None, tournament_mod.BYE) else names[v["winner"]],
+                     # (2026-11-03) game by game: the stage and the two fighters (by side), for the set's window on the page
+                     "games": [{"winner": g.get("winner"),
+                                "stage": tournament_mod.STAGE_NAMES.get(g.get("stage") or "", g.get("stage") or ""),
+                                "chars": [tournament_mod.chara_name(x) if isinstance(x, int) else "" for x in game_charas(g)],
+                                "keys": [tournament_mod.chara_key(x) if isinstance(x, int) else "" for x in game_charas(g)]}
+                               for g in r.get("games", [])]})
     return {"id": t.id, "name": t.name, "state": t.state, "organizer": t.rules.get("organizer_name", ""),
             "seed_mode": t.seed_mode,
             "rules": {k: t.rules.get(k) for k in ("bo", "bo_top8", "bo_finals", "bans", "stocks", "checkin", "rated", "noshow", "turn_for")},
@@ -1617,7 +1647,30 @@ button.small { font-size: 12px; padding: 2px 6px; }
 table.ent { border-collapse: collapse; width: 100%; } table.ent td, table.ent th { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: left; }
 table.ent th { font-size: 12px; color: var(--muted); } .tag { font-size: 12px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); }
 .tag.in { color: var(--win); border-color: var(--win); } .tag.out { color: var(--muted); }
-</style></head><body><main><div id="login"></div><div id="m"><p class="sub">Cargando...</p></div></main><script>
+.set.open { cursor: pointer; } .set.open:hover { border-color: var(--accent); }
+.set .more { font-size: 11px; color: var(--muted); padding: 2px 9px 4px; border-top: 1px solid var(--line); }
+dialog#gd { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--fg); padding: 0; width: min(560px, calc(100vw - 32px)); }
+dialog#gd::backdrop { background: rgba(0, 0, 0, .55); }
+#gd .hd { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
+#gd .hd h3 { margin: 0; font-size: 17px; } #gd .hd p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+#gd .bd { padding: 10px 16px 16px; max-height: 70vh; overflow-y: auto; }
+#gd .g { display: grid; grid-template-columns: 56px 1fr; gap: 4px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+#gd .g:last-child { border-bottom: 0; } #gd .gn { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; }
+#gd .stage { font-weight: 600; } #gd .fx { display: flex; justify-content: space-between; gap: 8px; }
+#gd .fx span { flex: 1; } #gd .fx span:last-child { text-align: right; } #gd .fx .w { color: var(--win); font-weight: 600; }
+#gd .fx small { display: block; color: var(--muted); font-weight: 400; } #gd .fx .w small:after { content: " \\2713"; color: var(--win); }
+#gd .none { color: var(--muted); }
+.fi { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 22px; height: 22px; border-radius: 50%;
+      color: #fff; font-size: 10px; font-weight: 700; letter-spacing: -.02em; margin-right: 6px; vertical-align: middle;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .25); }
+.set div.p > span:first-child { display: inline-flex; align-items: center; min-width: 0; }
+#gd .fx > span { display: flex; align-items: center; gap: 0; } #gd .fx > span:last-child { flex-direction: row-reverse; text-align: right; }
+#gd .fx > span:last-child .fi { margin: 0 0 0 6px; } #gd .fx .fi { width: 30px; height: 30px; font-size: 12px; }
+img.fi { background: transparent; box-shadow: none; border-radius: 0; object-fit: contain; }
+.fis { display: inline-flex; gap: 3px; margin-left: 7px; vertical-align: middle; } .fis .fi { margin: 0; width: 20px; height: 20px; font-size: 9px; }
+li { margin: 3px 0; }
+</style></head><body><main><div id="login"></div><div id="m"><p class="sub">Cargando...</p></div></main>
+<dialog id="gd"><div class="hd"><div><h3 id="gd_t"></h3><p id="gd_s"></p></div><button id="gd_x" aria-label="Cerrar">&times;</button></div><div class="bd" id="gd_b"></div></dialog><script>
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const m = document.getElementById("m"), lg = document.getElementById("login");
 const parts = location.pathname.split("/").filter(Boolean), last = parts[parts.length - 1], id = /^[0-9]+$/.test(last) ? last : null;
@@ -1705,10 +1758,33 @@ function showLogin() {
   document.getElementById("lb").onclick = login;
 }
 function msgHtml() { return msg ? "<p class='msg " + (msgOk ? "ok" : "err") + "'>" + esc(msg) + "</p>" : ""; }
+// (2026-11-03) the fighter's badge: its initials on a colour of its own (no game art on this public page)
+let ICONS = new Set(), NKEY = {};                  // the icons the server has (icons.json), fighter name -> internal name
+function fi(name) {
+  if (!name) return "";
+  const k = NKEY[name];
+  if (k && ICONS.has(k)) return "<img class='fi img' src='" + base + "icons/" + k + ".png' alt='" + esc(name) + "' title='" + esc(name) + "'>";
+  const w = name.replace(/[^A-Za-z0-9 ]/g, " ").trim().split(/\\s+/).filter(Boolean);
+  const ini = w.length > 1 ? w[0][0] + w[1][0] : (w[0] || "?").slice(0, 2);
+  let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return "<span class=fi style='background:hsl(" + h + " 55% 42%)' title='" + esc(name) + "'>" + esc(ini.charAt(0).toUpperCase() + ini.slice(1)) + "</span>";
+}
+function setChars(s, i) {                            // every fighter side i used in set s, in the order first used
+  const out = []; (s.games || []).forEach(g => { const c = g.chars && g.chars[i]; if (c && !out.includes(c)) out.push(c); });
+  return out.map(fi).join("");
+}
+function mains(t) {                                   // every fighter each player used in this tournament, the most played first
+  const n = {};
+  t.sets.forEach(s => (s.games || []).forEach(g => [0, 1].forEach(i => {
+    const p = s.players[i], c = g.chars && g.chars[i]; if (!p || !c) return;
+    (n[p] = n[p] || {})[c] = (n[p][c] || 0) + 1; })));
+  const out = {}; for (const p in n) out[p] = Object.keys(n[p]).sort((a, b) => n[p][b] - n[p][a]);
+  return out;
+}
 function card(s, t, org) {
   if (s.state === "skipped") return "";
   const row = i => { const p = s.players[i]; return "<div class='p " + (p == null ? "tbd" : s.winner && s.winner === p ? "w" : "") + "'><span>" +
-    esc(p == null ? "-" : p) + "</span><span class=n>" + (s.state === "done" || s.state === "playing" ? s.score[i] : "") + "</span></div>"; };
+    esc(p == null ? "-" : p) + "<span class=fis>" + setChars(s, i) + "</span></span><span class=n>" + (s.state === "done" || s.state === "playing" ? s.score[i] : "") + "</span></div>"; };
   let tools = "";
   if (org && t.state === "running" && s.players[0] != null && s.players[1] != null && s.players[0] !== "(bye)" && s.players[1] !== "(bye)" &&
       ["ready", "playing", "done", "forfeit"].includes(s.state)) {
@@ -1717,13 +1793,16 @@ function card(s, t, org) {
             (s.state !== "done" && s.state !== "forfeit" ? "<button class=small data-feat=" + s.id + ">" + (s.featured ? "Quitar del stream" : "En stream") + "</button>" : "") + "</div>";
   }
   const by = (s.by === "noshow" ? " (no se presentó)" : s.by === "organizer" ? " (organizador)" : "") + (s.featured ? " - en stream, arena " + s.featured : "");
-  return "<div class='set" + (s.state === "playing" || s.state === "ready" ? " live" : "") + "' title='mejor de " + s.bo + by + "'>" + row(0) + row(1) + tools + "</div>";
+  const n = (s.games || []).length;
+  const more = n ? "<div class=more>" + n + (n === 1 ? " game" : " games") + " &middot; ver escenarios y personajes</div>" : "";
+  return "<div class='set" + (s.state === "playing" || s.state === "ready" ? " live" : "") + (n ? " open' data-gd=" + s.id : "'") +
+         " title='mejor de " + s.bo + by + "'>" + row(0) + row(1) + more + tools + "</div>";
 }
 function bracket(t, br, title, org) {
   const sets = t.sets.filter(s => s.bracket === br && s.players[0] !== "(bye)" && s.players[1] !== "(bye)");
   if (!sets.length) return "";
   const rounds = [...new Set(sets.map(s => s.round))].sort((a, b) => a - b);
-  return "<h2>" + title + "</h2><div class=row>" + rounds.map(r => "<div class=col><h3>" + (br === "G" ? (r === 1 ? "Gran final" : "Reset") : "Ronda " + r) +
+  return "<h2>" + title + "</h2><div class=row>" + rounds.map(r => "<div class=col><h3>" + roundTitle(t, br, r) +
     "</h3>" + sets.filter(s => s.round === r).map(s => card(s, t, org)).join("") + "</div>").join("") + "</div>";
 }
 function createForm() {
@@ -1767,16 +1846,20 @@ function orgPanel(t) {
     h += " Seeding: <select id=sm>" + [["rating", "por rating"], ["random", "al azar"], ["manual", "manual"]].map(x =>
          "<option value=" + x[0] + (t.seed_mode === x[0] ? " selected" : "") + ">" + x[1] + "</option>").join("") + "</select> ";
   }
-  if (t.state !== "done" && t.state !== "cancelled") h += btn("cancel", "Cancelar el torneo");
+  if (t.state !== "done" && t.state !== "cancelled") {
+    h += "<p class=sub style='margin-top:10px'>Si tu rival no llega a Smash en <input id=ns type=number min=0 max=120 style='width:70px' value=" +
+         Math.round((t.rules.noshow || 0) / 60) + "> minutos, gana el que llegó (0: nunca, lo decides tú). <button class=small id=nsb>Guardar</button></p>";
+    h += btn("cancel", "Cancelar el torneo");
+  }
   return h + msgHtml() + "</div>";
 }
 function players(t, org) {
-  const open = t.state === "signup" || t.state === "checkin";
-  let h = "<h2>Jugadores (" + t.entrants.length + ")</h2><table class=ent><tr><th>Seed</th><th>Jugador</th><th>Rating</th>" +
+  const open = t.state === "signup" || t.state === "checkin", mn = mains(t);
+  let h ="<h2>Jugadores (" + t.entrants.length + ")</h2><table class=ent><tr><th>Seed</th><th>Jugador</th><th>Rating</th>" +
           (t.state === "checkin" ? "<th>Check-in</th>" : "") + (org ? "<th></th>" : "") + "</tr>";
   t.entrants.forEach((e, i) => {
     h += "<tr><td class=n>" + e.seed + "</td><td" + (e.dq ? " style='text-decoration:line-through;color:var(--muted)'" : "") + ">" + esc(e.name) +
-         "</td><td class=n>" + (e.rating == null ? "-" : e.rating) + "</td>" +
+         "<span class=fis>" + (mn[e.name] || []).map(fi).join("") + "</span></td><td class=n>" + (e.rating == null ? "-" : e.rating) + "</td>" +
          (t.state === "checkin" ? "<td>" + (e.in ? "<span class='tag in'>listo</span>" : "<span class='tag out'>falta</span>") + "</td>" : "");
     if (org) {
       h += "<td>";
@@ -1790,12 +1873,41 @@ function players(t, org) {
   });
   return h + "</table>";
 }
+// (2026-11-03) the rounds' usual names: the last three of each bracket are its Final, Semifinal and Quarterfinal
+function roundTitle(t, br, r) {
+  if (br === "G") return r === 1 ? "Grand Final" : "Grand Final Reset";
+  const last = Math.max(...t.sets.filter(x => x.bracket === br).map(x => x.round)), side = br === "W" ? "Winners " : "Losers ";
+  return side + (r === last ? "Final" : r === last - 1 ? "Semifinal" : r === last - 2 ? "Quarterfinal" : "Round " + r);
+}
+function roundName(t, s) { return roundTitle(t, s.bracket, s.round); }
+function showGames(t, s) {
+  const p = [s.players[0] || "-", s.players[1] || "-"];
+  document.getElementById("gd_t").textContent = p[0] + " " + s.score[0] + " - " + s.score[1] + " " + p[1];
+  document.getElementById("gd_s").textContent = roundName(t, s) + " · mejor de " + s.bo + (s.by === "organizer" ? " · resultado puesto por el organizador" : "");
+  const side = (g, i) => "<span class='" + (g.winner === i ? "w" : "") + "'>" + fi(g.chars[i]) + "<span>" +
+                         (g.chars[i] ? esc(g.chars[i]) : "<span class=none>personaje sin dato</span>") + "<small>" + esc(p[i]) + "</small></span></span>";
+  document.getElementById("gd_b").innerHTML = (s.games || []).map((g, k) =>
+    "<div class=g><div class=gn>Game " + (k + 1) + "</div><div><div class=stage>" + (g.stage ? esc(g.stage) : "<span class=none>escenario sin dato</span>") +
+    "</div><div class=fx>" + side(g, 0) + side(g, 1) + "</div></div></div>").join("") || "<p class=none>Sin games registrados.</p>";
+  const d = document.getElementById("gd");
+  if (d.showModal) { if (!d.open) d.showModal(); } else d.setAttribute("open", "");
+}
+(() => {
+  const d = document.getElementById("gd"), close = () => d.close ? d.close() : d.removeAttribute("open");
+  document.getElementById("gd_x").onclick = close;
+  d.addEventListener("click", e => { if (e.target === d) close(); });       // a click on the backdrop closes it
+})();
 function wire(t) {
+  document.querySelectorAll("[data-gd]").forEach(el => el.onclick = e => {
+    if (e.target.closest("button")) return;                                   // (the organizer's buttons on the card)
+    showGames(t, t.sets.find(x => x.id === +el.dataset.gd));
+  });
   document.querySelectorAll("[data-a]").forEach(b => b.onclick = () => {
     if (b.dataset.a === "cancel" && !confirm("¿Cancelar el torneo para todos?")) return;
     act(b.dataset.a, {});
   });
   const sm = document.getElementById("sm"); if (sm) sm.onchange = () => act("seed_mode", {mode: sm.value});
+  const nsb = document.getElementById("nsb"); if (nsb) nsb.onclick = () => act("noshow", {minutes: +document.getElementById("ns").value});
   document.querySelectorAll("[data-mv]").forEach(b => b.onclick = () => act("move", {i: +b.dataset.mv, j: +b.dataset.to}));
   document.querySelectorAll("[data-ci]").forEach(b => b.onclick = () => act("check_in", {i: +b.dataset.ci}));
   document.querySelectorAll("[data-dq]").forEach(b => b.onclick = () => {
@@ -1821,18 +1933,27 @@ async function load() {
   }
   const r = await fetch(id + ".json"); if (!r.ok) { m.innerHTML = "<p>Ese torneo no existe.</p>"; return; }
   const t = await r.json();
+  t.sets.forEach(s => (s.games || []).forEach(g => [0, 1].forEach(i => { if (g.chars && g.chars[i] && g.keys && g.keys[i]) NKEY[g.chars[i]] = g.keys[i]; })));
   const org = !!(me && me.name.toLowerCase() === String(t.organizer).toLowerCase());
+  const mn = mains(t);
   m.innerHTML = "<p><a href='../tournaments'>&larr; Torneos</a></p><h1>" + esc(t.name) + "</h1><p class=sub>" + esc(ST[t.state] || t.state) + " &middot; organiza " + esc(t.organizer) +
-    " &middot; mejor de " + t.rules.bo + " (top 8: " + t.rules.bo_top8 + ", finales: " + t.rules.bo_finals + ") &middot; " + t.rules.stocks + " stocks &middot; " + t.rules.bans + " bans</p>" +
+    " &middot; mejor de " + t.rules.bo + " (top 8: " + t.rules.bo_top8 + ", finales: " + t.rules.bo_finals + ") &middot; " + t.rules.stocks + " stocks &middot; " + t.rules.bans + " bans &middot; " +
+    (t.rules.noshow ? "no se presentó: " + Math.round(t.rules.noshow / 60) + " min" : "no se presentó: lo decide el organizador") + "</p>" +
     (org ? orgPanel(t) : "") +
-    (t.standings.length ? "<h2>Posiciones</h2><ol>" + t.standings.map(s => "<li value=" + s.place + ">" + esc(s.name) + "</li>").join("") + "</ol>" : "") +
+    (t.standings.length ? "<h2>Posiciones</h2><ol>" + t.standings.map(s => "<li value=" + s.place + ">" + esc(s.name) + "<span class=fis>" + (mn[s.name] || []).map(fi).join("") + "</span></li>").join("") + "</ol>" : "") +
     bracket(t, "W", "Winners", org) + bracket(t, "L", "Losers", org) + bracket(t, "G", "Gran final", org) + players(t, org) +
     "<h2>Escenarios</h2><p>Para empezar: " + t.stages.starters.map(esc).join(", ") + "<br>Counterpicks: " + t.stages.counterpicks.map(esc).join(", ") + "</p>";
   wire(t);
-  if (["running", "signup", "checkin"].includes(t.state)) timer = setTimeout(load, 5000);
+  if (["running", "signup", "checkin"].includes(t.state)) timer = setTimeout(autoLoad, 5000);
+}
+function autoLoad() {                                 // (not while the organizer types in a field of the page, nor with a set's window open)
+  const a = document.activeElement, d = document.getElementById("gd");
+  if ((a && m.contains(a) && /^(INPUT|SELECT)$/.test(a.tagName)) || (d && d.open)) { timer = setTimeout(autoLoad, 2000); return; }
+  load();
 }
 (async () => {
   if (tok) { const r = await api("me", {}); if (!r.error) me = r; else { tok = ""; try { localStorage.removeItem("ssbu_org_token"); } catch (e) {} } }
+  try { ICONS = new Set(await (await fetch(base + "icons.json")).json()); } catch (e) {}
   showLogin(); load();
 })();
 </script></body></html>
@@ -1869,6 +1990,18 @@ def start_status_server(lobby, bind, port, started):
                 return 200, json.dumps(ld.table()).encode(), "application/json"
             if lobby.tourneys is not None and path == "/tournaments":
                 return 200, TOURNEY_PAGE.encode(), "text/html; charset=utf-8"
+            if lobby.tourneys is not None and path == "/icons.json":
+                return 200, json.dumps(icon_list(lobby.icons_dir)).encode(), "application/json"
+            if lobby.tourneys is not None and path.startswith("/icons/") and path.endswith(".png") and lobby.icons_dir:
+                name = path[len("/icons/"):-len(".png")]
+                if ICON_NAME_RE.match(name):
+                    try:
+                        with open(os.path.join(lobby.icons_dir, name + ".png"), "rb") as f:
+                            data = f.read(512 * 1024 + 1)
+                        if len(data) <= 512 * 1024 and data[:8] == b"\x89PNG\r\n\x1a\n":
+                            return 200, data, "image/png"
+                    except OSError:
+                        pass
             if lobby.tourneys is not None and path == "/tournaments.json":
                 return 200, json.dumps(tourney_list_json(ld.path)).encode(), "application/json"
             if lobby.tourneys is not None and path.startswith("/tournament/"):
@@ -1970,6 +2103,7 @@ def main():
     ap.add_argument("--account-unban", metavar="NAME", help="accounts: lift a ban, and exit")
     ap.add_argument("--account-delete", metavar="NAME", help="accounts: delete one (its game signs up again as a new account), and exit")
     ap.add_argument("--tournament-admins", default="", help="tournaments: the account names that may make them, comma-separated (empty: any account)")
+    ap.add_argument("--icons-dir", default="", help="tournament pages: folder of fighter icons <name>.png (default: icons beside --ladder-db)")
     ap.add_argument("--arena-streak", type=int, default=3, help="arena: wins in a row after which the winner goes to the back of the queue too (default 3, 0: no limit)")
     ap.add_argument("--ladder-stages", default="", help="ladder: the legal stages, comma-separated stage ids (match block + 0x420, hex or decimal; empty: any)")
     o = ap.parse_args()
@@ -2005,6 +2139,7 @@ def main():
     sock.bind((o.bind, o.port))
     admins = [x.strip() for x in o.tournament_admins.split(",") if x.strip()] or None
     lobby = Lobby(sock, o.verbose, o.search_secs, o.match_secs, ladder, o.arena_streak, admins)
+    lobby.icons_dir = o.icons_dir or (os.path.join(os.path.dirname(os.path.abspath(o.ladder_db)), "icons") if o.ladder_db else "")
     lobby.say("lobby on UDP %s:%d (protocol SU %d)" % (o.bind, o.port, PROTO))
     if ladder is not None:
         lobby.say("ladder: %s (%s)" % (o.ladder_db, "open sign-up" if o.ladder_open else "by invitation"))

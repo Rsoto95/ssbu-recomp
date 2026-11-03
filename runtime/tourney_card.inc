@@ -27,9 +27,16 @@ static int tc_fight_on(void) { return 0; }
 #endif
 static int tc_is_stage_phase(const NetTourney &t) { return t.set >= 0 && (!strcmp(t.phase, "strike") || !strcmp(t.phase, "ban") || !strcmp(t.phase, "pick")); }
 static int tc_struck(const NetTourney &t, const char *s) { for (int i = 0; i < t.nstruck; i++) if (!strcmp(t.struck[i], s)) return 1; return 0; }
-static const char *tc_round_name(char br, int round, char *out, int n) {
-    if (br == 'G') snprintf(out, (size_t)n, round == 2 ? "Grand final reset" : "Grand final");
-    else snprintf(out, (size_t)n, "%s round %d", br == 'L' ? "Losers" : "Winners", round);
+/* (2026-11-03) the rounds' usual names: the last three rounds of a bracket are its Final, Semifinal and Quarterfinal */
+static const char *tc_round_name(const NetTourney &t, char br, int round, char *out, int n) {
+    int last = 0;
+    for (int k = 0; k < t.nsets; k++) if (t.sets[k].br == br && t.sets[k].round > last) last = t.sets[k].round;
+    const char *side = br == 'L' ? "Losers" : "Winners";
+    if (br == 'G') snprintf(out, (size_t)n, round == 2 ? "Grand Final Reset" : "Grand Final");
+    else if (last && round == last) snprintf(out, (size_t)n, "%s Final", side);
+    else if (last && round == last - 1) snprintf(out, (size_t)n, "%s Semifinal", side);
+    else if (last && round == last - 2) snprintf(out, (size_t)n, "%s Quarterfinal", side);
+    else snprintf(out, (size_t)n, "%s Round %d", side, round);
     return out;
 }
 static void tc_open(int on, int automatic) {
@@ -190,7 +197,7 @@ static void tc_draw_set(void) {
     ImGui::SetWindowFontScale(1.5f);
     ImGui::TextColored(TC_GOLD, "vs %s", t.opp);
     ImGui::SetWindowFontScale(1.0f);
-    ImGui::Text("%s  -  best of %d  -  game %d  -  score %d - %d", tc_round_name(t.br, t.round, rn, sizeof rn), t.set_bo ? t.set_bo : t.need * 2 - 1, t.game, t.mine, t.theirs);
+    ImGui::Text("%s  -  best of %d  -  game %d  -  score %d - %d", tc_round_name(t, t.br, t.round, rn, sizeof rn), t.set_bo ? t.set_bo : t.need * 2 - 1, t.game, t.mine, t.theirs);
     ImGui::Separator();
     if (tc_is_stage_phase(t)) {
         const char *verb = !strcmp(t.phase, "strike") ? "STRIKE" : !strcmp(t.phase, "ban") ? "BAN" : "PICK";
@@ -245,7 +252,7 @@ static void tc_draw_bracket(void) {
         const NetTourneySet &s = t.sets[i];
         if (t.me < 0 || (s.p[0] != t.me && s.p[1] != t.me) || !strcmp(s.state, "skipped")) continue;
         int side = s.p[0] == t.me ? 0 : 1, o = s.p[1 - side];
-        char rn[48]; tc_round_name(s.br, s.round, rn, sizeof rn);
+        char rn[48]; tc_round_name(t, s.br, s.round, rn, sizeof rn);
         const char *on = o >= 0 && o < t.nent ? t.ent[o].name : o == -1 ? "(bye)" : "?";
         ImVec4 c = !strcmp(s.state, "done") || !strcmp(s.state, "forfeit") ? (s.winner == t.me ? TC_GREEN : TC_RED) : TC_GOLD;
         ImGui::TextColored(c, "%-22s vs %-20s %d - %d  %s", rn, on, s.score[side], s.score[1 - side],
@@ -253,7 +260,7 @@ static void tc_draw_bracket(void) {
         shown++;
     }
     if (!shown) ImGui::TextColored(TC_DIM, "No sets yet.");
-    if (t.next_br) ImGui::Text("Next: %s round %d vs %s", t.next_br == 'L' ? "Losers" : t.next_br == 'G' ? "Grand final" : "Winners", t.next_round, t.next_who);
+    if (t.next_br) { char nr[48]; ImGui::Text("Next: %s vs %s", tc_round_name(t, t.next_br, t.next_round, nr, sizeof nr), t.next_who); }
     if (t.nplaces) {
         ImGui::Spacing(); ImGui::TextColored(TC_GOLD, "Standings");
         for (int i = 0; i < t.nplaces && i < 8; i++) { int e = t.places[i][1]; ImGui::Text("%d. %s", t.places[i][0], e >= 0 && e < t.nent ? t.ent[e].name : "?"); }
@@ -329,7 +336,7 @@ static void tc_draw(ImGuiIO &io) {
         } else if (!strcmp(t.status, "dq")) ImGui::TextColored(TC_RED, "You were disqualified (by the organizer, or you did not come to a set in time).");
         else {
             ImGui::TextColored(TC_GREEN, "Waiting for your next set.");
-            if (t.next_br) ImGui::Text("Next: %s round %d vs %s.", t.next_br == 'L' ? "Losers" : t.next_br == 'G' ? "Grand final" : "Winners", t.next_round, t.next_who);
+            if (t.next_br) { char nr[48]; ImGui::Text("Next: %s vs %s.", tc_round_name(t, t.next_br, t.next_round, nr, sizeof nr), t.next_who); }
             ImGui::Text("Keep the game open: when the set is ready this screen opens by itself.");
         }
         tc_hint("A / B: close   Y: bracket");

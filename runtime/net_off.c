@@ -39,7 +39,7 @@ void net_ladder_result(const NetLadderResult *r) { (void)r; }
 void net_tourney_get(NetTourney *o) { memset(o, 0, sizeof *o); o->me = o->set = -1; }   /* (tournaments: none without online play) */
 void net_tourney_peek(NetTourney *o) { net_tourney_get(o); }
 void net_tourney_look(int tid) { (void)tid; }
-void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks) { (void)name; (void)bo; (void)bo_top8; (void)bo_finals; (void)bans; (void)stocks; }
+void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks, int noshow_min) { (void)name; (void)bo; (void)bo_top8; (void)bo_finals; (void)bans; (void)stocks; (void)noshow_min; }
 void net_tourney_simple(int op, int tid) { (void)op; (void)tid; }
 void net_tourney_seed_mode(int tid, int mode) { (void)tid; (void)mode; }
 void net_tourney_move(int tid, int from, int to) { (void)tid; (void)from; (void)to; }

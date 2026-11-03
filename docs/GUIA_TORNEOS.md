@@ -17,8 +17,7 @@ una **página web**.
 2. Ve a **Experimental** y pon **Tournaments** en **ON** (está justo debajo de Battle Arenas).
 3. Presiona **Restart the game now**. El juego se vuelve a abrir conectado al servidor de torneos.
 
-Mientras **Tournaments** está en ON, el juego no usa la red de Radmin del grupo. Para volver a jugar en las salas de
-siempre, ponlo en **OFF** y reinicia.
+Todo se juega a través del servidor del grupo (Oracle): no hace falta ninguna otra red ni programa.
 
 Tu **cuenta** se crea sola la primera vez que te conectas. Tu nombre en el torneo es el de **F1 > Experimental > Your
 name**. El **código de cuenta** (F1 > Online > Account code) es tu cuenta completa: guárdalo como una contraseña y no lo
@@ -65,8 +64,9 @@ Arriba a la derecha hay una línea pequeña que dice siempre qué te toca ("YOUR
 **Si algo sale mal**
 - *"The last game was not counted: play it again"*: los dos juegos no coincidieron (empate, desconexión, alguien salió o
   desincronización). Jueguen ese game otra vez: presionen start de nuevo.
-- *Tu rival no aparece:* si en **10 minutos** tu rival no llega a la selección de personaje y tú sí, **ganas el set**
-  solo. El organizador puede deshacerlo.
+- *Tu rival no aparece:* si tu rival no llega a la selección de personaje en el tiempo que puso el organizador (10
+  minutos si no lo cambió; la página del torneo lo dice arriba) y tú sí, **ganas el set** solo. El organizador puede
+  deshacerlo.
 - *Te quedaste esperando y quieres salir de la espera:* mantén **B** o presiona **Esc** (con la pantalla del torneo
   cerrada).
 
@@ -89,7 +89,8 @@ Abre **http://160.34.219.118:8080/tournaments** (la dirección del servidor del 
    organizador**. El código no viaja por internet: el navegador solo firma una prueba con él.
 2. **Crear un torneo** (ten el juego abierto y conectado al servidor; el torneo se crea para tu versión del juego): nombre,
    mejor de 1 / 3 / 5 / 7 (sets, top 8 y finales), bans, stocks, check-in, si cuenta para el ladder, minutos para "no se
-   presentó" y segundos para tachar.
+   presentó" (0: nunca, lo decides tú) y segundos para tachar. Desde el juego (F1 > Tournament > Make a tournament)
+   también se eligen los minutos de "no se presentó" (**No-show**).
 3. **Inscripciones:** los jugadores se inscriben solos desde el juego. En la lista de jugadores puedes mover seeds
    (flechas ↑ ↓), cambiar el seeding (por rating, al azar, manual) y quitar a alguien.
 4. **Check-in:** unos 30 minutos antes presiona **Abrir check-in**. La lista muestra quién confirmó ("listo") y quién
@@ -98,6 +99,8 @@ Abre **http://160.34.219.118:8080/tournaments** (la dirección del servidor del 
 6. **Durante el torneo** (la página se actualiza cada 5 segundos), en cada set del bracket puedes:
    - marcar quién ganó (**Ganó …**) si hubo un problema, o **Jugar de nuevo** para borrar el resultado;
    - ponerlo **En stream** (sección 4);
+   - cambiar los minutos de **"no se presentó"** (abajo en el panel Organizar, **Guardar**): cuenta también para los sets
+     que ya están esperando;
    - en la lista de jugadores: **DQ** a quien no se presentó (pierde el resto de sus sets).
    Lo que sigue en el bracket se acomoda solo.
 7. **Cancelar el torneo** lo cancela para todos.
@@ -121,6 +124,19 @@ En Oracle Cloud abre también **TCP 8080** (o corre `oci_arenas_ports.sh` en Clo
 - Solo algunas cuentas pueden crear torneos: `sudo TOURNAMENT_ADMINS="Rober,napky" bash deploy_arenas.sh`.
 - Cuentas: `sudo ssbu-account list`, `rename <viejo> <nuevo>`, `ban <nombre>`, `unban <nombre>`, `delete <nombre>`.
 - Logs: `journalctl -u ssbu-lobby -f`.
+- Iconos de personajes de la página: archivos PNG en `/var/lib/ssbu-lobby/icons/`, con el nombre interno del personaje
+  (`mario.png`, `captain.png`, ...: la lista está en `tools/net/tournament.py`, FIGHTERS). No van en el repositorio; si
+  falta uno, la página pone las iniciales del personaje.
 
-**Si el servidor se apaga** las cuentas y los torneos se guardan y siguen donde iban cuando vuelve. Mientras tanto se puede
-jugar casual en la sala de siempre (Tournaments en OFF, red de Radmin).
+**Si el servidor se apaga** las cuentas y los torneos se guardan y siguen donde iban cuando vuelve.
+
+## 7. Ver los resultados
+
+En la página del torneo (**http://160.34.219.118:8080/tournaments**, cualquiera la puede abrir, sin entrar):
+
+- Las rondas se llaman como en los torneos de siempre: **Winners Round 1**, **Winners Quarterfinal**, **Winners
+  Semifinal**, **Winners Final**, lo mismo en **Losers**, y **Grand Final** / **Grand Final Reset**. El juego usa los
+  mismos nombres.
+- Al lado de cada jugador salen los **personajes que usó** (en el set, y en Posiciones y Jugadores los de todo el torneo).
+- Un set ya jugado dice abajo **"ver escenarios y personajes"**: dale clic y se abre una ventana con cada game, el
+  escenario y el personaje de cada uno (el ganador en verde). Se cierra con la ×, con Esc o dando clic afuera.

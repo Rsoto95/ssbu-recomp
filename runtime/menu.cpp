@@ -1657,14 +1657,17 @@ static void sec_arena(void) {
 }
 
 /* ------------------------------------------------------------------ tournaments (lobby 1.7: net_relay.c net_tourney_*, tools/net/tournament.py) */
-static const char *t_set_name(const NetTourney &T, int i) {      /* "Winners round 2", "Losers final", "Grand final" ... */
+static const char *t_set_name(const NetTourney &T, int i) {      /* "Winners Round 1", "Winners Quarterfinal", "Losers Semifinal", "Grand Final" ... */
     static char b[48];
     const NetTourneySet &s = T.sets[i];
     int last = 0;
     for (int k = 0; k < T.nsets; k++) if (T.sets[k].br == s.br && T.sets[k].round > last) last = T.sets[k].round;
-    if (s.br == 'G') snprintf(b, sizeof b, s.round == 1 ? "Grand final" : "Grand final reset");
-    else if (s.round == last) snprintf(b, sizeof b, "%s final", s.br == 'W' ? "Winners" : "Losers");
-    else snprintf(b, sizeof b, "%s round %d", s.br == 'W' ? "Winners" : "Losers", s.round);
+    const char *side = s.br == 'W' ? "Winners" : "Losers";
+    if (s.br == 'G') snprintf(b, sizeof b, s.round == 1 ? "Grand Final" : "Grand Final Reset");
+    else if (s.round == last) snprintf(b, sizeof b, "%s Final", side);
+    else if (s.round == last - 1) snprintf(b, sizeof b, "%s Semifinal", side);
+    else if (s.round == last - 2) snprintf(b, sizeof b, "%s Quarterfinal", side);
+    else snprintf(b, sizeof b, "%s Round %d", side, s.round);
     return b;
 }
 static const char *t_player(const NetTourney &T, int e) {
@@ -1749,6 +1752,7 @@ static void sec_tourney(void) {
     if (T.can_create && ImGui::TreeNode("Make a tournament##tmk")) {
         static char tname[33] = "";
         static int bo = 1, b8 = 1, bf = 2, bans = 2, stocks = 2;     /* (indices: Bo3, Bo3, Bo5, 2 bans, 3 stocks) */
+        static int noshow = 10;                                       /* (2026-11-03) minutes; 0: never */
         static const char *const k_bo[] = {"Best of 1", "Best of 3", "Best of 5", "Best of 7"};
         static const char *const k_n[] = {"0", "1", "2", "3", "4", "5"};
         ImGui::SetNextItemWidth(260); ImGui::InputTextWithHint("Name##tmk", "e.g. Friday weekly", tname, sizeof tname);
@@ -1757,8 +1761,10 @@ static void sec_tourney(void) {
         ImGui::SetNextItemWidth(160); ImGui::Combo("Finals (winners, losers, grand)##tmk", &bf, k_bo, 4);
         ImGui::SetNextItemWidth(160); ImGui::Combo("Stage bans after game 1##tmk", &bans, k_n, 5);
         ImGui::SetNextItemWidth(160); ImGui::Combo("Stocks##tmk", &stocks, k_n + 1, 5);
+        ImGui::SetNextItemWidth(160); ImGui::SliderInt("No-show (minutes)##tmk", &noshow, 0, 60, noshow ? "%d min" : "never");
+        help("A set is ready, one player came to Smash and the other did not within this time: the one who came wins the set (the organizer can undo it). 0: never, the organizer decides. It can be changed later on the tournament's web page.");
         help("Stages: Battlefield, Small Battlefield, Final Destination, Pokemon Stadium 2 and Smashville to start; Town and City, Kalos, Yoshi's Story, Lylat Cruise, Hollow Bastion and Northern Cave as counterpicks. No items, no hazards.");
-        if (ImGui::Button("Make it##tmk", ImVec2(bw, 0))) net_tourney_create(tname, 2 * bo + 1, 2 * b8 + 1, 2 * bf + 1, bans, stocks + 1);
+        if (ImGui::Button("Make it##tmk", ImVec2(bw, 0))) net_tourney_create(tname, 2 * bo + 1, 2 * b8 + 1, 2 * bf + 1, bans, stocks + 1, noshow);
         ImGui::TreePop();
     }
     ImGui::Separator();

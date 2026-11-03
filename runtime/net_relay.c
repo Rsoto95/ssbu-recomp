@@ -1663,10 +1663,11 @@ void net_tourney_peek(NetTourney *o) {
     if (!g_joined) o->known = 0;
 }
 void net_tourney_look(int tid) { InterlockedExchange(&g_t_focus_want, tid); g_t_tx = 0; }
-void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks) {
-    uint8_t a[1 + 32 + 5]; memset(a, 0, sizeof a);
+void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks, int noshow_min) {
+    uint8_t a[1 + 32 + 6]; memset(a, 0, sizeof a);   /* (2026-11-03) + the no-show minutes (0: never); an older lobby ignores it */
     a[0] = 3; memcpy(a + 1, name, strlen(name) < 32 ? strlen(name) : 32);
     a[33] = (uint8_t)bo; a[34] = (uint8_t)bo_top8; a[35] = (uint8_t)bo_finals; a[36] = (uint8_t)bans; a[37] = (uint8_t)stocks;
+    a[38] = (uint8_t)(noshow_min < 0 ? 0 : noshow_min > 120 ? 120 : noshow_min);
     say("tournament: making \"%s\"", name);
     t_request(0, a, sizeof a);
 }

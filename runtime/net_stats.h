@@ -151,7 +151,7 @@ typedef struct {
 void net_tourney_get(NetTourney *out);           /* never blocks; while F1 > Tournament asks, the lobby is asked every second */
 void net_tourney_peek(NetTourney *out);          /* the same, without asking the lobby more often (the cards on screen, every frame) */
 void net_tourney_look(int tid);
-void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks);
+void net_tourney_create(const char *name, int bo, int bo_top8, int bo_finals, int bans, int stocks, int noshow_min);   /* noshow_min: 0 = never */
 void net_tourney_simple(int op, int tid);        /* 1 sign up, 2 withdraw, 4 start, 5 cancel, 13 check in, 14 open the check-in */
 void net_tourney_seed_mode(int tid, int mode);   /* 0 rating, 1 random, 2 manual */
 void net_tourney_move(int tid, int from, int to);

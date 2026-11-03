@@ -60,6 +60,12 @@ def hash40(s):
 
 
 _CHARA_BY_HASH = {hash40("ui_chara_" + k): v for k, v in FIGHTERS.items()}
+_KEY_BY_HASH = {hash40("ui_chara_" + k): k for k in FIGHTERS}
+
+
+def chara_key(chara):
+    """the fighter's internal name ("mario") from a ui_chara id, or "" (the web page's icon file: icons/<key>.png)"""
+    return _KEY_BY_HASH.get(chara & 0xffffffffff, "")
 
 
 def chara_name(chara):
@@ -375,6 +381,17 @@ class Tournament:
 
     def cancel(self):
         self.state = "cancelled"
+        self.changed()
+
+    def set_noshow(self, minutes):
+        """(2026-11-03) the organizer changes the no-show time (minutes, 0: never) at any time before the end; a set
+        already waiting is judged with the new time (its clock started when it became ready)"""
+        if self.state in ("done", "cancelled"):
+            raise Error("the tournament is over")
+        minutes = int(minutes)
+        if not 0 <= minutes <= 120:
+            raise Error("0 to 120 minutes")
+        self.rules["noshow"] = minutes * 60
         self.changed()
 
     def feature(self, sid, code):
