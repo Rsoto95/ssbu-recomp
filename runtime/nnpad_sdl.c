@@ -1452,22 +1452,18 @@ void nnpad_rumble_set(int on) {
     if (old && out) {
         size_t o = 0; int in_general = 0, done = 0;
         for (char *p = old; *p; ) {
-            char *e = strchr(p, '
-');
+            char *e = strchr(p, '\n');
             size_t l = e ? (size_t)(e - p) + 1 : strlen(p);
             if (*p == '[') {
-                if (in_general && !done) { o += (size_t)sprintf(out + o, "rumble = %s
-", on ? "on" : "off"); done = 1; }
+                if (in_general && !done) { o += (size_t)sprintf(out + o, "rumble = %s\r\n", on ? "on" : "off"); done = 1; }
                 in_general = !_strnicmp(p, "[general]", 9);
             }
-            if (in_general && !done && !_strnicmp(p, "rumble", 6) && (p[6] == ' ' || p[6] == '=' || p[6] == '	')) {
-                o += (size_t)sprintf(out + o, "rumble = %s
-", on ? "on" : "off"); done = 1;
+            if (in_general && !done && !_strnicmp(p, "rumble", 6) && (p[6] == ' ' || p[6] == '=' || p[6] == '\t')) {
+                o += (size_t)sprintf(out + o, "rumble = %s\r\n", on ? "on" : "off"); done = 1;
             } else { memcpy(out + o, p, l); o += l; }
             p += l;
         }
-        if (in_general && !done) o += (size_t)sprintf(out + o, "rumble = %s
-", on ? "on" : "off");
+        if (in_general && !done) o += (size_t)sprintf(out + o, "rumble = %s\r\n", on ? "on" : "off");
         FILE *f = fopen(g_cfg.path, "wb");
         if (f) { fwrite(out, 1, o, f); fclose(f); }
         g_cfg.mtime = file_mtime(g_cfg.path);
@@ -1475,16 +1471,8 @@ void nnpad_rumble_set(int on) {
     free(old); free(out);
     if (!on) for (int q = 0; q < 8; q++) { Dev *d = dev_of(q); if (d && d->gp) SDL_RumbleGamepad(d->gp, 0, 0, 0); else if (d && d->js) SDL_RumbleJoystick(d->js, 0, 0, 0); if (d) { d->rl = d->rh = 0; } }
     unlock();
-    say("nn::pad: vibration %s (settings menu; [general] rumble of %s)
-", on ? "on" : "off", g_cfg.path);
+    say("nn::pad: vibration %s (settings menu; [general] rumble of %s)\n", on ? "on" : "off", g_cfg.path);
 }
-
-/* ================================================================ U1, the Controls page of the settings menu (menu.cpp)
- * Every pad target (16 Pro buttons + 8 stick directions) can be bound for ONE controller ([device <GUID>]) or for every
- * controller of its kind ([type xbox|playstation|switch|gamecube|generic|joystick]); the device section wins over the type
- * profile, which wins over the built-in default. All of it is written to controllers.ini at once and used at once (the
- * memory copy is changed together with the file; the 1 s reload then finds nothing new). */
-static const char *const g_type_label[NTYPE] = {"Xbox", "PlayStation", "Switch", "GameCube", "other pad", "joystick (no SDL mapping)"};
 const char *nnpad_type_label(int t) { return t >= 0 && t < NTYPE ? g_type_label[t] : "?"; }
 const char *nnpad_type_key(int t) { return t >= 0 && t < NTYPE ? g_type_key[t] : "?"; }
 const char *nnpad_target_name(int t) { return t >= 0 && t < 24 ? g_kbn[t] : ""; }
