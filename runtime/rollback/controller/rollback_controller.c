@@ -499,19 +499,20 @@ static void rbg_after_begin(void) {
     { int l = rbn_local_player();
       LOG("r1: RB NET: results screen: the other player's card is closed with this PC's A (this PC player %d; at most %d presses, %.0f s)\n", l + 1, RBG_AFTER_PRESSES, RBG_AFTER_MS / 1000.0); }
 }
-/* nnhid.c net_merge: the results screen of an agreed match is up (this PC's pads stay merged into port 1 meanwhile) */
-int rbg_after_active(void) { return g_rbg_after_t0 > 0 && now_ms() - g_rbg_after_t0 <= RBG_AFTER_MS; }
 static int rbg_after(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {   /* 1 = port id's pad was given */
     if (now_ms() - g_rbg_after_t0 > RBG_AFTER_MS || rbn_started() || (g_rbg_after_n >= RBG_AFTER_PRESSES && !g_rbg_after_hold)) {
         LOG("r1: RB NET: results screen: player 2's A given %d times (port 2 read %d times with A down), done\n", g_rbg_after_n, g_rbg_after_polls);
         g_rbg_after_t0 = 0; return 0;
     }
-    /* Port 1 is this PC's devices on both PCs (nnhid.c net_merge merges every pad of this PC into port 1 while online, and
-     * keeps doing so while this runs: rbg_after_active). (2026-11-03, a friend: "se trabó en la result screen pero a mí no":
-     * the merge ended with the session at the fight's end, so his GameCube controller - adapter port 4 - went back to port 4,
-     * which nobody reads here, and neither card closed; on the host's PC the pad was port 1's own device anyway.) */
+    /* Port 1 is this PC's player on both PCs (nnhid.c merges this PC's pads into port 1 while online). (2026-11-03, a friend:
+     * "se trabó en la result screen pero a mí no": the merge ends with the session at the fight's end, so his GameCube
+     * controller - adapter port 4 - went back to port 4, which nobody read here, and neither card closed. Its A is now read
+     * directly (nnhid_local_a_elsewhere) and pressed on port 1 too: one A closes both cards. 9345a93 kept the pads merged
+     * instead, into the next arena match's set-up, which then gave him his GameCube controls instead of his Pro ones.) */
     if (rbn_local_player() < 0) return 0;               /* (a spectator: nobody's card is this PC's) */
     if (id == 0) {
+        int nnhid_local_a_elsewhere(void);
+        if (nnhid_local_a_elsewhere()) *b |= 1;         /* (A of this PC's other pads, on port 1) */
         int down = (*b & 1) != 0;                       /* A (nnhid.c BTN_A) */
         if (down && !g_rbg_after_down && g_rbg_after_n < RBG_AFTER_PRESSES) {
             g_rbg_after_n++; g_rbg_after_hold = 6;

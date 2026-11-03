@@ -531,13 +531,10 @@ static int id_supported(uint32_t id) {
  * Wireless room, a room code (host / join), the arena queue, or a match already running. With rollback on but none of
  * these (Smash on one PC, two friends on the couch) each pad is its own player again (net_session.c: such a fight is local). */
 static int net_merge(void) {
-    int r1_net_on(void), nnldn_role(void), net_online(void), net_mode(void), net_arena_queued(void), rbn_started(void), rbg_after_active(void);
+    int r1_net_on(void), nnldn_role(void), net_online(void), net_mode(void), net_arena_queued(void), rbn_started(void);
     if (g_x_synth || scripted_run() || !r1_net_on()) return 0;
     int mode = net_online() > 0 ? net_mode() : -1;
-    /* (2026-11-03) and on the results screen after an online match (rollback_controller.c rbg_after_active): the session ends
-     * with the fight, and a pad that is not port 1's own device (a GameCube adapter's port 4) went back to its own port,
-     * where the results screen's A mirroring never saw it: the joiner could not leave the results screen */
-    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started() || rbg_after_active();
+    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started();
 }
 
 /* Is a controller connected as this npad id? Player 1 always exists in scripted runs (the script is its pad). */
@@ -772,6 +769,16 @@ static int port1_gc(void) {
     if (nnpad_is_gc(0)) return 1;
     if (!net_merge()) return 0;
     for (int p = 1; p < 8; p++) if (nnpad_present(p) && nnpad_is_gc(p)) return 1;
+    return 0;
+}
+/* (2026-11-03) rollback_controller.c, the results screen after an online match: A held on a pad of this PC that is NOT
+ * port 1's own device (a GameCube adapter's port 4: after the fight the pads are no longer merged into port 1). Read
+ * directly instead of merging the pads again: kept merged into the next match's set-up (an arena has no character select
+ * in between) the joiner's panel took port 1 and the match gave him his GameCube controls instead of his Pro ones. */
+int nnhid_local_a_elsewhere(void) {
+    if (!sdl_on() || !devices_live() || menu_input_blocked()) return 0;
+    NnPadState ps;
+    for (int p = 1; p < 8; p++) if (nnpad_get(p, &ps) && (ps.buttons & (1ull << BTN_A))) return 1;
     return 0;
 }
 int nnhid_native_gc0(void) { return sdl_on() && port1_gc() && nnpad_gc_native() && (g_supported_styles & STYLE_GC); }
