@@ -813,6 +813,14 @@ int nnhid_native_gc0(void) { return sdl_on() && port1_gc() && nnpad_gc_native() 
 static uint32_t npad_style(uint32_t id) {
     if (!player_connected(id)) return 0;
     if (g_lwr_style_on && id < 2) return g_lwr_gc[id] && (g_supported_styles & STYLE_GC) ? STYLE_GC : STYLE_FULLKEY;
+    /* (2026-11-04) an agreed rollback match that is not a room's / an arena's (the ladder, a room code): the controller kinds are
+     * not exchanged there, and each PC showed ports 1 / 2 in the kind of ITS OWN devices (port1_gc: a GameCube adapter made
+     * port 1 GameCube, whoever plays it). The owner (joiner, an adapter on 4 slots) had the host's fighter in GameCube controls,
+     * the host (SUKO) the same fighter in Pro controls: a press that means something else in the two sets, desync at frame 27,
+     * and his own fighter "did not take his controller". Both ports are Pro on both PCs there (GameCube L / R still work:
+     * nnhid fill_pad's 25% trigger press -> L / R). */
+    {   int rbn_agreed(void), rbn_room_rollback(void);
+        if (id < 2 && rbn_agreed() && !rbn_room_rollback()) return STYLE_FULLKEY; }
     if (sdl_on() && (id == 0 ? port1_gc() : nnpad_is_gc((int)id)) && nnpad_gc_native() && (g_supported_styles & STYLE_GC)) return STYLE_GC;
     return STYLE_FULLKEY;
 }
