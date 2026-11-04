@@ -535,6 +535,8 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
                     else net_match_find_rb(); } }
     double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 120000.0;
     if (lwr) limit = getenv("SSBU_RB_NET_ROOM_WAIT") ? atof(getenv("SSBU_RB_NET_ROOM_WAIT")) * 1000.0 : 10000.0;     /* (R3 lwr) both games are at this set-up together */
+    double spec_grace = getenv("SSBU_RB_NET_SPEC_GRACE") ? atof(getenv("SSBU_RB_NET_SPEC_GRACE")) * 1000.0 : 4000.0;      /* (2026-11-03) player 1: the spectators' HELLOs, see below */
+    if (spec_grace > limit / 2) spec_grace = limit / 2;
     uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0, last_here = 0;
     long long presents = nvn_front_presents(); uint64_t presents_at = t0, notes = 0, redraws = 0;
     int ok = 0, stopped = 0;
@@ -588,6 +590,21 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             if (g_rbs_need && g_rbs_bad && g_hs_have_peer && !g_hs_have_prop && !g_hs_refused) {      /* (2026-11-02) a spectator refused / differs: the game's own netcode for everyone */
                 AcquireSRWLockShared(&g_rbs_lock); snprintf(g_hs_why, sizeof g_hs_why, "%s", g_rbs_bad_why); ReleaseSRWLockShared(&g_rbs_lock);
                 g_hs_refused = 1; hs_refuse(g_hs_peer.nonce, g_hs_why);
+            }
+            /* (2026-11-03) a spectator whose game never says HELLO (it left the arena's screens or closed, but the arena still
+             * lists it: owner's run, Player-8dac in the menus while seats 0 and 2 fought) no longer costs the fighters their match:
+             * after SSBU_RB_NET_SPEC_GRACE s (default 4, at most half the time limit) player 1 proposes with the spectators it has;
+             * the silent one is not fed (its game, if it comes, shows the match its own way). Before, player 1 waited the whole
+             * 10 s, the other fighter (which hears nothing until the proposal) gave up first, and both games played the arena's
+             * match with the game's own netcode: the other player's fighter could not be moved, and one player's controller
+             * behind the keyboard (player 2 of that PC) did not play his fighter. */
+            if (g_rbs_need && g_hs_have_peer && !g_hs_have_prop && !g_hs_refused && !g_rbs_bad && (double)(now - t0) >= spec_grace) {
+                AcquireSRWLockShared(&g_rbs_lock); LONG have = rbs_popc(g_rbs_seats), need = g_rbs_need, seats = g_rbs_seats; ReleaseSRWLockShared(&g_rbs_lock);
+                if (have < need) {
+                    InterlockedExchange(&g_rbs_need, have);
+                    printf("[arena] handshake %ld: %ld of %ld spectators said HELLO in %.1f s (seats %02lx): player 1 goes on without the others (they are not fed)\n", (long)round, (long)have, (long)need, (now - t0) / 1000.0, (unsigned long)seats);
+                    fflush(stdout);
+                }
             }
             if (!g_hs_have_prop && g_hs_have_peer && lwr && !g_hs_refused && rbs_popc(g_rbs_seats) >= g_rbs_need && hs_auto_delay(my_delay(), g_hs_peer.m.pad0, now - t0) > 0) {      /* (R3 lwr) the room's match: both games built it from the room; only the seed is new; (2026-11-02) and every spectator's HELLO is in */
                 if (g_hs_peer.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_peer.exe_stamp);

@@ -534,7 +534,11 @@ static int net_merge(void) {
     int r1_net_on(void), nnldn_role(void), net_online(void), net_mode(void), net_arena_queued(void), rbn_started(void);
     if (g_x_synth || scripted_run() || !r1_net_on()) return 0;
     int mode = net_online() > 0 ? net_mode() : -1;
-    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started();
+    /* (2026-11-03) and a Battle Arena of the game's Online menu (the match block's melee mode 0x14) played by the game's own
+     * netcode (no rollback session): a GameCube controller that came up as player 2 behind the keyboard did not play the
+     * fighter (owner's friend: "se le cambio el control") */
+    int dm_melee_mode(void);
+    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started() || (mode >= 0 && dm_melee_mode() == 0x14);
 }
 
 /* Is a controller connected as this npad id? Player 1 always exists in scripted runs (the script is its pad). */
