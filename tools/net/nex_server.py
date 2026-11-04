@@ -557,6 +557,7 @@ def join_matchmake_session_with_param(client, req):
             taken = set(seats.values())
             seats[client.pid] = next(s for s in range(64) if s not in taken)
         set_session_count(a)
+        session = a["session"]
         conns = a.setdefault("clients", {a["owner"]: a["client"]})
         conns[client.pid] = client
         others = [c for p, c in conns.items() if c is not client and p in parts]
