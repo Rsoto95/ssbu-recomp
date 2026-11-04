@@ -373,7 +373,14 @@ void os_r1_fibers(void (*cb)(uint64_t key, Ctx *c, uint64_t stack, uint64_t stac
                 if (o->fiber) { if (g_fib_cn >= g_fib_ccap) { g_fib_ccap = g_fib_ccap ? g_fib_ccap * 2 : 256; g_fib_c = realloc(g_fib_c, (size_t)g_fib_ccap * sizeof *g_fib_c); } g_fib_c[g_fib_cn++] = o; }
         g_fib_cgen = gen;
     }
-    for (int i = 0; i < g_fib_cn; i++) { Obj *o = g_fib_c[i]; if (o->fiber) cb(o->key, o->fctx, o->stack, o->stack_size, o->fiber); }
+    /* (2026-11-04) a fiber the game finalized (fib_dead: its host fiber only kept for a ring load) is not part of the game's
+     * state any more: left out. Before, every capture saved it (its host stack copied, then copied back at every load), and
+     * the last capture's list (g_guest_fibers) then named it, so r1_ring_fiber_in_use kept os_r1_fibers_reap from ever
+     * deleting it: the list only grew (a real hour of online play: 17 -> 272 fibers, the capture +1 ms, a load 4.9 -> 15 ms,
+     * the game from 60 to ~30 fps by the 17th match). A load of a state from before the finalize still gives it back (that
+     * state's list names it, and the ring keeps it from the reap meanwhile). SSBU_R1_DEADFIB=1: listed as before. */
+    static int keep_dead = -1; if (keep_dead < 0) { const char *e = getenv("SSBU_R1_DEADFIB"); keep_dead = e && e[0] == '1'; }
+    for (int i = 0; i < g_fib_cn; i++) { Obj *o = g_fib_c[i]; if (o->fiber && (keep_dead || !o->fib_dead)) cb(o->key, o->fctx, o->stack, o->stack_size, o->fiber); }
 }
 void os_thread_report(FILE *out) {
     if (!g_oslog_n) return;
