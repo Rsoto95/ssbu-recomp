@@ -493,6 +493,7 @@ void log_async_drain(unsigned ms) {
     }
     if (g_log_thr) WaitForSingleObject(g_log_thr, ms);
 }
+static void log_async_atexit(void) { log_async_drain(2000); }
 static void log_async_start(void) {
     const char *e = getenv("SSBU_LOG_ASYNC");
     if (e && e[0] == '0') return;
@@ -515,6 +516,7 @@ static void log_async_start(void) {
     SetStdHandle(STD_OUTPUT_HANDLE, file);             /* (_dup2 made the pipe the standard handle: a game started from this one gets the file) */
     if (g_log_both) SetStdHandle(STD_ERROR_HANDLE, file);
     InterlockedExchange(&g_log_on, 1);
+    atexit(log_async_atexit);                          /* (a return from main, exit(): the tools) */
 }
 static void log_async_note(void) { if (g_log_on) printf("log: written by a thread of its own (a busy disk no longer holds the game; SSBU_LOG_ASYNC=0: off)\n"); }
 #else
