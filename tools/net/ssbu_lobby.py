@@ -505,6 +505,28 @@ class TourneyMixin:
                 return t, e, sid
         return None
 
+    def t_rejoin(self, c, now):
+        """(2026-11-04) a player back on the lobby whose set is "playing" a game with no result waited for: that game was cut
+        (both games closed without a result, e.g. after a desync: the owner and SUKO, ladder match 2), and nothing ever
+        moved the set again: back on the lobby, both games waited at the set-up for a "go" that never came. The game is
+        played again (the players choose their fighters), as a game with a bad result is."""
+        a = self.t_active(c)
+        if a is None:
+            return
+        t, e, sid = a
+        p = t.proc(sid)
+        if p is None or p.get("phase") != "playing":
+            return
+        if any(r["tid"] == t.id and r["sid"] == sid for r in self.t_reports.values()):
+            return                                  # (a result is coming: t_sweep decides)
+        p["ready"], p["phase"] = [None, None], "chars"
+        t.changed()
+        for x in (self.t_client(t, y) for y in t.view[sid]["p"]):
+            if x is not None:
+                x.t_err, x.t_err_at = "the last game was cut off (no result from either game): play it again", now
+        self.say("tournament %d: set %d: game %d had no result and %s came back: played again" % (t.id, sid, p.get("game", 0), c.name))
+        self.t_changed(t, now)
+
     def t_busy(self, part):
         """the clients playing a tournament set now (other searches never take them)"""
         out = set()
@@ -1252,6 +1274,8 @@ class Lobby(TourneyMixin):
             elif c.ladder_why != why:
                 self.say("ladder: %s is not ranked: %s" % (c.name, why))
             c.ladder_id = got
+            if got is not None:
+                self.t_rejoin(c, time.monotonic())
         c.ladder_why = why
         return b"LD" + bytes((status,)) + self.ladder_numbers(c) + why.encode("utf-8", "replace")[:NAME_LEN].ljust(NAME_LEN, b"\0")
 
