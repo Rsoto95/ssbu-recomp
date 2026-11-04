@@ -291,17 +291,21 @@ volatile LONG64 g_xls_out_commit, g_xls_out_write; static volatile LONG g_xls_ou
 /* The addresses of those pages, so the verify (ring_simulation.c, SSBU_RB_SIM_VERIFY=3) can compare their content original-vs-re-run and say whether the pages the ring does not save are the cause. */
 #define XLS_OUT_MAX 262144
 uint64_t g_xls_out_pg[XLS_OUT_MAX]; volatile LONG g_xls_out_npg;
-static void xls_out_record(uint64_t p) {
+uint8_t g_xls_out_host[XLS_OUT_MAX];     /* (2026-11-04) 1: the page was written by the host (snapshot_ring.c rg_opg_load never clears it) */
+static void xls_out_record2_(uint64_t p, int host);
+static void xls_out_record(uint64_t p) { xls_out_record2_(p, 0); }
+static void xls_out_record_host(uint64_t p) { xls_out_record2_(p, 1); }
+static void xls_out_record2_(uint64_t p, int host) {
     uint64_t pg = p & ~(uint64_t)(PG - 1);
     LONG n = g_xls_out_npg; if (n >= XLS_OUT_MAX) return;
-    for (LONG i = 0; i < n && i < XLS_OUT_MAX; i++) if (g_xls_out_pg[i] == pg) return;      /* dedup (the list is short; the scan is cheap) */
-    LONG k = InterlockedIncrement(&g_xls_out_npg) - 1; if (k < XLS_OUT_MAX) g_xls_out_pg[k] = pg;
+    for (LONG i = 0; i < n && i < XLS_OUT_MAX; i++) if (g_xls_out_pg[i] == pg) { if (host) g_xls_out_host[i] = 1; return; }      /* dedup (the list is short; the scan is cheap) */
+    LONG k = InterlockedIncrement(&g_xls_out_npg) - 1; if (k < XLS_OUT_MAX) { g_xls_out_host[k] = (uint8_t)(host != 0); g_xls_out_pg[k] = pg; }
 }
 static void xls_range_page(uint64_t p, int what) {       /* ls_range_event for an address outside the windows: 0 a host write, 1 decommit, 2 commit */
     size_t e; if (g_nxr <= 0) return;
     if (!xls_find((const uint8_t *)(uintptr_t)p, &e) || e >= g_xn) {      /* a page the ring does not know: committed or written after the base save, outside window 1 and window 2 */
         if (what == 2) { InterlockedIncrement64(&g_xls_out_commit); xls_out_record(p); if (InterlockedIncrement(&g_xls_out_lines) <= 6) LOG("r1: LS-X: a page committed in a fight is not in the ring: %llx (not saved or restored)\n", (unsigned long long)p); }
-        else if (what == 0) { InterlockedIncrement64(&g_xls_out_write); xls_out_record(p); }
+        else if (what == 0) { InterlockedIncrement64(&g_xls_out_write); xls_out_record_host(p); }
         return;
     }
     if (g_xww_act && g_xwd && e < g_xw_cap) { g_xwd[e] = 1; return; }      /* (the OS does not report a decommit / commit: the page counts as written at the next poll) */

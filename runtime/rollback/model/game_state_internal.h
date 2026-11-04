@@ -218,6 +218,7 @@ typedef struct {
     int quiet, qset;                                    /* every worker at a usual pause when it was taken (snapshot_ring.c rg_best_state) */
     uint8_t *gstk; size_t gstk_used, gstk_com;
     uint8_t *opg; size_t opg_used, opg_com;             /* the pages committed outside the ring, as at the capture */          /* the fibers' guest stacks, [sp, top) each, as at the capture */
+    int opg_part;                                       /* (2026-11-04) the capture ran out of room / the list was cut: not every page is in opg */
 } RgSlot;
 
 typedef struct { uint64_t blk; long long n[3]; } RgPageCount;

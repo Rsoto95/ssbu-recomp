@@ -310,7 +310,7 @@ static uint8_t *rg_src_v(uint32_t id, uint32_t v) { uint32_t s = g_rg_idx[id]; g
 /* SSBU_RB_SIM_VERIFY=3: besides the tracked pages, snapshot the pages the ring does NOT save (committed/written outside it during the fight, page_tracker_learned.c) at the load and compare them after the
  * re-run returns to the same pass. If many of those differ, the state the ring cannot restore is the cause of the post-rollback crashes and bringing those pages into the ring (option 2) would fix it;
  * if ~none differ, the corruption is elsewhere (host-side) and option 2 would not be enough. First 12 rollbacks. */
-extern uint64_t g_xls_out_pg[]; extern volatile LONG g_xls_out_npg;
+extern uint64_t g_xls_out_pg[]; extern volatile LONG g_xls_out_npg; extern uint8_t g_xls_out_host[];
 static uint64_t *g_rgvo_h; static int g_rgvo_n;
 static uint64_t rgv_hash(const uint8_t *p);
 static void rgvo_before(void) {
@@ -322,7 +322,7 @@ static void rgvo_before(void) {
     for (int i = 0; i < n; i++) {
         uint8_t *a = (uint8_t *)(uintptr_t)g_xls_out_pg[i];
         MEMORY_BASIC_INFORMATION mi; if (!VirtualQuery(a, &mi, sizeof mi) || mi.State != MEM_COMMIT) continue;
-        g_xls_out_pg[g_rgvo_n] = g_xls_out_pg[i];       /* compact to the ones still committed, so rgvo_after lines up */
+        g_xls_out_pg[g_rgvo_n] = g_xls_out_pg[i]; g_xls_out_host[g_rgvo_n] = g_xls_out_host[i];       /* compact to the ones still committed, so rgvo_after lines up */
         g_rgvo_h[g_rgvo_n] = rgv_hash(a); g_rgvo_n++;
     }
 }

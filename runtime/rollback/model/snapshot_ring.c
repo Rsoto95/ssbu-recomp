@@ -303,18 +303,20 @@ extern uint64_t g_xls_out_pg[]; extern volatile LONG g_xls_out_npg;
 int fibers_stack_ranges(uint64_t *lo, uint64_t *hi, int max);   /* threads.c */
 #define OPH 16                                               /* entry: page address, (pad), then the 4 KB */
 static int g_opg_on = -1; static long long g_opg_caps, g_opg_pages, g_opg_gone, g_opg_full, g_opg_loads, g_opg_written, g_opg_skip, g_opg_recommit;
+static long long g_opg_zeroed, g_opg_zero_skip, g_opg_part_loads; static int g_opg_zero = -1;     /* (2026-11-04) see rg_opg_zero_missing */
+extern uint8_t g_xls_out_host[];
 static void opg_copy_page(uint8_t *d, const uint8_t *s) { memcpy(d, s, PG); }
 static void (*volatile g_opg_cp)(uint8_t *, const uint8_t *) = opg_copy_page;      /* (through a pointer the compiler cannot see through: __try then covers the copy, write_marks.c) */
 static int opg_try_copy(uint8_t *d, const uint8_t *s) { __try { g_opg_cp(d, s); return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
 static void rg_opg_capture(RgSlot *s) {
     if (g_opg_on < 0) { const char *e = getenv("SSBU_R1_OUTPAGES"); g_opg_on = !(e && e[0] == '0'); }
-    s->opg_used = 0;
+    s->opg_used = 0; s->opg_part = 0;
     if (!g_opg_on || !s->opg) return;
-    int n = (int)g_xls_out_npg; if (n > 65536) n = 65536;
+    int n = (int)g_xls_out_npg; if (n > 65536) { n = 65536; s->opg_part = 1; }
     for (int i = 0; i < n; i++) {
         uint64_t a = g_xls_out_pg[i]; if (!a) continue;
         size_t need = s->opg_used + OPH + PG;
-        if (!rg_vcom(s->opg, &s->opg_com, need, 1u << 20)) { g_opg_full++; break; }
+        if (!rg_vcom(s->opg, &s->opg_com, need, 1u << 20)) { g_opg_full++; s->opg_part = 1; break; }
         uint8_t *o = s->opg + s->opg_used;
         if (!opg_try_copy(o + OPH, (const uint8_t *)(uintptr_t)a)) { g_opg_gone++; g_xls_out_pg[i] = 0; continue; }      /* not committed now: not part of this state; off the list (a later commit puts it back on: page_tracker_learned.c) */
         ((uint64_t *)o)[0] = a; ((uint64_t *)o)[1] = 0;
@@ -322,12 +324,49 @@ static void rg_opg_capture(RgSlot *s) {
     }
     g_opg_caps++; g_opg_pages += (long long)(s->opg_used / (OPH + PG));
     if (g_opg_caps == 1 || g_opg_caps % 2000 == 0)
-        LOG("r1: OUTPAGES: %lld captures, %.0f pages each on average (%.1f MB), %lld not committed at a capture, %lld out of room; loads %lld: %lld pages written back, %lld left to the fiber stacks, %lld committed again\n",
-            g_opg_caps, (double)g_opg_pages / g_opg_caps, (double)g_opg_pages / g_opg_caps * PG / 1048576.0, g_opg_gone, g_opg_full, g_opg_loads, g_opg_written, g_opg_skip, g_opg_recommit);
+        LOG("r1: OUTPAGES: %lld captures, %.0f pages each on average (%.1f MB), %lld not committed at a capture, %lld out of room; loads %lld: %lld pages written back, %lld left to the fiber stacks, %lld committed again; pages committed after the loaded state zeroed %lld (left alone %lld; loads of a partial capture %lld)\n",
+            g_opg_caps, (double)g_opg_pages / g_opg_caps, (double)g_opg_pages / g_opg_caps * PG / 1048576.0, g_opg_gone, g_opg_full, g_opg_loads, g_opg_written, g_opg_skip, g_opg_recommit,
+            g_opg_zeroed, g_opg_zero_skip, g_opg_part_loads);
+}
+/* (2026-11-04) a page on the list now that is NOT in the state being loaded was committed after that capture (the list learns of a
+ * commit at once, nnsdk.c -> r1_on_commit, and a capture holds every guest thread): in that state it does not exist. It used to
+ * keep what the undone frames wrote there, while the game's allocator (rolled back with the rest) took it again as fresh memory,
+ * zero-filled as a new commit is, and built on the old bytes. The owner's crash (2026-11-04, match 4, 10 frames after a rollback):
+ * a lookup table's entry read id 0 from such memory, the next function took (0 - 52) * 24 as an index (f_7103928580) and read
+ * far outside the game's memory. Such a page is now zeroed at the load, as a fresh commit is. Not a page on a live fiber's
+ * stack (rg_gstk_load's), not one the host wrote, and never from a capture that ran out of room (its list is partial).
+ * SSBU_R1_OUTPAGES_ZERO=0: off. */
+static void rg_opg_zero_missing(const RgSlot *s, const uint64_t *lo, const uint64_t *hi, int nr) {
+    if (g_opg_zero < 0) { const char *e = getenv("SSBU_R1_OUTPAGES_ZERO"); g_opg_zero = !(e && e[0] == '0'); }
+    if (!g_opg_zero) return;
+    if (s->opg_part) { g_opg_part_loads++; return; }
+    size_t cnt = s->opg_used / (OPH + PG), cap = 16;
+    while (cap < cnt * 2 + 16) cap <<= 1;
+    static uint64_t *set; static size_t setcap;
+    if (setcap < cap) { free(set); set = (uint64_t *)malloc(cap * sizeof *set); setcap = set ? cap : 0; if (!set) return; }
+    memset(set, 0, cap * sizeof *set);
+    for (size_t off = 0; off + OPH + PG <= s->opg_used; off += OPH + PG) {
+        uint64_t a = ((const uint64_t *)(s->opg + off))[0], h = (a >> 12) * 0x9E3779B97F4A7C15ull;
+        for (size_t k = (size_t)(h >> 20) & (cap - 1); ; k = (k + 1) & (cap - 1)) { if (!set[k]) { set[k] = a; break; } if (set[k] == a) break; }
+    }
+    int n = (int)g_xls_out_npg; if (n > 65536) n = 65536;
+    static uint8_t zero[PG];
+    for (int i = 0; i < n; i++) {
+        uint64_t a = g_xls_out_pg[i]; if (!a) continue;
+        uint64_t h = (a >> 12) * 0x9E3779B97F4A7C15ull; int found = 0;
+        for (size_t k = (size_t)(h >> 20) & (cap - 1); set[k]; k = (k + 1) & (cap - 1)) if (set[k] == a) { found = 1; break; }
+        if (found) continue;
+        if (g_xls_out_host[i]) { g_opg_zero_skip++; continue; }
+        int in_stack = 0; for (int r = 0; r < nr && !in_stack; r++) if (a + PG > lo[r] && a < hi[r]) in_stack = 1;
+        if (in_stack) { g_opg_zero_skip++; continue; }
+        if (opg_try_copy((uint8_t *)(uintptr_t)a, zero)) g_opg_zeroed++;      /* (not committed now: nothing to do, it reads as fresh when committed) */
+    }
 }
 static void rg_opg_load(const RgSlot *s) {
-    if (!g_opg_on || !s->opg || !s->opg_used) return;
+    if (!g_opg_on || !s->opg) return;
     static uint64_t lo[2048], hi[2048]; int nr = fibers_stack_ranges(lo, hi, 2048);
+    rg_opg_zero_missing(s, lo, hi, nr);
+    if (!s->opg_used) { g_opg_loads++; return; }
     for (size_t off = 0; off + OPH + PG <= s->opg_used; off += OPH + PG) {
         const uint8_t *o = s->opg + off; uint64_t a = ((const uint64_t *)o)[0];
         int in_stack = 0; for (int r = 0; r < nr && !in_stack; r++) if (a + PG > lo[r] && a < hi[r]) in_stack = 1;
