@@ -556,12 +556,7 @@ def join_matchmake_session_with_param(client, req):
         if client.pid not in seats:                    # (2026-11-03) the game's seat: the lowest one free now
             taken = set(seats.values())
             seats[client.pid] = next(s for s in range(64) if s not in taken)
-        session = bytearray(a["session"])
-        try:
-            struct.pack_into("<I", session, session_participants_offset(session), len(parts))
-        except struct.error:
-            pass
-        a["session"] = bytes(session)
+        set_session_count(a)
         conns = a.setdefault("clients", {a["owner"]: a["client"]})
         conns[client.pid] = client
         others = [c for p, c in conns.items() if c is not client and p in parts]
@@ -684,6 +679,19 @@ def leave_arenas(pid, only_gid=None):
             parts.remove(pid)
             a.get("clients", {}).pop(pid, None)
             a.get("seats", {}).pop(pid, None)
+            set_session_count(a)
+
+
+def set_session_count(a):
+    """The participation count inside the stored session (what the arena list shows) = the members now. (2026-11-04) it
+    was set at a join only: a member who left still counted, and after a few came and went the arena was listed as full.
+    Call with ARENAS_LOCK held."""
+    session = bytearray(a["session"])
+    try:
+        struct.pack_into("<I", session, session_participants_offset(session), len(a.get("players") or [a["owner"]]))
+    except struct.error:
+        return
+    a["session"] = bytes(session)
 
 
 def referee_1(client, req):

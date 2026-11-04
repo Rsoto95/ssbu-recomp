@@ -72,6 +72,7 @@ typedef struct {
     Uint32 btn;
     Sint16 ax[6];
     volatile LONG64 t_apply;                  /* QueryPerformanceCounter of the last report applied to SDL */
+    LONG64 absent_since;                      /* (2026-11-04) first report of a gap with no controller on an attached port; 0 = none */
 } Port;
 typedef struct {
     volatile LONG running;
@@ -79,7 +80,22 @@ typedef struct {
     WCHAR path[MAX_PATH];
     Port port[4];
     volatile LONG rumble[4];
+    int motor[4];                             /* (2026-11-04) the motor state last sent to the adapter (its thread only) */
+    LONG64 rumble_block_until[4];             /* no rumble on this port before this time: it dropped out with its motor on */
+    int dips;                                 /* short gaps kept so far (logged: the first 10) */
 } Adapter;
+/* (2026-11-04) a port that reports no controller is kept this long (its inputs released) before it is taken away. Owner's
+ * friend Elias (WUP-028, port 2): at every match end the port blinked off and on dozens of times in a row, and the game
+ * took each blink for a controller unplugged; one report without the controller (8 ms) was enough. A real unplug is still
+ * seen, 0.75 s later. A gap that starts with the port's motor on is a power dip from the rumble: no rumble on that port for
+ * GCA_RUMBLE_REST_S (the rumble of the "GAME!" at a match end took power, the port dropped, its rumble stopped as the port was
+ * taken away, the controller came back and the game rumbled again). SSBU_GCA_GONE_MS: the wait. */
+#define GCA_RUMBLE_REST_S 5.0
+static double gca_gone_ms(void) {
+    static double v = -1;
+    if (v < 0) { const char *e = getenv("SSBU_GCA_GONE_MS"); v = e && e[0] ? atof(e) : 750.0; if (v < 0) v = 0; }
+    return v;
+}
 
 static Adapter g_ad[MAX_ADAPTERS];
 static char g_names[MAX_ADAPTERS][4][48];
@@ -152,7 +168,29 @@ static Sint16 trig16(int v, int rest) {
 static void port_apply(Adapter *a, int p, const unsigned char *s, LONG64 t_done) {
     Port *pt = &a->port[p];
     int present = (s[0] & 0x30) != 0;
+    if (!present && pt->id && pt->js) {                    /* (2026-11-04) a gap: kept for gca_gone_ms(), see above */
+        if (!pt->absent_since) {
+            pt->absent_since = t_done ? t_done : 1;
+            if (a->motor[p]) a->rumble_block_until[p] = t_done + (LONG64)(GCA_RUMBLE_REST_S * (double)g_qpf.QuadPart);
+            for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++) if (pt->btn >> i & 1) SDL_SetJoystickVirtualButton(pt->js, i, false);
+            pt->btn = 0;
+            Sint16 rest_ax[6] = {0, 0, 0, 0, -32768, -32768};
+            for (int i = 0; i < 6; i++) if (pt->ax[i] != rest_ax[i]) { pt->ax[i] = rest_ax[i]; SDL_SetJoystickVirtualAxis(pt->js, i, rest_ax[i]); }
+            InterlockedIncrement(&g_seq);
+        }
+        if (ticks_us(t_done - pt->absent_since) < gca_gone_ms() * 1000.0) return;
+    }
     if (!present) { if (pt->id) port_detach(a, p); pt->seen = 0; pt->calibrated = 0; memset(pt->acc, 0, sizeof pt->acc); return; }
+    if (pt->absent_since) {
+        double ms = ticks_us(t_done - pt->absent_since) / 1000.0;
+        int blocked = a->rumble_block_until[p] > t_done;
+        pt->absent_since = 0;
+        if (++a->dips <= 10) {
+            printf("nn::gca: adapter %d port %d: no controller for %.0f ms, kept (a short drop%s)%s\n", a->index + 1, p + 1, ms,
+                   blocked ? " while its motor was on: no rumble on this port for 5 s" : "", a->dips == 10 ? "; further drops not logged" : "");
+            fflush(stdout);
+        }
+    }
     if (!pt->calibrated) {
         int v[6] = {s[3], s[4], s[5], s[6], s[7], s[8]};
         for (int i = 0; i < 6; i++) pt->acc[i] += v[i];
@@ -186,15 +224,18 @@ static void port_apply(Adapter *a, int p, const unsigned char *s, LONG64 t_done)
 static void send_rumble(Adapter *a, WUSB w, unsigned char *last, int *last_valid, const unsigned char *rep) {
     unsigned char cmd[5] = {0x11, 0, 0, 0, 0};
     int changed = !*last_valid;
+    LONG64 t = now_ticks();
     for (int p = 0; p < 4; p++) {
         int power = rep && (rep[1 + 9 * p] & 0x04);
-        cmd[1 + p] = (unsigned char)(power && a->rumble[p] ? 1 : 0);
+        int rest = a->rumble_block_until[p] > t || a->port[p].absent_since;      /* (2026-11-04) after a drop with the motor on / during a gap */
+        cmd[1 + p] = (unsigned char)(power && a->rumble[p] && !rest ? 1 : 0);
         if (cmd[1 + p] != last[p]) changed = 1;
     }
     if (!changed) return;
     ULONG n = 0;
     if (pWrite(w, EP_OUT, cmd, sizeof cmd, &n, NULL)) {
         memcpy(last, cmd + 1, 4); *last_valid = 1;
+        for (int p = 0; p < 4; p++) a->motor[p] = cmd[1 + p];
     } else {
         static volatile LONG werr;
         if (!InterlockedExchange(&werr, 1)) printf("nn::gca: adapter %d: writing the rumble command failed (error %lu)\n", a->index + 1, GetLastError());
