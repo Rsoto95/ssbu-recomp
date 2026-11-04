@@ -179,6 +179,10 @@ uint64_t rbn_match_seed(void) {
 static volatile LONG g_hs_room;                         /* (pub2) the last set-up was inside a Local Wireless room (until the next set-up: the fight-off of the
                                                            * room's waiting-stage fight comes AFTER the room match's set-up, run rm4) */
 int rbn_match_cancelled(void) { return g_hs_room ? 2 : (int)g_hs_cancelled; }      /* 0, 1 (not agreed: walk off) or 2 (pub2: a room fight, the game's own netcode) */
+/* (2026-11-04) this set-up's handshake agreed on a rollback match between the two fighters (cleared at every set-up):
+ * rollback_controller.c rbg_pad gives both players no pad in the fight's frames before the match start */
+static volatile LONG g_hs_agreed;
+int rbn_agreed(void) { return (int)g_hs_agreed; }
 /* (R3 lwr) debug_mode.c tells which set-up this is: 1 = a Local Wireless room's waiting-stage fight (the record builder called from
  * the waiting-stage set-up, one player), 0 = any other (the select screens' "ready to fight", also the room's match) */
 static int g_setup_waiting, g_hs_lwr;
@@ -399,6 +403,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * rollback for these fights: they are played exactly as without rollback, whatever the other game's setting; a box says so
      * once. Rollback matches: Smash (versus) with a room code (host / join modes). SSBU_RB_NET_ROOM_MATCH=1: the old way (test). */
     InterlockedExchange(&g_hs_room, 0);
+    InterlockedExchange(&g_hs_agreed, 0);
     /* (2026-11-02) spectators: what the last set-up left (a watched match that never reached its fight; a fighter's group) */
     AcquireSRWLockExclusive(&g_hs_lock); if (g_spec) { g_local = g_spec_saved_local; InterlockedExchange(&g_spec, 0); } ReleaseSRWLockExclusive(&g_hs_lock);
     InterlockedExchange(&g_rbs_fighter, 0); InterlockedExchange(&g_rbs_need, 0); InterlockedExchange(&g_rbs_match_tx, 0); g_rbs_gid = 0;
@@ -663,6 +668,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         printf("[arena] handshake %ld: agreed with the other fighter%s: this game sends its final pads to the arena's group every pass\n", (long)round, g_local == 0 ? " and every spectator (HELLO)" : "");
     }
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
+    InterlockedExchange(&g_hs_agreed, 1);
     g_hs_delay = out->pad0;
     printf("[rbnet] handshake %ld: input delay %d frames for this match (%s; here %d, 0 = auto)\n", (long)round, g_hs_delay,
            g_hs_delay ? "the larger of the two players' settings" : "both on auto: from the round trip", my_delay());
