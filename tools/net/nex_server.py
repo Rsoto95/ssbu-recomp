@@ -832,6 +832,19 @@ def sinkhole(host, port, log):
             with PIA_LOCK:
                 if all(e[1] != addr for e in PIA_SEEN):
                     PIA_SEEN.append((time.time(), addr, cid))
+            # (2026-11-03) a game makes a new Pia socket for each arena it makes or joins, but reports its NAT properties
+            # (pia_claim) only once: the owner joined an arena (socket 62327), then made his own (socket 49746, probed
+            # here, no new report), and the joiners were given the first socket and station id: denied, 2618-0502 on
+            # every join. A probe from the address of exactly one game that already has a Pia socket (another port)
+            # is that game's new socket. Two games on one address (two copies on one PC): left to pia_claim.
+            owners = [c for c in list(CLIENTS_BY_CID.values())
+                      if getattr(c, "pia", None) and c.pia[0] == addr[0] and c.pia != addr]
+            if len(owners) == 1 and not any(getattr(c, "pia", None) == addr for c in list(CLIENTS_BY_CID.values())):
+                c = owners[0]
+                old = (c.pia, getattr(c, "pia_cid", None))
+                c.pia, c.pia_cid = addr, cid
+                log("reachability %s:%d <- %s:%d: the new Pia socket of pid %s (was %s:%d, station id %s; now station id %s)"
+                    % (host, port, addr[0], addr[1], getattr(c, "pid", "?"), old[0][0], old[0][1], old[1], cid))
         if addr not in seen:
             seen.add(addr)
             log("reachability %s:%d <- %s:%d %d bytes (not answered, as it should be): %s" % (host, port, addr[0], addr[1], len(data), hexdump(data[:48])))
