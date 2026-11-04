@@ -493,7 +493,12 @@ def main():
     work = os.path.join(a.build, 'work')
     rollback = False
     gini = os.path.join(a.build, 'config', 'graphics.ini')
-    if a.play and a.exe == main_exe and not (a.linux or a.mac) and ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false'):   # (fork: on unless graphics.ini says off)
+    try:                                              # (2026-11-04) a graphics.ini the game has not moved to "rollback on by default"
+        with open(gini, 'rb') as f:                   # yet (gfx_options.c ini_migrate_online_defaults, at its start): on this run too
+            rb_moved = b'Battle Arenas and rollback netcode are on by default' in f.read()
+    except OSError:
+        rb_moved = True
+    if a.play and a.exe == main_exe and not (a.linux or a.mac) and (not rb_moved or ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false')):   # (fork: on unless graphics.ini says off)
         # F1 > Experimental > Rollback netcode: the normal exe and game DLL with SSBU_RB_NET (since R4 the ring saves the fight on
         # the normal build: runtime/rb_learned.c); the old pair ssbu_native_rb.exe + ssbu_game_r1.dll of an older install is not used
         rollback = True

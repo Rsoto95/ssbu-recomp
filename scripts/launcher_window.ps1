@@ -196,7 +196,7 @@ $settings = @(
        Help = 'The ROOM CODE your friend got as host (for join mode), like XXXXX-XXXXX.' }
     @{ Page = 'Online'; F = 'G'; S = ''; K = 'player_name'; Label = 'Your name'; Kind = 'text'; Def = ''
        Help = 'The name the other players see. Empty = your Windows user name.' }
-    @{ Page = 'Online'; F = 'G'; S = ''; K = 'rollback'; Label = 'Rollback netcode (experimental)'; Kind = 'choice'; Values = $onoff; Def = 'off'
+    @{ Page = 'Online'; F = 'G'; S = ''; K = 'rollback'; Label = 'Rollback netcode (experimental)'; Kind = 'choice'; Values = $onoff; Def = 'on'
        Help = 'Smooth fights at high ping: a late input rolls the game back a few frames instead of slowing both players. Both players need it on and the same game version.' }
     @{ Page = 'Online'; F = 'G'; S = ''; K = 'online_upnp'; Label = 'Open the router port (UPnP)'; Kind = 'choice'; Values = @('on', 'off'); Def = 'on'
        Help = 'For host mode: asks your router to let the other player in (UDP 39500). If it fails, forward that port by hand or use the lobby.' }
