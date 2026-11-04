@@ -614,7 +614,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     memset((void *)(uintptr_t)out, 0, size);
     wr64(out, (uint64_t)InterlockedIncrement64(&g_sampling));
     if (id > 7 || !kind) return;                              /* the other styles are never filled */
-    unsigned trig_l = 0, trig_r = 0;
+    unsigned trig_l = 0, trig_r = 0, gc_l = 0, gc_r = 0;        /* (gc_l / gc_r: the GameCube pads' analog triggers, any style) */
     static long long l1_ticks;                               /* L1: fight-frame ticks seen at player 1's polls (SSBU_L1 report) */
     int r1_on(void), r1_poll(int ticks); void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry);    /* R1 (r1_state.c, SSBU_R1 only) */
     if (id == 0) { int fight_seq_ticks(void); int nt = fight_seq_ticks();
@@ -646,6 +646,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
                 if (ps.rx || ps.ry || !rx) { rx = ps.rx; ry = ps.ry; }
                 if (kind == 2 && ps.gc) { trig_l = (unsigned)ps.trig_l; trig_r = (unsigned)ps.trig_r; }
+                if (ps.gc) { if ((unsigned)ps.trig_l > gc_l) gc_l = (unsigned)ps.trig_l; if ((unsigned)ps.trig_r > gc_r) gc_r = (unsigned)ps.trig_r; }
             }
         }
         if (id == 0 && net_merge() && devices_live() && !menu_input_blocked())      /* online: the other pads of this PC play port 1 too */
@@ -657,6 +658,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                     if ((unsigned)ps.trig_l > trig_l) trig_l = (unsigned)ps.trig_l;
                     if ((unsigned)ps.trig_r > trig_r) trig_r = (unsigned)ps.trig_r;
                 }
+                if (ps.gc) { if ((unsigned)ps.trig_l > gc_l) gc_l = (unsigned)ps.trig_l; if ((unsigned)ps.trig_r > gc_r) gc_r = (unsigned)ps.trig_r; }
             }
     } else if (x_present(slot) && devices_live() && !menu_input_blocked()) {
         const XGamepad *g = &g_x[slot].st.pad;
@@ -675,9 +677,21 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
         ry = g->ry < -STICK_MAX ? -STICK_MAX : g->ry;
         wired = !g_x[slot].wireless;
     }
+    /* (2026-11-04) an online rollback match carries buttons and sticks, no analog trigger: a GameCube trigger pressed past 25%
+     * is also its L / R button here, before port 1's pad is recorded for the match (Elias: "no podia poner la R o la L":
+     * shown as a GameCube controller, the game read L / R from the analog triggers, and port 2 had none). */
+    if (id == 0 && r1_on() && (gc_l > 0x7fff / 4 || gc_r > 0x7fff / 4)) {
+        if (gc_l > 0x7fff / 4) buttons |= 1ull << BTN_L;
+        if (gc_r > 0x7fff / 4) buttons |= 1ull << BTN_R;
+    }
     if (id == 0) record_or_replay(&buttons, &lx, &ly);
     if (id == 0 && r1_on()) r1_pad(&buttons, &lx, &ly, &rx, &ry);
     if (id == 1 && r1_on()) { void r1_pad_id(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); r1_pad_id(1, &buttons, &lx, &ly, &rx, &ry); }      /* R3: port 2 in an online rollback match */
+    {   int rbg_pad_synced(int id);                       /* (2026-11-04) the same on both games: a GameCube port's triggers from the synced L / R */
+        if (kind == 2 && (id == 0 || id == 1) && r1_on() && rbg_pad_synced((int)id)) {
+            trig_l = (buttons >> BTN_L & 1) ? 0x7fff : 0;
+            trig_r = (buttons >> BTN_R & 1) ? 0x7fff : 0;
+        } }
     if (lx < -STICK_MAX / 2) buttons |= 1ull << BTN_SL_LEFT;
     if (lx > STICK_MAX / 2) buttons |= 1ull << BTN_SL_RIGHT;
     if (ly > STICK_MAX / 2) buttons |= 1ull << BTN_SL_UP;

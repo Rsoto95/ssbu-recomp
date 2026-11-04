@@ -573,7 +573,12 @@ void rbg_after_stop(void) {
     g_rbg_after_t0 = 0;
 }
 /* nnhid.c (through r1_pad / r1_pad_id): the pad of port id (0 / 1) in the pass now running */
+/* (2026-11-04) whether rbg_pad gave this port the same pad as on the other game at its last call (the countdown's empty pad
+ * or the match's pad): nnhid.c then makes a GameCube port's analog triggers from the synced L / R (the pad carries none) */
+static int g_rbg_synced[2];
+int rbg_pad_synced(int id) { return (id == 0 || id == 1) && g_rbg_synced[id]; }
 void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
+    if (id == 0 || id == 1) g_rbg_synced[id] = 0;
     if (g_session.fight_frame != g_rbg_seen_ff) { g_rbg_seen_ff = g_session.fight_frame; g_rbg_seen_t = now_ms(); }     /* (2026-11-04) the counter moving now: a fight runs */
     if (!g_rbg_in_match && g_rbg_ff_first < 0 && (id == 0 || id == 1) && g_session.fight_frame > g_rbg_ff_reset && rbg_fight_moving()) {    /* (2026-11-04) the countdown, see above */
         int rbn_agreed(void);
@@ -584,7 +589,7 @@ void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
         int ag = rbn_agreed();
         if (g_rbg_prepad && ag && ag != g_rbg_agreed_done && !rbn_spectating()) {
             if (!g_rbg_prepad_told) { g_rbg_prepad_told = 1; LOG("r1: RB NET: the fight's frames before the match start (from fight frame %lld): no pad on either player, on both games\n", g_session.fight_frame); }
-            *b = 0; *lx = *ly = *rx = *ry = 0; return;
+            *b = 0; *lx = *ly = *rx = *ry = 0; g_rbg_synced[id] = 1; return;
         }
     }
     if (!g_rbg_in_match && g_rbg_after_t0 > 0 && (id == 0 || id == 1) && rbg_after(id, b, lx, ly, rx, ry)) return;
@@ -622,6 +627,7 @@ void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
         rbn_local_pad(f, now); g_rbg_lastlocal = f;
     }
     RbPad p = rbn_pad(id, f);
+    g_rbg_synced[id] = 1;
     *b = p.buttons; *lx = p.lx; *ly = p.ly; *rx = p.rx; *ry = p.ry;
 }
 
