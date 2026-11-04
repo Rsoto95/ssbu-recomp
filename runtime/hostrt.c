@@ -785,6 +785,7 @@ void report_and_exit(int code) {
     module_coverage_report(stdout);
     if (g_trace) { print_import_summary(g_trace); print_hostfn_summary(g_trace); fclose(g_trace); }
     fflush(stdout);
+    log_async_drain(3000);                          /* (2026-11-04) the log thread's pipe into the file (boot.c) */
     ExitProcess((UINT)code);
 }
 
@@ -1091,6 +1092,7 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
         }
     }
     fflush(stdout);
+    log_async_drain(2000);                          /* (the log thread's pipe into the file first: boot.c) */
     crash_file_report(ep);                          /* the console report is out: a fault in what follows (stack, heap) cannot take it away */
     diag_minidump(ep, "crash");
     report_and_exit(4);

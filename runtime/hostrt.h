@@ -25,6 +25,7 @@ const char *hostfn_current_name(void);
 unsigned long long hostfn_current_calls(void);
 void print_hostfn_summary(FILE *out);
 void report_and_exit(int code);
+void log_async_drain(unsigned ms);                     /* (2026-11-04) boot.c: the log thread's pipe written out (at most ms) before the process ends */
 void runtime_init(const char *elf, const char *trace_path);
 void *import_data(const char *name);
 /* Make an imported data symbol resolve to host memory (call before runtime_init). */

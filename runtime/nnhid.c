@@ -325,8 +325,12 @@ static void record_or_replay(uint64_t *buttons, int *lx, int *ly) {
             fclose(f);
             printf("input replay: %d changes from %s\n", g_play_count, play);
         } else if (play) printf("input replay: cannot open %s\n", play);
-        if (!g_play_count) {
-            g_rec = fopen(rec ? rec : "input_last.rec", "w");
+        /* (2026-11-04) only with SSBU_REC (every test tool sets it): before, every game wrote work\input_last.rec, a line and
+         * an fflush at every change of player 1's pad, on the game's main thread, so a moment when the disk was busy (an
+         * SSD spike, OBS recording to the same drive) held the whole game: a friend's online fights froze 8 and 12 s, the
+         * main thread inside this fflush (WriteFile) */
+        if (!g_play_count && rec && rec[0]) {
+            g_rec = fopen(rec, "w");
             if (g_rec) fprintf(g_rec, "# a <anchor> <polls since the anchor> <buttons hex> <lx> <ly>   (see nnhid.c; replay with SSBU_PLAY=<this file>)\n");
         }
     }

@@ -460,11 +460,76 @@ static void check_romfs(void) {
     romfs_fail(msg);
 }
 
+/* (2026-11-04) THE LOG IS WRITTEN BY A THREAD OF ITS OWN. stdout is unbuffered (every printf is a WriteFile) and run.py
+ * points it at build\logs\game_*.log, so any thread that printed while the disk was busy (an SSD spike, OBS recording to
+ * the same drive) waited for the disk, the game's main thread too (a friend's fights froze for seconds). Now the C
+ * library's stdout / stderr write into a pipe (4 MB) and log_pump copies it to the log file: a slow disk only delays the
+ * file. The Windows standard handles stay the file, so a game started again from this one (OpenGL fallback, F1 restart)
+ * writes to it directly. The process's ends (report_and_exit, the crash filter, the close watchdog) call log_async_drain
+ * first, so the last lines (a crash report) reach the file. SSBU_LOG_ASYNC=0: written directly as before. */
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+static HANDLE g_log_r, g_log_file, g_log_thr;
+static int g_log_both;
+static volatile LONG g_log_on;
+static DWORD WINAPI log_pump(LPVOID arg) {
+    (void)arg;
+    static char buf[1 << 16];
+    DWORD n, w;
+    while (ReadFile(g_log_r, buf, sizeof buf, &n, NULL) && n)
+        for (char *q = buf; n; q += w, n -= w) if (!WriteFile(g_log_file, q, n, &w, NULL) || !w) return 0;
+    return 0;                                         /* (every write end closed: the pipe is empty and all of it is in the file) */
+}
+/* The end of the process: stdout / stderr go straight to the file again (what is printed after this is written at once,
+ * after the pipe's rest), the pipe's write ends close, and the pump ends once it has written everything (at most ms). */
+void log_async_drain(unsigned ms) {
+    if (InterlockedExchange(&g_log_on, 0) != 1) return;
+    fflush(stdout); fflush(stderr);
+    HANDLE d = NULL;
+    if (DuplicateHandle(GetCurrentProcess(), g_log_file, GetCurrentProcess(), &d, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+        int fd = _open_osfhandle((intptr_t)d, _O_TEXT);
+        if (fd >= 0) { _dup2(fd, 1); if (g_log_both) _dup2(fd, 2); _close(fd); } else CloseHandle(d);
+    }
+    if (g_log_thr) WaitForSingleObject(g_log_thr, ms);
+}
+static void log_async_start(void) {
+    const char *e = getenv("SSBU_LOG_ASYNC");
+    if (e && e[0] == '0') return;
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE), err = GetStdHandle(STD_ERROR_HANDLE);
+    if (!out || out == INVALID_HANDLE_VALUE || GetFileType(out) != FILE_TYPE_DISK) return;     /* (a console or a pipe: as before) */
+    HANDLE file = NULL, r = NULL, w = NULL;
+    /* the pump's own handle of the log: _dup2 below closes the C library's (the standard handle itself) */
+    if (!DuplicateHandle(GetCurrentProcess(), out, GetCurrentProcess(), &file, 0, TRUE, DUPLICATE_SAME_ACCESS)) return;
+    if (!CreatePipe(&r, &w, NULL, 4u << 20) && !CreatePipe(&r, &w, NULL, 1u << 20)) { CloseHandle(file); return; }
+    g_log_r = r; g_log_file = file;
+    g_log_thr = CreateThread(NULL, 64 << 10, log_pump, NULL, 0, NULL);
+    if (!g_log_thr) { CloseHandle(r); CloseHandle(w); CloseHandle(file); return; }
+    int fd = _open_osfhandle((intptr_t)w, _O_TEXT);
+    if (fd < 0) { CloseHandle(w); return; }             /* (the pump then ends at the pipe's end) */
+    fflush(stdout); fflush(stderr);
+    g_log_both = err && err != INVALID_HANDLE_VALUE && GetFileType(err) == FILE_TYPE_DISK;     /* run.py: stderr = stdout */
+    if (_dup2(fd, 1) != 0) { _close(fd); return; }
+    if (g_log_both) _dup2(fd, 2);
+    _close(fd);
+    SetStdHandle(STD_OUTPUT_HANDLE, file);             /* (_dup2 made the pipe the standard handle: a game started from this one gets the file) */
+    if (g_log_both) SetStdHandle(STD_ERROR_HANDLE, file);
+    InterlockedExchange(&g_log_on, 1);
+}
+static void log_async_note(void) { if (g_log_on) printf("log: written by a thread of its own (a busy disk no longer holds the game; SSBU_LOG_ASYNC=0: off)\n"); }
+#else
+void log_async_drain(unsigned ms) { (void)ms; }
+static void log_async_start(void) {}
+static void log_async_note(void) {}
+#endif
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--write-dump")) { int diag_dump_helper(int, char **); return diag_dump_helper(argc, argv); }   /* hostrt.c: minidump of the crashed game, written from outside */
     g_elf = argc > 1 ? argv[1] : "..\\binaries\\13.0.4\\main.elf";
     setvbuf(stdout, NULL, _IONBF, 0);
+    log_async_start();
     print_build_identity();
+    log_async_note();
     launch_defaults();
     {   void gfx_online_menu_env(void); gfx_online_menu_env(); }      /* (2026-11-02) graphics.ini online_menu = on: the Online menu's variables (gfx_options.c) */
     {   /* pad tools and their self-test (nnpad_sdl.c): no game is started */
