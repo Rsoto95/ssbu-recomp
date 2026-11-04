@@ -153,7 +153,7 @@ static long long g_rbg_ff_first = -1; static int g_rbg_basefix = -1;
  * the host's fighter got the HOST's pad on the host's game and the JOINER's (every pad of a PC plays port 1) on the
  * joiner's; whatever was pressed in the countdown made it start a move at frame 1 on one game only: desync from frame 1,
  * every checksum after it (also 1996z vs Hitboy x3, a player vs the owner, Dekaeme vs Player-1092). SSBU_RB_NET_PREPAD=0: off. */
-static long long g_rbg_ff_reset; static int g_rbg_prepad = -1, g_rbg_prepad_told;
+static long long g_rbg_ff_reset; static int g_rbg_prepad = -1, g_rbg_prepad_told, g_rbg_agreed_done;     /* (g_rbg_agreed_done: the agreement whose match is over) */
 static long long g_rbg_seen_ff = -1; static double g_rbg_seen_t;
 static int rbg_fight_moving(void) { return g_rbg_seen_t > 0 && now_ms() - g_rbg_seen_t < 250.0; }     /* (not in the menus or the results: the counter stands there) */
 static int g_rbg = -1;
@@ -568,7 +568,11 @@ void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
     if (!g_rbg_in_match && g_rbg_ff_first < 0 && (id == 0 || id == 1) && g_session.fight_frame > g_rbg_ff_reset && rbg_fight_moving()) {    /* (2026-11-04) the countdown, see above */
         int rbn_agreed(void);
         if (g_rbg_prepad < 0) { const char *e = getenv("SSBU_RB_NET_PREPAD"); g_rbg_prepad = !(e && e[0] == '0'); }
-        if (g_rbg_prepad && rbn_agreed() && !rbn_spectating()) {
+        /* (2026-11-04, second version) only for an agreement whose match has not ended yet: the fight frame counter also moves
+         * after the fight (the results screen), and the first version took that for the next countdown: no pad there, the
+         * results screen's A did nothing and the cards stayed closed */
+        int ag = rbn_agreed();
+        if (g_rbg_prepad && ag && ag != g_rbg_agreed_done && !rbn_spectating()) {
             if (!g_rbg_prepad_told) { g_rbg_prepad_told = 1; LOG("r1: RB NET: the fight's frames before the match start (from fight frame %lld): no pad on either player, on both games\n", g_session.fight_frame); }
             *b = 0; *lx = *ly = *rx = *ry = 0; return;
         }
@@ -680,6 +684,7 @@ void rbg_fight_off(void) {
     rbg_fibers_reap();                                  /* (the ring is empty: only running fibers and live objects keep theirs) */
     { char w[48]; snprintf(w, sizeof w, "match %d over", rbn_match_number()); rb_mem_report(w); }
     { char mk[24]; snprintf(mk, sizeof mk, "match%dover", g_rbg_in_match == 1 ? rbn_match_number() : 0); if (g_rbg_in_match == 1) input_mark(mk); else input_mark("localmatchover"); }
+    { int rbn_agreed(void); int ag = rbn_agreed(); if (ag) g_rbg_agreed_done = ag; }
     g_rbg_in_match = 0; g_rbg_ff_first = -1; g_rbg_ff_reset = g_session.fight_frame; g_rbg_prepad_told = 0;
     g_rbg_rb = 0; memset(g_rbg_k, 0, sizeof g_rbg_k); g_rbg_rerun = g_rbg_miss = g_rbg_stalls = g_rbg_capfail = g_rbg_capskip = g_rbg_lastlocal = g_rbg_real = g_rbg_gone = 0;
     g_rbg_stall_ms = g_rbg_load_ms = g_rbg_tick0 = g_rbg_next = g_rbg_last_go = 0;

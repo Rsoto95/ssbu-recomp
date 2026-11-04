@@ -181,8 +181,8 @@ static volatile LONG g_hs_room;                         /* (pub2) the last set-u
 int rbn_match_cancelled(void) { return g_hs_room ? 2 : (int)g_hs_cancelled; }      /* 0, 1 (not agreed: walk off) or 2 (pub2: a room fight, the game's own netcode) */
 /* (2026-11-04) this set-up's handshake agreed on a rollback match between the two fighters (cleared at every set-up):
  * rollback_controller.c rbg_pad gives both players no pad in the fight's frames before the match start */
-static volatile LONG g_hs_agreed;
-int rbn_agreed(void) { return (int)g_hs_agreed; }
+static volatile LONG g_hs_agreed, g_hs_agreed_n;        /* (agreed now; agreed handshakes so far: which one it was) */
+int rbn_agreed(void) { return g_hs_agreed ? (int)g_hs_agreed_n : 0; }      /* 0: not agreed; else the number of this agreement */
 /* (R3 lwr) debug_mode.c tells which set-up this is: 1 = a Local Wireless room's waiting-stage fight (the record builder called from
  * the waiting-stage set-up, one player), 0 = any other (the select screens' "ready to fight", also the room's match) */
 static int g_setup_waiting, g_hs_lwr;
@@ -668,7 +668,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         printf("[arena] handshake %ld: agreed with the other fighter%s: this game sends its final pads to the arena's group every pass\n", (long)round, g_local == 0 ? " and every spectator (HELLO)" : "");
     }
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
-    InterlockedExchange(&g_hs_agreed, 1);
+    InterlockedIncrement(&g_hs_agreed_n); InterlockedExchange(&g_hs_agreed, 1);
     g_hs_delay = out->pad0;
     printf("[rbnet] handshake %ld: input delay %d frames for this match (%s; here %d, 0 = auto)\n", (long)round, g_hs_delay,
            g_hs_delay ? "the larger of the two players' settings" : "both on auto: from the round trip", my_delay());
