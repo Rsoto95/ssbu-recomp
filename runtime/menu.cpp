@@ -1875,6 +1875,7 @@ static void upd_start_check(const char *branch) {
     InterlockedExchange(&g_chk_state, 1);
     HANDLE t = CreateThread(NULL, 0, update_ask_thread, NULL, 0, NULL); if (t) CloseHandle(t); else InterlockedExchange(&g_chk_state, 4);
 }
+static int g_stg_ask;                                  /* (2026-11-04) the staging warning is open: 1 = git switch, 2 = update channel */
 static void about_update_ui(void) {
     ImGui::Separator();
     LONG st = g_chk_state;
@@ -1886,11 +1887,34 @@ static void about_update_ui(void) {
     if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) upd_start_check(upd_branch());
     if (!git) {
         ImGui::SameLine();
-        if (!staging && ImGui::Button("Check for staging updates")) { upd_set_channel(1); upd_start_check("staging"); }
+        if (!staging && ImGui::Button("Check for staging updates")) { g_stg_ask = 2; ImGui::OpenPopup("TEST VERSION (staging)"); }
         if (staging && ImGui::Button("Back to normal updates")) { upd_set_channel(0); upd_start_check("main"); }
     }
     if (st == 1) ImGui::EndDisabled();
-    if (!git && !staging) ImGui::TextDisabled("Staging = the test versions, before everyone gets them: they may break. Back to normal: the button that appears instead.");
+    /* (2026-11-04) the move to staging is asked first: the button was easy to press by friends who do not want to test */
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("TEST VERSION (staging)", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.2f, 1), "WARNING: you are about to enter the TEST mode (staging).");
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Staging gets the newest changes BEFORE they are checked. It can:\n"
+                               "  - crash or freeze the game,\n"
+                               "  - play badly online (slow, desyncs) or not work at all,\n"
+                               "  - change several times a day.\n"
+                               "Players on the normal version may not be able to play with you.\n\n"
+                               "If you just want to play, choose \"No, keep the normal version\".\n"
+                               "To come back later: F1 > About > \"Back to normal updates\".");
+        ImGui::Spacing();
+        if (ImGui::Button("No, keep the normal version")) { g_stg_ask = 0; ImGui::CloseCurrentPopup(); }
+        ImGui::SetItemDefaultFocus();
+        ImGui::SameLine();
+        if (ImGui::Button("Yes, I want to test (staging)")) {
+            if (g_stg_ask == 2) { upd_set_channel(1); upd_start_check("staging"); }
+            printf("menu: staging chosen after the warning\n"); fflush(stdout);
+            g_stg_ask = 0; ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    if (!git && !staging) ImGui::TextDisabled("Staging = the TEST versions, before everyone gets them: they can crash. Only if you want to test; it asks first.");
     const char *have = getenv("SSBU_UPDATE_HAVE");
     if (st == 2 && have && *have) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "You have the latest version (%s).", g_chk_latest);
     else if (st == 2) ImGui::TextDisabled("The newest on GitHub is %s; this copy's is not known: start the game with \"Play SSBU.bat\".", g_chk_latest);
