@@ -538,7 +538,17 @@ static int net_merge(void) {
      * netcode (no rollback session): a GameCube controller that came up as player 2 behind the keyboard did not play the
      * fighter (owner's friend: "se le cambio el control") */
     int dm_melee_mode(void);
-    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started() || (mode >= 0 && dm_melee_mode() == 0x14);
+    int on = nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started() || (mode >= 0 && dm_melee_mode() == 0x14);
+    /* (2026-11-04) after a rollback match, still online, port 1 stays the merged pads when it has no device of its own (no
+     * keyboard on player 1, no pad on slot 1). Elias (keyboard: nobody, his GameCube controller came up as player 2): port 1
+     * existed only through the merge, the merge ended with the match (the arena's melee mode is made 0 for rollback, the
+     * session ends), port 1 vanished and the game showed player 1's controller unplugged after every match. A PC with its own
+     * port 1 device (the keyboard) is unchanged: there the merge kept on changed the next match's controls (9345a93). */
+    static int merged_in_match;
+    if (on && rbn_started()) merged_in_match = 1;
+    if (mode < 0) merged_in_match = 0;
+    if (!on && merged_in_match && g_keyboard_player != 0 && !nnpad_present(0)) return 1;
+    return on;
 }
 
 /* Is a controller connected as this npad id? Player 1 always exists in scripted runs (the script is its pad). */
