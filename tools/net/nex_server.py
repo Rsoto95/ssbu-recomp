@@ -903,7 +903,8 @@ class Client:
     def __init__(self, s, addr, log):
         self.s, self.log, self.who = s, log, "%s:%d" % addr
         self.send_lock = threading.Lock()
-        self.seq_out = 1                 # our next DATA sequence id (UNCONFIRMED: 1 unless the client gave option 3)
+        self.data_lock = threading.Lock()   # (2026-11-04) one message's fragments in a row (notifications come from other clients' threads)
+        self.seq_out = 1                # our next DATA sequence id (UNCONFIRMED: 1 unless the client gave option 3)
         self.fragments = b""
         self.handlers = HANDLERS         # (protocol, method) -> fn(client, Rmc) -> body bytes or int error
         self.local = s.getsockname()     # the address the game reached us on (the secure server's address)
@@ -1036,11 +1037,21 @@ class Client:
         self.log("%s     call to pid %d: protocol %d method %d %s" % (self.who, self.pid or 0, protocol, method, what))
         self.send_data(rmc_request(protocol, self.notify_call, method, body), self.last_ports[0], self.last_ports[1])
 
+    DATA_FRAGMENT = 1300                                     # the game's own fragment size (its fragments: 1300, 1300, ..., the rest)
+
     def send_data(self, payload, src_port=1, dst_port=0x1f):
-        p = Packet(TYPE_DATA, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE, self.seq_out, 10, 10, src_port, dst_port,
-                   0, None, payload)
-        self.seq_out = (self.seq_out + 1) & 0xffff
-        self.send_packet(p)
+        """(2026-11-04) at most 1300 bytes per packet, as the game sends: fragment ids 1, 2, ... and 0 on the last (or only)
+        one, each with its own sequence id. A Battle Arena search answering 2 arenas (1354 bytes) in one packet was never
+        acknowledged by the game (1 of 25 times; 0 / 1 arena: 146 of 146): the arena list stayed on "searching", 2618-0006
+        / 2306-0332 after it."""
+        chunks = [payload[i:i + self.DATA_FRAGMENT] for i in range(0, len(payload), self.DATA_FRAGMENT)] or [b""]
+        with self.data_lock:
+            for k, chunk in enumerate(chunks):
+                frag = 0 if k == len(chunks) - 1 else k + 1
+                p = Packet(TYPE_DATA, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE, self.seq_out, 10, 10, src_port, dst_port,
+                           frag, None, chunk)
+                self.seq_out = (self.seq_out + 1) & 0xffff
+                self.send_packet(p)
 
     # RMC
     def on_rmc(self, data):
