@@ -363,6 +363,7 @@ static DWORD WINAPI close_watchdog(LPVOID arg) {
     Sleep(4000);
     printf("\nwindow closed but the game did not end within 4 s: ended now\n");
     fflush(stdout);
+    log_async_drain(2000);                          /* (2026-11-04) the log thread's pipe into the file (boot.c) */
     TerminateProcess(GetCurrentProcess(), 0);
     return 0;
 }
