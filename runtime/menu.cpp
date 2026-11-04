@@ -1121,7 +1121,7 @@ static void sec_experimental(void) {
 #else
             rb_have = 0;
 #endif
-            rb_on = ini_read("rollback", v, sizeof v) && !off_word(v); rb_on0 = rb_on;
+            rb_on = !ini_read("rollback", v, sizeof v) || !off_word(v); rb_on0 = rb_on;      /* (2026-11-04) missing = on, as Play SSBU.bat (run.py) */
         }
         if (onoff("rb", rb_on != 0, rb_have || rb_on)) { rb_on = !rb_on; ini("rollback", rb_on ? "on" : "off"); }
         ImGui::SameLine(); ImGui::Text("Rollback netcode");
@@ -1142,7 +1142,7 @@ static void sec_experimental(void) {
     tag(1, om != om0);
     help("ON: the game's own Online > Battle Arenas work, on the project's server: make an arena (it gets a 5-character code), "
          "your friends find it by its code or in the list. 1-on-1 fights use rollback; the others in the arena watch them. "
-         "While it is ON the Local Wireless rooms are not available: turn it OFF to play in them again. Used when the game starts again.");
+         "While it is ON the Local Wireless rooms are not available: turn it OFF to play in them again. ON by default. Used when the game starts again.");
     {   /* (2026-11-02) tournaments: graphics.ini tournaments, read at the start (gfx_options.c gfx_online_menu_env). [restart] */
         static int tn = -1, tn0;
         if (tn < 0) { tn = gfx_tournaments(); tn0 = tn; }
