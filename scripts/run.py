@@ -531,6 +531,15 @@ def main():
         # libopus decodes the game's music and most sounds (testers' log 2026-10-20: "libopus NOT FOUND", no sound): the
         # copy install.py fetched into deps\opus is used when the one beside the exe is missing
         dep = os.path.join(REPO, 'deps', 'opus', 'libopus-0.dll')
+        if not os.path.isfile(dep):
+            # (2026-11-04) downloaded again here (SHA-256 checked, fetch_media.py): a friend's install had not got it and
+            # he played without music for days; the installer was the only place that fetched it
+            print('libopus-0.dll (the music) is missing: downloading it again ...')
+            try:
+                import fetch_media
+                fetch_media.fetch_opus(os.path.join(REPO, 'deps'))
+            except Exception as e:
+                print('libopus: the download failed (%s)' % e)
         if os.path.isfile(dep):
             env['SSBU_OPUS_DLL'] = dep
         else:
