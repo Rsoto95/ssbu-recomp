@@ -55,8 +55,10 @@ uint8_t *in_shadow(uint8_t *a, uint8_t **cmap, size_t *pi) {
 int sh_commit(uint8_t *sh, uint8_t *cmap, size_t pi) {
     if (!sh || !cmap || cmap[pi]) return sh != NULL;
     size_t c0 = pi & ~(size_t)15;
-    if (!VirtualAlloc(sh - (pi - c0) * PG, 16 * PG, MEM_COMMIT, PAGE_READWRITE)) return 0;
-    memset(cmap + c0, 1, 16);
+    size_t n = ((cmap == g_sh1c ? g_wn1 : WN2) >> 12) - c0;    /* the last 16-page group may be shorter */
+    if (n > 16) n = 16;
+    if (!VirtualAlloc(sh - (pi - c0) * PG, n * PG, MEM_COMMIT, PAGE_READWRITE)) return 0;
+    memset(cmap + c0, 1, n);
     return 1;
 }
 int mark_bind(void) { return 0; }             /* no marked game DLL on Linux */
@@ -84,6 +86,7 @@ static int win2_id(const uint8_t *a, uint32_t *id) {
     *id = (uint32_t)(g_rg_n1 + (((uintptr_t)a - WIN2) >> 12)); return 1;
 }
 static void pending_add(uint32_t id) {
+    if (id < g_rg_n1 ? (g_ns1 && g_ns1[id]) : (g_ns2 && g_ns2[id - g_rg_n1])) return;      /* not simulation: scans skip these too */
     AcquireSRWLockExclusive(&g_pending_lock);
     if (g_npending < g_npending_cap) g_pending[g_npending++] = id;
     else InterlockedExchange(&g_pending_overflow, 1);
@@ -124,9 +127,9 @@ int r1_ww_taken(const void *p, size_t n) {     /* did our window-1 poll consume 
 static void drain_pending(void (*fn)(uint32_t id, int w, size_t j)) {
     AcquireSRWLockExclusive(&g_pending_lock);
     for (size_t i = 0; i < g_npending; i++) {
-        uint32_t id = g_pending[i];
-        if (id < g_rg_n1) fn(id, 0, id);
-        else fn(id, 1, id - g_rg_n1);
+        uint32_t id = g_pending[i];                             /* ns bits can be set after the page was queued */
+        if (id < g_rg_n1) { if (g_ns1 && g_ns1[id]) continue; fn(id, 0, id); }
+        else { size_t j = id - g_rg_n1; if (g_ns2 && g_ns2[j]) continue; fn(id, 1, j); }
     }
     g_npending = 0;
     ReleaseSRWLockExclusive(&g_pending_lock);
@@ -250,7 +253,7 @@ void ls_capture_pages(void (*fn)(uint32_t id, int w, size_t j)) {
     if (InterlockedExchange(&g_pending_overflow, 0)) {
         for (int i = 0; i < g_nwin2; i++) for (size_t p = 0; p < g_win2[i].n; p += PG) {
             size_t j = (size_t)((uintptr_t)(g_win2[i].a + p) - WIN2) >> 12;
-            if (!g_ns2[j]) fn((uint32_t)(g_rg_n1 + j), 1, j);
+            if (!g_ns2[j]) cap_cb((uint32_t)(g_rg_n1 + j), 1, j);   /* not fn: a page drained above or scanned below must not enter the undo log twice */
         }
     }
     scan_window1(cap_cb, 1);
