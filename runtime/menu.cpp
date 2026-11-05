@@ -748,6 +748,8 @@ static void sec_controls(void) {
     if (dv) snprintf(cur, sizeof cur, "%s (%s)%s", dv->name, nnpad_type_label(dv->type), dv->player >= 0 ? "" : " - no player");
     else snprintf(cur, sizeof cur, "Keyboard");
     const bool dis_2 = capturing();
+    ImGui::TextColored(ImVec4(1, 0.85f, 0.3f, 1), "GameCube controller? Set up your buttons on the PRO CONTROLLER in the game (Options > Controls):");
+    ImGui::TextColored(ImVec4(1, 0.85f, 0.3f, 1), "online every controller is read as a Pro Controller.");      /* (2026-11-04, gc_pro_notice) */
     {   /* (2026-11-03) every controller's vibration at once ([general] rumble of controllers.ini): off = nothing vibrates,
          * whatever the game's own (name tag) setting says */
         bool rumble = nnpad_rumble_on() != 0;
@@ -1779,6 +1781,28 @@ static void update_check(void) {                           /* render thread, eve
                    "The game closes, installs it (about a minute) and opens again by itself.");
     }
 }
+/* (2026-11-04, owner) online fights read every controller as a Pro Controller (nnhid.c npad_style), a GameCube one too, so
+ * a GameCube player's buttons must be set up on the game's PRO CONTROLLER controls. Said once per run, 20 s after the start
+ * or when a GameCube controller first shows up later: the short note at the bottom (menu_toast: no input, gone after 10 s;
+ * the owner: "it must not get in the way"). SSBU_GC_PRO_NOTE=0: never. */
+static const char k_gc_pro_note[] = "GameCube controller: set up your buttons on the PRO CONTROLLER (Options > Controls).\n"
+                                    "Online every controller is read as a Pro Controller.\n"
+                                    "Control de GameCube: configura tus botones en el PRO CONTROLLER.";
+static void gc_pro_notice(void) {
+    static int done = -1; static ULONGLONG t0, next;
+    if (done < 0) { const char *e = getenv("SSBU_GC_PRO_NOTE"); done = e && e[0] == '0'; }
+    if (done) return;
+    ULONGLONG t = GetTickCount64();
+    if (!t0) t0 = t;
+    if (t - t0 < 20000 || t < next) return;
+    next = t + 1000;
+    if (g_open || popup_on() || toast_on()) return;
+    for (int p = 0; p < 8; p++) if (nnpad_is_gc(p)) {
+        menu_toast(k_gc_pro_note, 10000); done = 1;
+        printf("menu: note: a GameCube controller (player %d): its buttons are set up on the Pro Controller (online every controller is one)\n", p + 1); fflush(stdout);
+        break;
+    }
+}
 static void update_and_restart(void);
 /* (2026-11-02) F1 > About > "Check for updates": GitHub's newest commit of the project (the repository "Play SSBU.bat"
  * updates from) asked NOW, on a thread of its own (winhttp.dll loaded when pressed: no new link library), and compared with
@@ -2195,6 +2219,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
     update_check();
+    gc_pro_notice();
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
