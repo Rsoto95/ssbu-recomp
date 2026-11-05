@@ -1123,7 +1123,13 @@ double rbn_pace_extra(long long f) {
         if (g_peerdelay && g_lockstep) est_ms += g_tsbias; else if (peer_lockstep()) est_ms -= g_tsbias;
         /* ahead: half of the lead given back over the next 30 frames (the other game, behind, does nothing; both halves meet) */
         /* (2026-11-03) 8 ms, half a frame (clock_sync.c's and Slippi's threshold), not 2: the estimate's own noise is a few ms */
-        if (est_ms >= 8.0) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; }
+        /* (2026-11-05, owner: delay 6 at ~157 ms and still hitches) 4 ms (SSBU_RB_NET_TSMIN): with the delay covering the trip
+         * by ~20 ms, a lead of 8..28 ms was already a rollback on every change of the other player's input (the owner's match:
+         * 179 rollbacks in the first 10 s at 28 ms ahead, none once the clocks met); the samples are forgotten when a
+         * correction starts, so the next decision measures the new lead and not the same old one again */
+        static double ts_min = -1;
+        if (ts_min < 0) { const char *e = getenv("SSBU_RB_NET_TSMIN"); ts_min = e ? atof(e) : 4.0; }
+        if (est_ms >= ts_min) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; rb_ts_forget(); }
         else g_ts_left = 0;
     }
     if (g_ts_left > 0) { g_ts_left--; return g_ts_extra; }

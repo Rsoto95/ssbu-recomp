@@ -1805,6 +1805,43 @@ static void update_check(void) {                           /* render thread, eve
                    "The game closes, installs it (about a minute) and opens again by itself.");
     }
 }
+/* (2026-11-05, owner: "si alguien dice que no también tiene que tener un mensaje en el juego") run.py could not allow the game
+ * in the Windows Firewall (the administrator prompt refused, or a block rule left): SSBU_FIREWALL = blocked / missing. Said at
+ * the top 25 s after the start, and at the bottom in each online match that still goes through the server 10 s after its
+ * start (the other player cannot reach this PC directly: higher ping). SSBU_FIREWALL unset: never. */
+static const char k_fw_text[] =
+    "Windows Firewall is blocking the game: other players cannot reach you directly, so matches go through the server (higher ping).\n"
+    "Fix: close the game, open it with \"Play SSBU.bat\" and press YES when Windows asks for permission.\n"
+    "El Firewall de Windows bloquea el juego: tus partidas van por el servidor (mas ping). Cierra el juego, abrelo con\n"
+    "\"Play SSBU.bat\" y presiona SI cuando Windows pida permiso.";
+#ifdef _WIN32
+extern "C" int rbn_started(void);
+extern "C" int net_rb_direct(void);
+#endif
+static void firewall_notice(void) {
+    static int state = -1; static ULONGLONG t0, next, match_t0; static int start_done, match_said;
+    if (state < 0) { const char *e = getenv("SSBU_FIREWALL"); state = e && (!strcmp(e, "blocked") || !strcmp(e, "missing")); }
+    if (!state) return;
+    ULONGLONG t = GetTickCount64();
+    if (!t0) t0 = t;
+    if (t < next) return;
+    next = t + 1000;
+    if (!start_done && t - t0 >= 25000 && !g_open && !popup_on()) {
+        start_done = 1;
+        menu_popup("Windows Firewall", k_fw_text);
+        printf("menu: note: the Windows Firewall does not allow the game (%s): told on screen\n", getenv("SSBU_FIREWALL")); fflush(stdout);
+    }
+#ifdef _WIN32
+    if (!rbn_started()) { match_t0 = 0; match_said = 0; return; }
+    if (!match_t0) match_t0 = t;
+    if (!match_said && t - match_t0 >= 10000 && !net_rb_direct() && !toast_on()) {
+        match_said = 1;
+        menu_toast("Firewall blocks the game: match via server (more ping). Next start press YES.\n"
+                   "El Firewall bloquea el juego: partida por el servidor. Al abrir presiona SI.", 12000);
+        printf("menu: note: this match goes through the server and the Windows Firewall does not allow the game: told on screen\n"); fflush(stdout);
+    }
+#endif
+}
 static void update_and_restart(void);
 /* (2026-11-02) F1 > About > "Check for updates": GitHub's newest commit of the project (the repository "Play SSBU.bat"
  * updates from) asked NOW, on a thread of its own (winhttp.dll loaded when pressed: no new link library), and compared with
@@ -1844,7 +1881,7 @@ static DWORD wh_get(HMODULE w, const wchar_t *host, const wchar_t *path, const w
 }
 /* (2026-11-03) the update channel: the branch this copy follows (run.py SSBU_UPDATE_BRANCH: main, or staging when
  * <repo>\update_channel.txt says so: test versions for the friends who help test). The check asks GitHub for that branch. */
-static char g_chk_branch[16] = "main";
+static char g_chk_branch[128] = "main";
 static const char *upd_branch(void) { const char *b = getenv("SSBU_UPDATE_BRANCH"); return b && *b ? b : "main"; }
 static int upd_repo_is_git(void) {
     const char *d = getenv("SSBU_UPDATE_DIR"); char p[MAX_PATH];
@@ -1852,22 +1889,61 @@ static int upd_repo_is_git(void) {
     snprintf(p, sizeof p, "%s\\.git", d);
     return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
 }
-static void upd_set_channel(int staging) {               /* written for run.py / update.py (the next start and Update and restart) */
+/* (2026-11-05, owner: "check for updates in staging deberia de ser un dropdown con las diferentes ramas") any branch of the
+ * repository can be followed: update_channel.txt holds its name (update.py channel_branch accepts any valid branch name);
+ * main deletes the file. A name with characters a branch cannot have is refused. */
+static int upd_branch_ok(const char *b) {
+    if (!b || !*b || strlen(b) >= sizeof g_chk_branch || strstr(b, "..") || b[0] == '/' || b[0] == '-') return 0;
+    for (const char *q = b; *q; q++) if (!isalnum((unsigned char)*q) && !strchr("._/-", *q)) return 0;
+    return 1;
+}
+static void upd_set_channel(const char *branch) {        /* written for run.py / update.py (the next start and Update and restart) */
+    if (!upd_branch_ok(branch)) branch = "main";
+    int test = strcmp(branch, "main") != 0;
     const char *d = getenv("SSBU_UPDATE_DIR"); char p[MAX_PATH];
     if (d && *d) {
         snprintf(p, sizeof p, "%s\\update_channel.txt", d);
-        if (staging) { FILE *f = fopen(p, "w"); if (f) { fputs("staging\n", f); fclose(f); } } else DeleteFileA(p);
+        if (test) { FILE *f = fopen(p, "w"); if (f) { fprintf(f, "%s\n", branch); fclose(f); } } else DeleteFileA(p);
     }
-    _putenv_s("SSBU_UPDATE_BRANCH", staging ? "staging" : "main");
-    printf("menu: update channel: %s (%s)\n", staging ? "STAGING (test versions)" : "normal (main)", d && *d ? d : "no folder known"); fflush(stdout);
+    _putenv_s("SSBU_UPDATE_BRANCH", branch);
+    printf("menu: update channel: %s%s (%s)\n", branch, test ? " (TEST versions)" : " (normal)", d && *d ? d : "no folder known"); fflush(stdout);
+}
+/* (2026-11-05) the repository's branches, asked from GitHub on a thread when F1 > About first shows the list (or Refresh) */
+#define UPD_NB 48
+static char g_br[UPD_NB][128]; static volatile LONG g_br_n, g_br_state;   /* state: 0 never, 1 asking, 2 done, 3 failed */
+static DWORD WINAPI branches_thread(LPVOID unused) {
+    (void)unused;
+    static char js[96 * 1024];
+    HMODULE w = LoadLibraryW(L"winhttp.dll");
+    DWORD n = w ? wh_get(w, L"api.github.com", L"/repos/Rsoto95/ssbu-recomp/branches?per_page=100", L"Accept: application/vnd.github+json\r\n", js, sizeof js) : 0;
+    int k = 0;
+    if (n) {
+        const char *q = js;
+        while (k < UPD_NB && (q = strstr(q, "\"name\"")) != NULL) {
+            q += 6; while (*q == ' ' || *q == ':') q++;
+            if (*q != '"') continue;
+            q++; const char *e = strchr(q, '"'); if (!e) break;
+            char b[128]; size_t len = (size_t)(e - q); if (len >= sizeof b) { q = e; continue; }
+            memcpy(b, q, len); b[len] = 0; q = e + 1;
+            if (upd_branch_ok(b)) snprintf(g_br[k++], sizeof g_br[0], "%s", b);
+        }
+    }
+    InterlockedExchange(&g_br_n, k);
+    printf("menu: branches on GitHub: %d%s\n", k, n ? "" : " (GitHub could not be asked)"); fflush(stdout);
+    InterlockedExchange(&g_br_state, k ? 2 : 3);
+    return 0;
+}
+static void upd_ask_branches(void) {
+    InterlockedExchange(&g_br_state, 1);
+    HANDLE t = CreateThread(NULL, 0, branches_thread, NULL, 0, NULL); if (t) CloseHandle(t); else InterlockedExchange(&g_br_state, 3);
 }
 static DWORD WINAPI update_ask_thread(LPVOID unused) {
     (void)unused;
     char got[64] = ""; DWORD n = 0;
     HMODULE w = LoadLibraryW(L"winhttp.dll");
-    wchar_t path[160], ipath[160];
-    swprintf(path, 160, L"/repos/Rsoto95/ssbu-recomp/commits/%hs", g_chk_branch);
-    swprintf(ipath, 160, L"/Rsoto95/ssbu-recomp/%hs/scripts/install.py", g_chk_branch);
+    wchar_t path[300], ipath[300];
+    swprintf(path, 300, L"/repos/Rsoto95/ssbu-recomp/commits/%hs", g_chk_branch);
+    swprintf(ipath, 300, L"/Rsoto95/ssbu-recomp/%hs/scripts/install.py", g_chk_branch);
     if (w) n = wh_get(w, L"api.github.com", path, L"Accept: application/vnd.github.sha\r\n", got, sizeof got);
     /* (2026-11-03) the game program too: the release the newest install.py names (runtime-<commit>) against this exe's version
      * ("<date>.<time>-<commit>"). A friend's code was the newest while the program was the old one, and this said "latest". */
@@ -1901,46 +1977,66 @@ static void upd_start_check(const char *branch) {
     InterlockedExchange(&g_chk_state, 1);
     HANDLE t = CreateThread(NULL, 0, update_ask_thread, NULL, 0, NULL); if (t) CloseHandle(t); else InterlockedExchange(&g_chk_state, 4);
 }
-static int g_stg_ask;                                  /* (2026-11-04) the staging warning is open: 1 = git switch, 2 = update channel */
+static char g_stg_want[128];                           /* (2026-11-05) the test branch chosen in the list, asked about in the warning */
 static void about_update_ui(void) {
     ImGui::Separator();
     LONG st = g_chk_state;
-    int staging = !strcmp(upd_branch(), "staging"), git = upd_repo_is_git();
-    if (git) ImGui::TextDisabled("Updates: this copy is a git checkout (branch %s): git decides what it runs.", upd_branch());
-    else if (staging) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Updates: STAGING (test versions: they may break; thanks for testing).");
+    const char *cur = upd_branch();
+    int test = strcmp(cur, "main") != 0, git = upd_repo_is_git();
+    if (git) ImGui::TextDisabled("Updates: this copy is a git checkout (branch %s): git decides what it runs.", cur);
+    else if (test) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Updates: TEST branch \"%s\" (test versions: they may break; thanks for testing).", cur);
     else ImGui::TextDisabled("Updates: normal (main).");
     if (st == 1) ImGui::BeginDisabled();
-    if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) upd_start_check(upd_branch());
-    if (!git) {
-        ImGui::SameLine();
-        if (!staging && ImGui::Button("Check for staging updates")) { g_stg_ask = 2; ImGui::OpenPopup("TEST VERSION (staging)"); }
-        if (staging && ImGui::Button("Back to normal updates")) { upd_set_channel(0); upd_start_check("main"); }
-    }
+    if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) upd_start_check(cur);
     if (st == 1) ImGui::EndDisabled();
-    /* (2026-11-04) the move to staging is asked first: the button was easy to press by friends who do not want to test */
+    if (!git) {
+        /* (2026-11-05, owner) a list of the repository's branches instead of one "staging" button: a change being tried is put
+         * on a branch of its own, and the friends who test it choose it here (main = the normal version) */
+        if (g_br_state == 0) upd_ask_branches();
+        ImGui::SetNextItemWidth(320);
+        if (ImGui::BeginCombo("Version to follow##branch", test ? cur : "main (normal)")) {
+            if (ImGui::Selectable("main (normal)", !test) && test) { upd_set_channel("main"); upd_start_check("main"); }
+            LONG nb = g_br_n;
+            for (int i = 0; i < nb; i++) {
+                if (!strcmp(g_br[i], "main")) continue;
+                if (ImGui::Selectable(g_br[i], !strcmp(g_br[i], cur)) && strcmp(g_br[i], cur)) snprintf(g_stg_want, sizeof g_stg_want, "%s", g_br[i]);
+            }
+            if (g_br_state == 1) ImGui::TextDisabled("asking GitHub for the branches...");
+            else if (g_br_state == 3) ImGui::TextDisabled("GitHub could not be asked");
+            ImGui::EndCombo();
+        }
+        if (g_stg_want[0] && !ImGui::IsPopupOpen("TEST VERSION##branch")) ImGui::OpenPopup("TEST VERSION##branch");
+        ImGui::SameLine();
+        if (g_br_state == 1) ImGui::BeginDisabled();
+        if (ImGui::Button("Refresh list")) upd_ask_branches();
+        if (g_br_state == 1) ImGui::EndDisabled();
+    }
+    /* (2026-11-04) the move to a test version is asked first: the button was easy to press by friends who do not want to test */
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("TEST VERSION (staging)", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.2f, 1), "WARNING: you are about to enter the TEST mode (staging).");
+    if (ImGui::BeginPopupModal("TEST VERSION##branch", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.2f, 1), "WARNING: you are about to follow the TEST branch \"%s\".", g_stg_want);
         ImGui::Spacing();
-        ImGui::TextUnformatted("Staging gets the newest changes BEFORE they are checked. It can:\n"
+        ImGui::TextUnformatted("A test branch gets changes BEFORE they are checked. It can:\n"
                                "  - crash or freeze the game,\n"
                                "  - play badly online (slow, desyncs) or not work at all,\n"
                                "  - change several times a day.\n"
                                "Players on the normal version may not be able to play with you.\n\n"
-                               "If you just want to play, choose \"No, keep the normal version\".\n"
-                               "To come back later: F1 > About > \"Back to normal updates\".");
+                               "If you just want to play, choose \"No, keep my version\".\n"
+                               "To come back later: F1 > About > Version to follow > \"main (normal)\".");
         ImGui::Spacing();
-        if (ImGui::Button("No, keep the normal version")) { g_stg_ask = 0; ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("No, keep my version")) { g_stg_want[0] = 0; ImGui::CloseCurrentPopup(); }
         ImGui::SetItemDefaultFocus();
         ImGui::SameLine();
-        if (ImGui::Button("Yes, I want to test (staging)")) {
-            if (g_stg_ask == 2) { upd_set_channel(1); upd_start_check("staging"); }
-            printf("menu: staging chosen after the warning\n"); fflush(stdout);
-            g_stg_ask = 0; ImGui::CloseCurrentPopup();
+        if (ImGui::Button("Yes, I want to test it")) {
+            char b[128]; snprintf(b, sizeof b, "%s", g_stg_want);
+            upd_set_channel(b); upd_start_check(b);
+            printf("menu: test branch %s chosen after the warning\n", b); fflush(stdout);
+            g_stg_want[0] = 0; ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
-    if (!git && !staging) ImGui::TextDisabled("Staging = the TEST versions, before everyone gets them: they can crash. Only if you want to test; it asks first.");
+    if (!git && !test) ImGui::TextDisabled("Test branches = changes being tried, before everyone gets them: they can crash. Only if you want to test; it asks first.");
+    if (!git && test) ImGui::TextDisabled("After choosing a version: \"Update and restart\" below installs it.");
     const char *have = getenv("SSBU_UPDATE_HAVE");
     if (st == 2 && have && *have) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "You have the latest version (%s).", g_chk_latest);
     else if (st == 2) ImGui::TextDisabled("The newest on GitHub is %s; this copy's is not known: start the game with \"Play SSBU.bat\".", g_chk_latest);
@@ -1993,6 +2089,7 @@ static void update_banner(void) {                          /* the top of every F
 #else
 static void update_check(void) {}
 static void update_banner(void) {}
+static void firewall_notice(void) {}      /* run.py asks the Windows Firewall only (SSBU_FIREWALL) */
 #endif
 static void draw_menu(int cw, int ch) {
     if (ImGui::BeginMainMenuBar()) {
@@ -2222,6 +2319,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
     update_check();
     gc_pro_notice();
+    firewall_notice();
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif

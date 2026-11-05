@@ -16,6 +16,9 @@ static int32_t g_estimate;                 /* the last decision's estimate of th
 void rb_ts_reset(int frame_us) { memset(g_samples, 0, sizeof g_samples); g_nsamples = g_next_sample = 0; g_estimate = 0; g_frame_us = frame_us > 0 ? frame_us : 16683; }
 /* Records one measurement of how far ahead of the peer this side's frame clock runs (microseconds, negative = behind). Keeps the latest SAMPLE_COUNT. */
 void rb_ts_sample(int32_t offset_us) { g_samples[g_next_sample] = offset_us; g_next_sample = (g_next_sample + 1) % SAMPLE_COUNT; if (g_nsamples < SAMPLE_COUNT) g_nsamples++; }
+/* (2026-11-05) Forgets the samples (the estimate stays): called when a correction starts, so the next decision is made from
+ * samples taken after it and not from the old lead again (an estimate over 3 s of pings kept slowing a game already caught up). */
+void rb_ts_forget(void) { g_nsamples = g_next_sample = 0; }
 /* The estimate of how far ahead of the peer this side is, as of the last decision (microseconds). */
 int32_t rb_ts_offset(void) { return g_estimate; }
 

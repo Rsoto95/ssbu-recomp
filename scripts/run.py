@@ -359,43 +359,65 @@ def ensure_firewall(exe, build, gini):
     if ini_get(gini, 'firewall') in ('off', '0', 'no', 'false'):
         return
     refused = os.path.join(build, 'firewall_refused.txt')
+    q = exe.replace("'", "''")
 
-    def has_rule():
+    def rules():
+        """(2026-11-05) (allow, block): enabled inbound rules for this exe that allow / block it, None when it cannot be
+        asked. Before, any rule named "SSBU native" with the path counted, and a BLOCK rule was not looked at: Windows makes
+        block rules when its own prompt is cancelled, and those win over an allow rule (two friends: no prompt, every
+        packet of the other player dropped, the match relayed through the server at 150+ ms)."""
+        ps = ("$ErrorActionPreference='SilentlyContinue'; Get-NetFirewallApplicationFilter -Program '%s' | Get-NetFirewallRule | "
+              "Where-Object { $_.Direction -eq 'Inbound' -and $_.Enabled -eq 'True' } | ForEach-Object { 'R ' + $_.Action }" % q)
         try:
-            out = subprocess.run(['netsh', 'advfirewall', 'firewall', 'show', 'rule', 'name=SSBU native', 'verbose'],
-                                 capture_output=True, timeout=15).stdout.decode('mbcs', 'replace')
+            r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, timeout=30)
         except (OSError, subprocess.SubprocessError):
-            return None                               # netsh missing or stuck: nothing is asked
-        return os.path.normcase(exe) in os.path.normcase(out)
+            return None                               # PowerShell missing or stuck: nothing is asked
+        if r.returncode != 0:
+            return None
+        acts = [ln.strip()[2:] for ln in r.stdout.decode('mbcs', 'replace').splitlines() if ln.strip().startswith('R ')]
+        return 'Allow' in acts, 'Block' in acts
 
-    have = has_rule()
-    if have is None or have:
+    st = rules()
+    if st is None or (st[0] and not st[1]):
         return
-    try:
+    try:                                              # a refusal: asked again after a day, not never
         with open(refused, encoding='utf-8') as f:
-            if os.path.normcase(f.read().strip()) == os.path.normcase(exe):
-                return
+            if os.path.normcase(f.read().strip()) == os.path.normcase(exe) and time.time() - os.path.getmtime(refused) < 86400:
+                return 'blocked' if st[1] else 'missing'
     except OSError:
         pass
-    print('The Windows Firewall has no rule for the game yet: without it the other players may not reach you (disconnects,\n'
-          'high ping, error 2618). Windows now asks for administrator permission ONCE to add it. Press "Yes".')
-    inner = ("New-NetFirewallRule -DisplayName 'SSBU native' -Direction Inbound -Program '%s' -Action Allow -Profile Any | Out-Null"
-             % exe.replace("'", "''"))
+    if st[1]:
+        print('The Windows Firewall BLOCKS the game (a "Cancel" on a Windows prompt makes such a rule): the other players\n'
+              'cannot reach you (high ping, every match through the server, error 2618). Windows now asks for administrator\n'
+              'permission to remove the block and allow the game. Press "Yes".')
+    else:
+        print('The Windows Firewall has no rule for the game yet: without it the other players may not reach you (disconnects,\n'
+              'high ping, error 2618). Windows now asks for administrator permission ONCE to add it. Press "Yes".')
+    inner = ("Get-NetFirewallApplicationFilter -Program '%s' | Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' -and "
+             "$_.Action -eq 'Block' } | Remove-NetFirewallRule; New-NetFirewallRule -DisplayName 'SSBU native' -Direction Inbound "
+             "-Program '%s' -Action Allow -Profile Any | Out-Null" % (q, q))
     outer = ("Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','%s'"
              % inner.replace("'", "''"))
     try:
         subprocess.run(['powershell', '-NoProfile', '-Command', outer], capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         pass
-    if has_rule():
-        print('Firewall rule added.')
+    st = rules()
+    if st and st[0] and not st[1]:
+        print('Firewall rule added: the game is allowed.')
+        try:
+            os.remove(refused)
+        except OSError:
+            pass
         return
-    print('The firewall rule was not added (the permission was refused). Not asked again; to be asked again delete\n  %s' % refused)
+    print('The firewall rule was not added (the permission was refused). Asked again tomorrow; to be asked at the next\n'
+          'start delete  %s' % refused)
     try:
         with open(refused, 'w', encoding='utf-8') as f:
             f.write(exe)
     except OSError:
         pass
+    return 'blocked' if st and st[1] else 'missing'      # (2026-11-05, owner) the game says it on screen (menu.cpp firewall_notice)
 
 
 def uffd_warn():
@@ -649,7 +671,9 @@ def main():
     if a.linux and (rollback or env.get('SSBU_RB_NET') or env.get('SSBU_RB_SIM')) and not env.get('SSBU_NO_WRITEWATCH'):
         uffd_warn()
     if a.play and os.name == 'nt' and not (a.linux or a.mac) and env.get('SSBU_ONLINE', '') not in ('off', '0', 'no', 'false'):
-        ensure_firewall(os.path.abspath(exe), a.build, gini)
+        fw = ensure_firewall(os.path.abspath(exe), a.build, gini)
+        if fw:
+            env['SSBU_FIREWALL'] = fw                 # 'blocked' / 'missing': the game tells the player on screen
     os.makedirs(a.userdata, exist_ok=True)
     os.makedirs(os.path.join(a.build, 'cache'), exist_ok=True)      # the runtime creates ..\cache\vk below it but not the folder itself (found 2026-10-13: with SSBU_VK_PREP=0 on a clean build nothing was saved)
     cmd = [exe, os.path.join(a.build, 'binaries', state.get('game_version', '13.0.4'), 'main.elf'), str(a.seconds)]

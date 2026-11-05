@@ -1158,10 +1158,21 @@ def log_upload(client, hdr, body):
     now = time.gmtime()
     day = os.path.join(LOG_DIR[0], time.strftime("%Y%m%d", now))
     os.makedirs(day, exist_ok=True)
-    name = "%s_%s_%s_%s.log.gz" % (time.strftime("%H%M%S", now), clean(hdr.get("x-ssbu-name"), 32), clean(hdr.get("x-ssbu-id"), 12),
-                                   clean(hdr.get("x-ssbu-version"), 32))
-    with open(os.path.join(day, name), "wb") as f:
-        f.write(body[:length])
+    stem = "%s_%s_%s_%s" % (time.strftime("%H%M%S", now), clean(hdr.get("x-ssbu-name"), 32), clean(hdr.get("x-ssbu-id"), 12),
+                             clean(hdr.get("x-ssbu-version"), 32))
+    # (2026-11-05) a game uploads the last session's log and its own within the same second (a friend's match log was
+    # overwritten by a 32-line start): a name that exists gets _2, _3, ... (exclusive create, so two at once never share one)
+    for n in range(1, 100):
+        name = stem + ("_%d" % n if n > 1 else "") + ".log.gz"
+        try:
+            with open(os.path.join(day, name), "xb") as f:
+                f.write(body[:length])
+            break
+        except FileExistsError:
+            continue
+    else:
+        client.s.sendall(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n")
+        return
     client.s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
     client.log("%s log upload: %s (%d bytes, from %s)" % (client.who, name, length, client.who))
     files = sorted((os.path.join(dp, f) for dp, _, fs in os.walk(LOG_DIR[0]) for f in fs), key=os.path.getmtime)
