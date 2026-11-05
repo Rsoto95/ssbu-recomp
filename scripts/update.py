@@ -263,14 +263,20 @@ STAGING_BRANCH = 'staging'
 
 
 def channel_branch():
-    """(2026-11-03) The branch a player's copy updates from: 'staging' when update_channel.txt says so (F1 > About > Check for
-    staging updates writes it; Back to normal updates deletes it), else DEFAULT_BRANCH. Test versions reach only the friends
-    who asked for them; main gets tested work only."""
+    """(2026-11-03) The branch a player's copy updates from: the one update_channel.txt names (F1 > About > Version to follow
+    writes it; choosing main deletes it), else DEFAULT_BRANCH. Test versions reach only the friends who asked for them; main
+    gets tested work only. (2026-11-05) any branch of the repository, not only staging: a change being tried has a branch of
+    its own; a name a branch cannot have is ignored."""
     try:
         with open(CHANNEL_FILE, encoding='utf-8', errors='replace') as f:
-            return STAGING_BRANCH if f.read().strip().lower() == STAGING_BRANCH else DEFAULT_BRANCH
+            b = f.read().strip()
     except OSError:
         return DEFAULT_BRANCH
+    if b.lower() == STAGING_BRANCH:
+        return STAGING_BRANCH
+    if b and len(b) < 128 and '..' not in b and b[0] not in '/-' and all(ch.isalnum() or ch in '._/-' for ch in b) and b.isascii():
+        return b
+    return DEFAULT_BRANCH
 
 
 def is_protected(rel):
