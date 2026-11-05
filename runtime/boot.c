@@ -576,6 +576,12 @@ int main(int argc, char **argv) {
     register_sdk2_imports();                 /* SDK families (lifted sdk.elf code + offline service answers): fills only; after the C runtime because its self-test needs every handler */
     { void audit_startup(void); audit_startup(); }   /* hostrt.c: fake audit / SSBU_STRICT (plan\FAKE_AUDIT.md) */
     display_init();
+    /* (2026-11-05, a friend: "the monitor thinks nothing is happening and goes to sleep" while playing) a GameCube adapter
+     * read over WinUSB, or any pad, is not input Windows counts against its display time-out, and the game asks for no
+     * sleep only in a few scenes (nn::oe BeginAutoSleepDisabledSection, nnmisc.c). This thread lives as long as the game:
+     * the display and the PC stay awake until it closes. SSBU_KEEP_AWAKE=0: Windows decides as before. */
+    {   const char *e = getenv("SSBU_KEEP_AWAKE");
+        if (!(e && e[0] == '0') && SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)) printf("display: the screen and the PC are kept awake while the game runs (SSBU_KEEP_AWAKE=0: off)\n"); }
     int seconds = argc > 2 ? atoi(argv[2]) : 0;      /* no number = no time limit (a player's launch); tests pass theirs */
     /* the lifted code uses the host stack for every guest call: give it plenty */
     HANDLE t = CreateThread(NULL, (SIZE_T)1 << 30, guest_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
