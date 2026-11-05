@@ -608,7 +608,12 @@ void guest_freeze_wait(void) { while (g_guest_frozen) Sleep(5); }
 volatile LONG g_rb_audio_off;
 const char *guest_thread_name_of(DWORD tid);       /* os_threads.c */
 int os_mutexes_held_here(void);                    /* os_threads.c */
+#ifdef __linux__
 void rb_park_gate(Ctx *c);                         /* rollback/rb_park.c */
+#define RB_PARK_GATE(c) rb_park_gate(c)
+#else
+#define RB_PARK_GATE(c) ((void)0)                  /* the cooperative gate is POSIX/Linux only */
+#endif
 double now_ms(void);                               /* rollback/model/game_state.c */
 /* Audio threads that are running guest code though AUDIO_OFF is on, because they hold a game mutex and parking them with it held would freeze a sim thread that needs it (seen: the game's
  * thread waiting 20 s for a mutex owned by a parked audio thread). The ring waits for this count to reach 0 before it loads a state (rb_audio_wait_parked), so no audio thread is in guest
@@ -695,9 +700,9 @@ static void host_import_real(Ctx *c, int sym) {
         uint64_t saved_from = c->import_from;
         c->in_import = dyn_syms[sym].name;
         c->import_from = c->x[30] - 4;
-        rb_park_gate(c);                            /* rollback: hold at a waiting import while memory is copied */
+        RB_PARK_GATE(c);                            /* rollback: hold at a waiting import while memory is copied */
         g_handlers[sym](c);
-        rb_park_gate(c);                            /* ... and at its return, before guest code runs again */
+        RB_PARK_GATE(c);                            /* ... and at its return, before guest code runs again */
         c->in_import = saved_name;
         c->import_from = saved_from;
         if (g_guest_frozen) guest_freeze_wait();
@@ -719,7 +724,7 @@ static void host_import_real(Ctx *c, int sym) {
     uint64_t saved_from = c->import_from;
     c->in_import = dyn_syms[sym].name;
     c->import_from = c->x[30] - 4;
-    rb_park_gate(c);                                /* rollback: hold at a waiting import while memory is copied */
+    RB_PARK_GATE(c);                                /* rollback: hold at a waiting import while memory is copied */
     if (fn) fn(c);
     else {
         /* No handler: the symbol belongs to a module that is not loaded (the script modules bind theirs at nn::ro::LoadModule)
@@ -731,7 +736,7 @@ static void host_import_real(Ctx *c, int sym) {
         if (audit_strict_on()) guest_trap("call to an import that has no handler (SSBU_STRICT)", c->x[30] - 4);
         c->x[0] = 0;
     }
-    rb_park_gate(c);                                /* ... and at its return, before guest code runs again */
+    RB_PARK_GATE(c);                                /* ... and at its return, before guest code runs again */
     c->in_import = saved_name;
     c->import_from = saved_from;
     if (g_guest_frozen) guest_freeze_wait();

@@ -422,7 +422,11 @@ def uffd_warn():
           '  sudo sysctl vm.unprivileged_userfaultfd=1\n'
           'for good:\n'
           '  echo vm.unprivileged_userfaultfd=1 | sudo tee /etc/sysctl.d/90-ssbu-uffd.conf\n'
-          '(or give only the game exe the capability: sudo setcap cap_sys_ptrace=ep <build>/work/ssbu_native)')
+          '(or give only the game exe the capability: sudo setcap cap_sys_ptrace=ep <build>/work/ssbu_native)\n'
+          'These workarounds weaken the machine: the sysctl lets every local process use userfaultfd, and\n'
+          'cap_sys_ptrace lets this executable inspect other processes. Use them only on a machine you trust,\n'
+          'and undo them when done (sudo rm /etc/sysctl.d/90-ssbu-uffd.conf; sudo sysctl vm.unprivileged_userfaultfd=0;\n'
+          'sudo setcap -r <exe>).')
     sys.stdout.flush()
 
 
@@ -531,6 +535,8 @@ def main():
         # the normal build: runtime/rb_learned.c); the old pair ssbu_native_rb.exe + ssbu_game_r1.dll of an older install is not used
         rollback = True
         print('Rollback netcode on (the normal build; no second compile needed)')
+        if a.linux:
+            print('Linux rollback is experimental: the two-instance stress test is still pending and a long match can still fail; fallback: SSBU_RB_NET_NOROLLBACK=1 or Rollback off in F1.')
     exe = os.path.join(work, a.exe)
     native = os.path.join(work, main_exe)
     if not os.path.exists(exe):

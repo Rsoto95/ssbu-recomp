@@ -134,16 +134,20 @@ sees rooms of its own build.
 ## Status and limits
 
 - Experimental.
-- Tested on Linux (2026-11-04) against a Windows player, over the internet and on the same LAN: Local Wireless Create
+- Windows: tested between two Windows PCs; it works. Earlier, tested with two game instances on one Windows PC:
+  lobby, LAN and host/join modes. Full matches ran with both players' inputs, and the fighters' states were identical
+  frame by frame on both sides.
+- Linux: tested (2026-11-04) against a Windows player, over the internet and on the same LAN: Local Wireless Create
   Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches,
   no desync or crash.
-- Earlier, tested with two game instances on one PC: lobby, LAN and host/join modes. Full matches ran with both players'
-  inputs, and the fighters' states were identical frame by frame on both sides.
-- NOT yet tested between two Windows PCs, against a real UPnP router, or with STUN. On Linux, UPnP is a stub: forward
-  UDP port 39500 by hand.
+- Linux against Linux is NOT yet tested. Not yet tested against a real UPnP router or with STUN. On Linux, UPnP is a
+  stub: forward UDP port 39500 by hand.
 - No encryption and no authentication. Play only with people you know.
 - Rollback netcode is on by default (since 2026-11-04). The game's own delay-based netcode is the fallback when it is
   off or the snapshot ring cannot start, see below.
+- On Linux rollback is experimental: Linux against Linux is not yet tested (the automated two-instance stress test is
+  still pending) and a long match can still fail. If it does, play delay-based with `SSBU_RB_NET_NOROLLBACK=1` or turn
+  Rollback off in F1; see [BUILDING_LINUX.md](../BUILDING_LINUX.md).
 - For now the room code is shown only in the log, on lines starting with `[online]`.
 - On first start, Windows may ask to allow the game through the firewall. LAN and host modes need it. On Linux, allow
   the game's UDP ports in your firewall if you use one.
@@ -180,9 +184,11 @@ player's own choice and is used from the next match. On Linux the same switch ex
 threads by default, and turning sound on has the same risk.
 
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping).
-Rollback works on Windows and Linux; tested on Linux against Windows over the internet and on the same LAN in several
-matches (2026-11-04, no desyncs or crashes), and earlier between two games on one PC with simulated 150 ms ping and
-loss (0 desyncs). Please report how it feels.
+Rollback works on Windows (tested between two Windows PCs) and experimentally on Linux (tested against Windows over
+the internet and on the same LAN, 2026-11-04; Linux against Linux is not yet tested). Earlier, between two games on one
+Windows PC with simulated 150 ms ping and loss (0 desyncs). The Linux port still has the known limits in
+[BUILDING_LINUX.md](../BUILDING_LINUX.md); if a long match fails, use the delay-based fallback
+(`SSBU_RB_NET_NOROLLBACK=1`). Please report how it feels.
 
 
 ## Credit

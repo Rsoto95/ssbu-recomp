@@ -361,15 +361,18 @@ static void catch_diag(uint64_t cfa) {                                        /*
 /* What nro_catch_call keeps on its host frame. The jmp_buf comes first, so the pointer in the catch table IS a CatchFrame: the rest says which function it is (body), the guest frame (cfa)
  * and how many guest mutexes the thread held when the function was entered (held, os_threads.c), for absorb_by_host_stack below. */
 typedef struct { jmp_buf jb; void (*body)(Ctx *, uint64_t); uint64_t cfa; int held; Ctx *ctx; } CatchFrame;
-/* snapshot_ring.c rgc_dead: the host fiber stack a present record names is not in the current fiber table any more. On POSIX a
+/* snapshot_ring.c rgc_dead: the host fiber stack a present record names is not in the current fiber table any more. On Linux a
  * fiber can still be the stack the re-run resumes on after the load; keep the record when the frame it points at is still the
  * same catch frame (its CFA and body), so the throw finds it instead of terminating. A stale stack reused by another fiber
- * with the same guest CFA and body is the one case this cannot tell apart; the pass is reloaded either way. */
+ * with the same guest CFA and body is the one case this cannot tell apart; the pass is reloaded either way. Windows keeps the
+ * hs15 drop: a record on a deleted fiber stack must not be revived there. */
+#ifdef __linux__
 int nnunwind_catch_valid(uint64_t cfa, uint64_t jb) {
     if (!cxxrt_readable(jb, sizeof(CatchFrame))) return 0;
     CatchFrame *cf = (CatchFrame *)(uintptr_t)jb;
     return cf->cfa == cfa && cf->body && guest_function_of((uint64_t)(uintptr_t)cf->body) != 0;
 }
+#endif
 int os_mutexes_held_here(void); void os_release_held_down_to(int depth);      /* os_threads.c */
 
 /* Entry of every lifted function whose LSDA has a catch clause (generated code: `nro_catch_call(c, u_<fn>)`). */
@@ -682,8 +685,9 @@ static int reload_via_host_catch(Ctx *c, uint64_t exc) {
  * delivered is unwound on the HOST stack to the innermost nro_catch_call frame of this thread, the pass is tainted, and
  * the ring reloads the last healthy state at its safe point. It returns 0 when the net is off or no catch frame is on
  * this stack; it never returns when it recovers. The guard stops a terminate inside the recovery from re-entering it;
- * eh_raise clears it for the next throw. */
-static volatile LONG g_recovering;
+ * eh_raise clears it for the next throw. Linux only: Windows keeps its old terminate path. */
+#ifdef __linux__
+static __thread volatile LONG g_recovering;
 int nnunwind_recover_terminate(Ctx *c) {
     if (!rb_fault_net_active()) return 0;
     if (InterlockedExchange(&g_recovering, 1)) return 0;
@@ -691,6 +695,9 @@ int nnunwind_recover_terminate(Ctx *c) {
     InterlockedExchange(&g_recovering, 0);
     return 0;
 }
+#else
+static int nnunwind_recover_terminate(Ctx *c) { (void)c; return 0; }      /* Windows / macOS: let it terminate as before */
+#endif
 /* ---- cutting a fault cascade (fault_recovery.c). Absorbing a bad read with 0 can leave a thread in an endless loop (walk a list until `end`: next is 0, never `end`, fault, 0, ...). After enough faults
  * in one pass the exception filter sends the faulting thread here instead of absorbing again: the host stack is unwound to the innermost nro_catch_call frame on this thread's stack (as reload_via_host_catch
  * does for a throw), which returns to its guest caller; the pass is already tainted and the ring reloads the last healthy state at its safe point. */
@@ -776,7 +783,9 @@ int nnunwind_bail_context_posix(void *uc) { (void)uc; return 0; }     /* macOS: 
 #endif
 
 static void eh_raise(Ctx *c, int reason) {
+#ifdef __linux__
     InterlockedExchange(&g_recovering, 0);
+#endif
     uint64_t exc = eh_in_flight(c);
     Regs cur;
     EhPad pad;
@@ -841,6 +850,7 @@ static void eh_raise(Ctx *c, int reason) {
             eh_terminate(c, "the handler cannot be entered");
         }
         if (!found) {
+#if defined(_WIN32) || defined(__linux__)
             {   /* which fiber this throw is on, and whether it was born inside a rolled-back window (rollback/model/threads.c) */
                 extern uint64_t os_fiber_cur_key(void); extern const char *rb_born_info(uint64_t key, char *buf, size_t n); extern long long g_rgs_next;
                 static volatile LONG nfib; char bi[160]; uint64_t fk = os_fiber_cur_key();
@@ -855,6 +865,7 @@ static void eh_raise(Ctx *c, int reason) {
                            (unsigned long long)g_unw_lr_slot, g_unw_lr_slot ? r1_addr_class(g_unw_lr_slot) : "none", g_unw_lr_slot && cxxrt_readable(g_unw_lr_slot, 8) ? (unsigned long long)rd64(g_unw_lr_slot) : 0ull);
                 }
             }
+#endif
             if (reload_via_host_catch(c, exc)) return;   /* net active: unwind the host stack to a catch frame and reload, instead of ending the game */
             if (absorb_by_host_stack(c, exc)) return;      /* (does not come back when it takes the exception) */
             printf("\nunwind: %s thrown at 0x%llx: no handler in %d frames (%s)\n", eh_type_name(exc), (unsigned long long)c->x[30] - 4, depth, stop);

@@ -10,7 +10,7 @@
 #include <windows.h>
 #include "runtime.h"
 #include "hostrt.h"
-#ifndef _WIN32
+#ifdef __linux__
 #include "rollback/rb_park.h"                     /* rollback: cooperative parking at SDK import boundaries */
 #endif
 #ifdef __linux__
@@ -343,7 +343,7 @@ static DWORD WINAPI thread_main(LPVOID arg) {
     t_thread = o->key;
     { void display_perf_thread(void); display_perf_thread(); }      /* track V session 14: the game's threads on the performance cores of a hybrid CPU (display.c; SSBU_PCORES=0 off) */
     Ctx *c = new_ctx(o->stack + o->stack_size);
-#ifndef _WIN32
+#ifdef __linux__
     rb_park_bind(c);
 #endif
     os_mutex_ctx_bind(c, os_mutex_held_slot(), os_mutex_stack_slot());
@@ -366,7 +366,7 @@ static DWORD WINAPI thread_main(LPVOID arg) {
     pkey_run_destructors(c);                          /* pthread keys a plugin's Rust std made on this game thread */
     tls_run_destructors(c);
     os_mutex_ctx_unbind(c);
-#ifndef _WIN32
+#ifdef __linux__
     rb_park_unbind(c);
 #endif
     trace_printf("--- thread %llx finished\n", (unsigned long long)o->key);
@@ -724,9 +724,20 @@ static void mtx_released(Obj *o) {                      /* the most recent hold 
     if (t_mtx_held > 0) t_mtx_held--;
 }
 DWORD os_mutex_owner(uint64_t key);               /* below: Win32 / glibc owner, macOS 0 */
+/* The recovery paths must not go through obj(): it takes the object table's lock and creates a record on a miss,
+ * which can deadlock the thread that is unwinding (or leave the real mutex held). The Obj is already in the stack. */
+static int mtx_owned_here(Obj *o) {
+#ifdef _WIN32
+    return o && (DWORD)(uintptr_t)o->cs.OwningThread == GetCurrentThreadId();
+#elif defined(__APPLE__)
+    (void)o; return 0;                            /* a pthread mutex does not show its owner */
+#else
+    return o && (DWORD)o->cs.__data.__owner == GetCurrentThreadId();
+#endif
+}
 /* nnunwind.c absorb_by_host_stack: a handler's frame is entered without the clean-ups of the frames it skips; the mutexes they held (above `depth`) are let go here, once each. */
 void os_release_held_down_to(int depth) {
-    while (t_mtx_held > depth && t_mtx_held <= HELD_MAX) { Obj *o = t_mtx_stack[t_mtx_held - 1]; if (o && os_mutex_owner(o->key) == GetCurrentThreadId()) LeaveCriticalSection(&o->cs); t_mtx_held--; }
+    while (t_mtx_held > depth && t_mtx_held <= HELD_MAX) { Obj *o = t_mtx_stack[t_mtx_held - 1]; if (mtx_owned_here(o)) LeaveCriticalSection(&o->cs); t_mtx_held--; }
     if (t_mtx_held > HELD_MAX) t_mtx_held = depth < 0 ? 0 : depth;
 }
 static void mtx_enter(Obj *o) {
@@ -1233,7 +1244,7 @@ static DWORD WINAPI pthread_main(LPVOID arg) {
     Obj *o = arg;
     t_thread = o->key;
     Ctx *c = new_ctx(o->stack + o->stack_size);
-#ifndef _WIN32
+#ifdef __linux__
     rb_park_bind(c);
 #endif
     os_mutex_ctx_bind(c, os_mutex_held_slot(), os_mutex_stack_slot());
@@ -1252,7 +1263,7 @@ static DWORD WINAPI pthread_main(LPVOID arg) {
     pkey_run_destructors(c);
     tls_run_destructors(c);
     os_mutex_ctx_unbind(c);
-#ifndef _WIN32
+#ifdef __linux__
     rb_park_unbind(c);
 #endif
     trace_printf("--- pthread %llx finished\n", (unsigned long long)o->key);

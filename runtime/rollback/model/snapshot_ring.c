@@ -29,7 +29,7 @@
  * against a run without it and every re-run frame against the frame it replays. SSBU_RB_SIM_SKIP=<mask>: run-ahead's
  * kick-skip mask in re-run passes except the last one (experiment). SSBU_RB_PARK_MS (default 30): hold limit. */
 #include "game_state_internal.h"
-#ifndef _WIN32
+#ifdef __linux__
 #include "../rb_park.h"
 #endif
 /* Functions and variables of other runtime files that only this file uses: */
@@ -524,17 +524,18 @@ int r1_ring_capture(long long frame, Ctx *c) {
         g_rgp_seg = seg_was;
         if (g_rg_nomem) return 0;                         /* (hs13) out of memory: not tried again in this match */
         g_save_failed = 0; g_ra_wd_pause = 1; g_rs_drop = 1;
+        int audio_set = 0;
         { extern volatile int g_ra_base_save; g_ra_base_save = 1;   /* (runahead.c ra_free: Pia not held, Online menu only) */
           /* stop the audio threads BEFORE the base hold, not after it */
-          if (!g_rb_audio_off && audio_off_wanted()) { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); }
+          if (!g_rb_audio_off && audio_off_wanted()) { InterlockedExchange(&g_rb_audio_off, 1); audio_set = 1; LOG("r1: RING: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); }
           save(c); release(); g_ra_base_save = 0; }
         g_rs_drop = 0;
         g_ra_wd_pause = 0;
-        if (g_save_failed == 2) { g_rg_nomem = 1; LOG("r1: RING: the base state was NOT made (out of memory: free commit %.0f MB, needed %.0f MB + 1024 MB left for the game): no rollback ring\n", g_save_avail_mb, g_save_need_mb); return 0; }
-        if (g_save_failed) return 0;
+        if (g_save_failed == 2) { g_rg_nomem = 1; if (audio_set) InterlockedExchange(&g_rb_audio_off, 0); LOG("r1: RING: the base state was NOT made (out of memory: free commit %.0f MB, needed %.0f MB + 1024 MB left for the game): no rollback ring\n", g_save_avail_mb, g_save_need_mb); return 0; }
+        if (g_save_failed) { if (audio_set) InterlockedExchange(&g_rb_audio_off, 0); return 0; }
         g_ra_ready = 1; g_session.cycle = 1;
-        if (g_mark <= 0) { g_ra_off = 1; LOG("r1: RING: no marks (the game DLL with marks is not loaded): OFF\n"); return 0; }
-        if (!rg_init()) { g_rg_nomem = 2; if (!rbg_on()) g_ra_off = 1; LOG("r1: RING: its own allocations FAILED (out of memory): no rollback ring for the rest of this session\n"); return 0; }
+        if (g_mark <= 0) { g_ra_off = 1; if (audio_set) InterlockedExchange(&g_rb_audio_off, 0); LOG("r1: RING: no marks (the game DLL with marks is not loaded): OFF\n"); return 0; }
+        if (!rg_init()) { g_rg_nomem = 2; if (!rbg_on()) g_ra_off = 1; if (audio_set) InterlockedExchange(&g_rb_audio_off, 0); LOG("r1: RING: its own allocations FAILED (out of memory): no rollback ring for the rest of this session\n"); return 0; }
         g_rg_ready = 1;
         if (audio_off_wanted()) { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); }   /* (hostrt.c rb_audio_off_gate) */
         audio_gate_fight();
@@ -755,7 +756,12 @@ static void rgc_before(void) {                          /* threads held, before 
     memcpy(g_rgc_now, (void *)(uintptr_t)g_catch_addr, sizeof g_rgc_now);
 }
 void nnunwind_catch_reinsert(uint64_t cfa, uint64_t jb); void nnunwind_catch_free(unsigned i);   /* nnunwind.c (hs15: its hash and probing) */
+#ifdef __linux__
 int nnunwind_catch_valid(uint64_t cfa, uint64_t jb);   /* nnunwind.c: the CatchFrame at jb is still this CFA's */
+static int rgc_revive_ok(uint64_t cfa, uint64_t jb) { return nnunwind_catch_valid(cfa, jb); }
+#else
+static int rgc_revive_ok(uint64_t cfa, uint64_t jb) { (void)cfa; (void)jb; return 0; }   /* Windows keeps the hs15 drop */
+#endif
 /* (hs15) after a load: the host fiber stacks still in use (some guest fiber's host fiber, a thread's current fiber, a stack a
  * thread's stack pointer is on); a catch record on any other host fiber stack ever made is dead (the coroutine there was made
  * again on a new host fiber, or the fiber exists only in states thrown away): dropped instead of kept for ever. These dead
@@ -814,7 +820,7 @@ static void rgc_after(void) {                           /* after the copies and 
               for (int i = 0; i < 8192; i++) if (t[i].cfa > 1) nnunwind_trace_note(rest_stack(t[i].jb) ? "load: restored record kept (its stack copied back)" : "load: restored record dropped", t[i].cfa, t[i].jb);
               for (int k = 0; k < 8192; k++) if (g_rgc_now[k].cfa > 1) {
                   const char *what = rest_stack(g_rgc_now[k].jb) ? "load: present record not kept (its stack copied back)"
-                                   : deadfix && rgc_dead(g_rgc_now[k].jb) && !nnunwind_catch_valid(g_rgc_now[k].cfa, g_rgc_now[k].jb) ? "load: present record dead"
+                                   : deadfix && rgc_dead(g_rgc_now[k].jb) && !rgc_revive_ok(g_rgc_now[k].cfa, g_rgc_now[k].jb) ? "load: present record dead"
                                    : "load: present record kept";
                   nnunwind_trace_note(what, g_rgc_now[k].cfa, g_rgc_now[k].jb);
               } }
@@ -823,7 +829,7 @@ static void rgc_after(void) {                           /* after the copies and 
         if (g_rgc_now[k].cfa <= 1 || !g_rgc_now[k].jb) continue;
         if (rest_stack(g_rgc_now[k].jb)) { g_rgc_skipped++; continue; }      /* the restored record is this one (its host stack is the capture's) */
         if (deadfix && rgc_dead(g_rgc_now[k].jb)) {
-            if (!nnunwind_catch_valid(g_rgc_now[k].cfa, g_rgc_now[k].jb)) { g_rgc_dead++; continue; }
+            if (!rgc_revive_ok(g_rgc_now[k].cfa, g_rgc_now[k].jb)) { g_rgc_dead++; continue; }
             g_rgc_revived++;                           /* the fiber is not in the table any more but its catch frame is still there (the re-run can resume on it) */
         }
         nnunwind_catch_reinsert(g_rgc_now[k].cfa, g_rgc_now[k].jb); kept++;     /* (the records are per host stack: nnunwind.c catch_here) */
@@ -856,7 +862,7 @@ int r1_ring_load(long long frame, Ctx *c) {
         for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].h == cur[j].h) { if (g_guest_threads.table[i].parked && cur[j].from == g_guest_threads.table[i].from && cur[j].imp == g_guest_threads.table[i].imp) { g_guest_threads.table[i].held = 1; g_guest_threads.table[i].rsp = cur[j].rsp; g_guest_threads.table[i].rip = cur[j].rip; g_guest_threads.table[i].cok = cur[j].cok; keep = 1; } break; }
         if (keep) g_rg_kept_same++;
         else {
-#ifndef _WIN32
+#ifdef __linux__
             rb_park_let_go(cur[j].c);
 #else
             ResumeThread(cur[j].h);
@@ -867,7 +873,7 @@ int r1_ring_load(long long frame, Ctx *c) {
         ra_hold_restore();
         if (ra_fibers_quiet() || now_ms() - tq > 200) { if (g_ra_busy_fibers) LOG("r1: RING load: %d fibers still busy after 200 ms\n", g_ra_busy_fibers); break; }
         for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held) {
-#ifndef _WIN32
+#ifdef __linux__
             rb_park_let_go(g_guest_threads.table[i].c);
 #else
             ResumeThread(g_guest_threads.table[i].h);
@@ -892,7 +898,7 @@ int r1_ring_load(long long frame, Ctx *c) {
             unpark();
             Ctx *tc2; const char *nm2; HANDLE h2;                  /* the threads made after that frame (stop_born_threads) go on too */
             for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc2, &nm2, &h2); i++) if (h2 && GetThreadId(h2) != GetCurrentThreadId()) {
-#ifndef _WIN32
+#ifdef __linux__
                 rb_park_let_go(tc2);
 #else
                 ResumeThread(h2);

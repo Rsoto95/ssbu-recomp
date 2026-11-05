@@ -102,7 +102,7 @@ by default; **In progress**; **Planned**.
 | Freeze watchdog: a report with the stack of every thread | Done |
 | Fixed 60 fps in every mode | In progress |
 | Items and stages as source | Planned |
-| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); F1 menu works; online play works (Local Wireless Create Room and Battle Arenas, delay-based and rollback, against Windows over the internet and on the same LAN); Steam Deck not tested | In progress |
+| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); F1 menu works; online play works (Local Wireless Create Room and Battle Arenas, delay-based and rollback, against Windows over the internet and on the same LAN; Linux against Linux not yet tested); Linux rollback is experimental and still has the limits in BUILDING_LINUX.md; Steam Deck not tested | In progress |
 
 ### Game modes (measured on the development PC)
 
@@ -194,7 +194,7 @@ per-frame logs against the lifted version (2,010 fight frames each). More: [docs
 | 5 | Fixed 60 fps in every mode; every mode playable start to end | In progress |
 | 6 | Single-file fighter packages (drop one file in the characters folder) | In progress |
 | 7 | Controllers confirmed on physical pads | In progress |
-| 8 | Linux / Steam Deck (a native Linux build runs and plays online, tested on one PC: [BUILDING_LINUX.md](BUILDING_LINUX.md)) | In progress |
+| 8 | Linux / Steam Deck (a native Linux build runs and plays online; rollback is experimental on Linux, see [BUILDING_LINUX.md](BUILDING_LINUX.md); tested against Windows, Linux against Linux not yet tested) | In progress |
 
 ## FAQ
 
@@ -211,7 +211,7 @@ tools, or an existing dump you made legally. This project cannot do that step fo
 Extensions (free, Microsoft Store) when they work, otherwise with FFmpeg, which the installer downloads.
 
 **Can I play online?** Experimental. The game's Local Wireless mode works over a LAN, a room code or a lobby server:
-[docs/ONLINE.md](docs/ONLINE.md). Rollback netcode works on Windows and Linux (experimental) and is on by default.
+[docs/ONLINE.md](docs/ONLINE.md). Rollback netcode works on Windows (tested between two Windows PCs); on Linux it is experimental and has been tested against Windows, but not yet Linux against Linux (known limits and the delay-based fallback are in [BUILDING_LINUX.md](BUILDING_LINUX.md)). It is on by default on both.
 
 **Which game version?** 13.0.5 ([docs/VERSIONS.md](docs/VERSIONS.md)). The code can still run 13.0.4, but this fork
 no longer plays or tests it, and pull requests must target 13.0.5.

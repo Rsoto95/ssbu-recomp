@@ -12,6 +12,43 @@
  * Check: at the end of the re-run the pages the first pass changed are compared with their first-pass end state
  * (SSBU_R1 report "verify"), next to the fighters' hash (SSBU_FIGHT_HASH) that the comparison script reads.
  * Nothing here runs without SSBU_R1. No game content in this file. */
+#ifdef __APPLE__
+/* macOS: the rollback state save/restore and its page tracker are not ported. These stubs keep the host runtime
+ * linking and answer "off", so callers take their normal paths (as the Linux build did before the POSIX port). */
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
+#include <windows.h>
+__declspec(dllexport) uint8_t *r1_m1, *r1_m2;
+__declspec(dllexport) uint64_t r1_lo1, r1_n1, r1_n2;
+double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000.0 + t.tv_nsec / 1e6; }
+int r1_on(void) {
+    static int said;
+    int gfx_runahead(void);
+    if (!said && ((getenv("SSBU_R1") && getenv("SSBU_R1")[0] != '0') || (getenv("SSBU_RUNAHEAD") ? getenv("SSBU_RUNAHEAD")[0] != '0' : gfx_runahead()))) {
+        said = 1;
+        printf("r1: state save / restore (SSBU_R1, run-ahead) is not available in the macOS build yet: off\n");
+    }
+    return 0;
+}
+int r1_ra_phase(void) { return 0; }
+int r1_ra_quiet(void) { return 0; }
+int r1_ra_present_mode(void) { return 0; }
+void r1_stats_report(void) {}
+int r1_poll(int ticks) { (void)ticks; return 0; }
+void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry) { (void)b; (void)lx; (void)ly; (void)rx; (void)ry; }
+void r1_init(void) { r1_on(); }
+void r1_on_decommit(void *p, size_t n) { (void)p; (void)n; }
+void r1_on_commit(void *p, size_t n) { (void)p; (void)n; }
+void r1_wrote(uint64_t a, uint64_t n) { (void)a; (void)n; }
+void r1_ww_note(void *const *pages, size_t cnt) { (void)pages; (void)cnt; }
+void r1_ww_note_range(const void *p, size_t n) { (void)p; (void)n; }
+int r1_ww_taken(const void *p, size_t n) { (void)p; (void)n; return 0; }
+void r1_nosim(uint64_t a, uint64_t n) { (void)a; (void)n; }
+void r1_read_retry_note(void) {}
+void r1_register_heap(void) { r1_on(); }
+#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,3 +216,4 @@ void r1_init(void) {
     int id = hook_install(GA(0x710386fc30ull), r1_frame_end, NULL, &g_orig_frame_end);
     LOG("r1: SSBU_R1 save at fight frame %d, %d frames, every %d frames, %d cycles; hook on the frame end 710386fc30: %s\n", g_session.start_frame, g_session.run_frames, g_session.period, g_session.cycles, id ? "installed" : "FAILED");
 }
+#endif

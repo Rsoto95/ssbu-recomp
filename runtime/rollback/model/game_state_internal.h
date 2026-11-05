@@ -5,7 +5,8 @@
  * presentation pool) is its own translation unit: this header is everything it shares with the others, in both directions.
  * Nothing else may be reached across the boundary. Keep the list short; when something here can go, remove it.
  *
- * Only Windows builds use these files (the Linux / macOS build of r1_state.c is a set of stubs and has no rb_learned.c). */
+ * Windows and Linux use these files (Linux has its own page tracker and parking gate); the macOS build of r1_state.c is a
+ * set of stubs and has no rb_learned.c. */
 #ifndef R1_INTERNAL_H
 #define R1_INTERNAL_H
 #include <stdint.h>

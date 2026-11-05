@@ -27,7 +27,7 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
 | Keyboard | works (tested); controllers through SDL3 are the same code as on Windows but **not tested with a real pad on Linux** |
 | Album movie recording (the game's video capture to the album) | **not implemented** on Linux; the 7 self-test cases for it are accepted as known failures |
 | OpenGL renderer | not on Linux: Vulkan only |
-| Online play (experimental, `SSBU_ONLINE`) | Works: tested 2026-11-04 against a Windows player, over the internet and on the same LAN, in Local Wireless Create Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches, no desync or crash. UPnP is a stub on Linux (forward the UDP port by hand); rollback fights are silent by default (the audio threads are held). See [Rollback and online play](#rollback-and-online-play-linux) |
+| Online play (experimental, `SSBU_ONLINE`) | Works: tested 2026-11-04 against a Windows player, over the internet and on the same LAN, in Local Wireless Create Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches, no desync or crash (this was Linux against Windows; Linux against Linux is not yet tested); rollback remains experimental and keeps the limits below. UPnP is a stub on Linux (forward the UDP port by hand); rollback fights are silent by default (the audio threads are held). See [Rollback and online play](#rollback-and-online-play-linux) |
 | Other distributions, AMD / Intel GPUs, X11, Steam Deck | not tested. The package lists for Debian/Ubuntu and Fedora in `install_deps.sh` are best guesses; `setup.py` checks every library and says which one is missing |
 
 ## What you need
@@ -62,6 +62,11 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
   appears anyway: `echo vm.unprivileged_userfaultfd=1 | sudo tee /etc/sysctl.d/90-ssbu-uffd.conf`, or
   `sudo sysctl vm.unprivileged_userfaultfd=1` until the next boot, or `sudo setcap cap_sys_ptrace=ep
   <build>/work/ssbu_native`.
+  **These workarounds weaken the machine.** `vm.unprivileged_userfaultfd=1` is system-wide: it lets every local
+  process use `userfaultfd`, a kernel attack surface. `setcap cap_sys_ptrace=ep` gives this executable the ability to
+  inspect and control other processes, far more than the game needs. Use them only on a machine you trust (not a
+  shared one), and undo them when done: `sudo rm /etc/sysctl.d/90-ssbu-uffd.conf` and
+  `sudo sysctl vm.unprivileged_userfaultfd=0`, plus `sudo setcap -r <build>/work/ssbu_native`.
 
 ## 1. Dependencies
 
@@ -229,14 +234,14 @@ Fault recovery is ported as well (`runtime/rollback/controller/fault_recovery_po
   refuses a load only when a thread is still RUNNING guest code after the hold; a thread waiting while owning a mutex
   still refuses the hold. Absorbable faults on network threads taint the pass for the usual safe-point reload;
   they are not rejected just because of the thread name. This mitigates the observed NetSystem crash, but the heap
-  objects these threads use can still be rolled back. Full two-instance stability is not established. The network-thread
-  exclusions, wait exceptions and thread-slot reuse are guarded by `__linux__`; they do not change the Windows paths.
+  objects these threads use can still be rolled back. Full Linux-against-Linux stability is not established. The
+  network-thread exclusions, wait exceptions and thread-slot reuse are guarded by `__linux__`; they do not change the Windows paths.
   `SSBU_RB_NET_THREAD_EXCLUDE=0` turns the exclusion off and rewinds Pia/NetSystem guest stacks like the Windows path;
   their registers are restored only when their wait is the same. This is the A/B experiment for the NetSystem heap
   fault; replaying the network thread may duplicate Pia traffic. A TaskWorker parked at a different wait is covered by
   the same 5 ms exception; a running worker or one owning a mutex still refuses the hold. Holding the POSIX task workers
   through the cooperative gate from H1 to H2 was tried and reverted: the gate parks workers inside jobs and stalled the
-  frame rate (avg 286 ms/frame in the two-instance test).
+  frame rate (avg 286 ms/frame in the Linux two-instance test).
 
 What is not ported: the presentation pool, the debug-only rollback files, and run-ahead (`SSBU_RUNAHEAD`). The 13.0.5
 address table is audited: every code address used by the rollback files is in `g_code_13_0_5`; data addresses follow the
@@ -249,8 +254,9 @@ online test of the Linux rollback port. The automated tests below were not rerun
 
 **Remaining risk.** The offline simulation is exact for 1,698 real frames (see below), but a long match is not proven
 on every path. Only Pia/NetSystem stacks and registers are excluded, not all their heap objects; the earlier
-two-instance test crashed on NetSystem after a load. The load admission change, wait exception and restored fault
-absorption above were not seen to fail in the online test, but the automated two-instance stress run has not been repeated.
+Linux two-instance test crashed on NetSystem after a load. The load admission change, wait exception and restored fault
+absorption above were not seen to fail in the online test, but the automated Linux-against-Linux two-instance stress
+run has not been repeated.
 Another risk is a load that restores a state whose guest object names a job fiber/object that the load did not bring
 back (the fiber moved to another host fiber between the capture and the load). The re-run then faults in a cascade.
 The signal handler absorbs the first plain moves, but the cascade has no `nro_catch_call` frame on the current host
@@ -263,7 +269,8 @@ Offline play is unaffected. If a long match does fail, fall back to delay-based 
 (2026-11-03: after the load-admission fix, the offline ring simulation completed 84 loads with k 1..7, no refused
 load, no `FAULT RECOVERY` and no `HOST SIGNAL`. The base state also loads now: a stress run that rolled back every 7
 passes loaded frame 0 in 23.9 ms with 2 audio threads taken at another wait, then hit the known not-saved-page
-cascade at pass 374. 2026-11-04: the online test above passed; the automated two-instance retest is still pending.)
+cascade at pass 374. 2026-11-04: the online test above passed; the automated Linux-against-Linux two-instance retest
+is still pending.)
 
 **Offline rollback test** (one process, no network). `--seed 1` (`SSBU_FIXED_SEED`) makes both runs pick the same CPU
 fighter and stage, so the reference and the rollback run play the same match:
@@ -318,11 +325,12 @@ passes `--play`, `scripts/run.py` sets it). The launcher's group settings (`SSBU
 input delay) are the same as on Windows; `group_lobby = off` in `graphics.ini` keeps F1's online mode instead of the
 same-network lobby.
 
-**Two instances** on one PC: one `SSBU_ONLINE=host:39520` and one `SSBU_ONLINE=join:127.0.0.1:39520`, each with its
+**Linux against Linux:** two instances on one PC: one `SSBU_ONLINE=host:39520` and one
+`SSBU_ONLINE=join:127.0.0.1:39520`, each with its
 own `--userdata`, `SSBU_ONLINE_LOOPBACK=1`, `SSBU_RB_NET=net` and `SSBU_RB_AUDIO_OFF=1`, started about 25 s apart. Add
 `SSBU_RB_NET_DELAY=0` and `SSBU_RB_NET_AHEAD=1` on both to force real loads on loopback (with the default delay the
 ~0 ms round trip absorbs every guess). The load admission change and fault recovery above were not seen to fail in the
-2026-11-04 online matches; an automated two-instance stress run is still worth repeating.
+2026-11-04 online matches; an automated Linux-against-Linux two-instance stress run is still worth repeating.
 Use a windowed 1280x720 build for the retest (two fullscreen instances are over the frame budget), and set
 `SSBU_FIGHT_HASH=<file>` on both so the checksums are exercised. The guest log should show
 `r1: NETWORK: Pia ReceiveThreadStream guest stack ... not rolled back`; there should be no `FAULT RECOVERY` cascade on
@@ -332,11 +340,11 @@ menus.
 
 **Freeze at match start:** `mark_network_threads` must call `r1_nosim(lo, hi - lo)`: its second argument is a byte count,
 not an end address. Passing `hi` scanned billions of pages at the base and every later capture, and excluded unrelated
-heap pages from rollback. A saved two-instance trace showed base saves of 136,165 / 135,385 ms, despite the initial
+heap pages from rollback. A saved Linux two-instance trace showed base saves of 136,165 / 135,385 ms, despite the initial
 memory copies taking about 2 s. `tests/rb_network_stack_test.c` checks the argument using the real marking function
-without loading the game. After the correction, the user's two-instance logs showed base saves of 3,464 / 3,349.7 ms,
+without loading the game. After the correction, the user's Linux two-instance logs showed base saves of 3,464 / 3,349.7 ms,
 but the join instance later crashed on NetSystem in that automated run. That crash was not seen in the 2026-11-04 online
-matches; the automated two-instance retest is still pending.
+matches; the automated Linux-against-Linux two-instance retest is still pending.
 
 UPnP is not implemented on Linux: in host mode the log says which UDP port to forward on the router.
 `SSBU_RB_NET_NOROLLBACK=1` plays the match delay-based when the ring cannot be made or is turned off; verified with the

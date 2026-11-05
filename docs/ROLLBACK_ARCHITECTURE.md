@@ -240,6 +240,8 @@ The Linux build runs the same state save/restore and ring, with five platform su
     frame at its `jmp_buf` is still the same catch frame (`nnunwind_catch_valid`). This is the fix for the
     `L2CExceptionShutdown` failure of the first port (`f_720052e2f0 handled an exception but was not entered through
     nro_catch_call`).
+    Both the terminate recovery and the catch-record revival are compiled only on Linux (`__linux__`); Windows keeps
+    its old terminate path and the hs15 drop of a record whose fiber stack is gone.
   - Pia / NetSystem threads are external network state: `threads.c` marks their guest stacks `r1_nosim` at every
     thread-table build (`park` and the run-ahead hold path `ra_hold_save`), skips their registers in
     `restore_thread_regs`. They are held at their waits during the copy but resume at the current network frame, not
@@ -254,8 +256,8 @@ The Linux build runs the same state save/restore and ring, with five platform su
     through the cooperative gate from H1 to H2 was tried and reverted: the gate parks workers inside jobs and stalled
     the frame rate. `fault_recovery_posix.c` absorbs supported network-thread
     faults like other guest faults and taints the pass for a safe-point reload. This is mitigation, not a complete
-    network-state exclusion: network heap objects can still rewind. Full two-instance stability is still unverified,
-    but the online matches below did not hit it.
+    network-state exclusion: network heap objects can still rewind. Full Linux-against-Linux stability is still
+    unverified, but the online matches below did not hit it.
     These network-thread exclusions, wait exceptions and thread-slot reuse are Linux-only (`__linux__`); Windows is
     unchanged. `SSBU_RB_NET_THREAD_EXCLUDE=0` disables the exclusion and rewinds network threads like Windows; the
     network wait exception is then off too.
@@ -268,14 +270,16 @@ faults are recovered differs.
 
 **Status (2026-11-04).** The Linux build was played online against a Windows player, over the internet and on the same
 LAN: Local Wireless Create Room and Battle Arenas, with delay-based and rollback netcode. Several matches completed
-with no desync or crash. This is the first reported real online test of the port.
+with no desync or crash. This is the first reported real online test of the port. It was Linux against Windows; Linux
+against Linux is not yet tested.
 
 **Remaining risk.** The offline simulation is exact for 1,698 real frames with a matching reference (same
 `SSBU_FIXED_SEED`, 51 re-run runs / 76 frames all equal). Pia/NetSystem stacks and registers are excluded, but their
-heap objects can still rewind; the earlier two-instance run crashed on NetSystem after a load, a case not seen in the
-online matches. The wait exception and restored fault absorption were not seen to fail online, but the automated
-two-instance retest has not been repeated. Another risk is a load that restores a state whose guest object names a job fiber/object
-that was not brought back (the fiber moved to another host fiber between the capture and the load). The re-run then
+heap objects can still rewind; the earlier Linux two-instance run crashed on NetSystem after a load, a case not seen in
+the online matches. The wait exception and restored fault absorption were not seen to fail online, but the automated
+Linux-against-Linux two-instance retest has not been repeated. Another risk is a load that restores a state whose
+guest object names a job fiber/object that was not brought back (the fiber moved to another host fiber between the
+capture and the load). The re-run then
 faults in a cascade; the signal handler absorbs the plain moves, but no `nro_catch_call` frame is on the current host
 stack to cut it back to, so after 4,096 faults the net lets go. A catch record on another fiber's stack cannot be used
 (cross-stack `longjmp`). These are the port's known limits; the fallback is delay-based online play

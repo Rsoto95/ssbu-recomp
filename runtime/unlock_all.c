@@ -128,8 +128,8 @@ void unlock_all_init(void) {
     g_on = e && *e ? atoi(e) > 0 : gfx_unlock_all();
     g_log = l && atoi(l) > 0;
     if (!g_on && !g_log) return;
-    static const char *const dlc[] = {"packun", "jack", "brave", "buddy", "dolly", "master", "tantan", "pickel", "edge", "flame_first",
-                                      "light_first", "flame_only", "light_only", "demon", "trail"};      /* the downloadable fighters' ui_chara names (Pyra/Mythra: flame/light, not the fighter kinds eflame/elight) */
+    static const char *const dlc[] = {"packun", "jack", "brave", "buddy", "dolly", "master", "tantan", "pickel", "edge", "eflame_first",
+                                      "elight_first", "eflame_only", "elight_only", "demon", "trail"};      /* the downloadable fighters' ui_chara names (ui_chara_db: eflame/elight, not flame/light) */
     for (size_t i = 0; i < sizeof dlc / sizeof dlc[0]; i++) { char n[48]; snprintf(n, sizeof n, "ui_chara_%s", dlc[i]); g_dlc[g_ndlc++] = hash40(n); }
     const char *ks = getenv("SSBU_UNLOCK_KINDS");
     if (ks && *ks) g_kinds = (unsigned)strtoul(ks, NULL, 16);
