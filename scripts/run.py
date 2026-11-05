@@ -80,6 +80,11 @@ PLAY_DEFAULTS = {
     # (2026-11-05) a rollback of 1 frame no longer saves the state of its re-run frame (the next real pass saves the
     # following one anyway; rollback_controller.c recap mode 6). graphics.ini rerun_lite = off: the old mode 5 too.
     'SSBU_RB_NET_RECAP': '6',
+    # (2026-11-05) the learned set forgets the pages that did not change in the last 30 captures (they are made read-only
+    # again; their next write brings them back): every capture compares and every load restores ~5,000 pages fewer.
+    # tests/rb_lite_bisect.py: capture 1.97 -> 1.36 ms, load 2.04 -> 1.29 ms, the real pass ~0.6 ms slower (the page
+    # faults), re-runs exact. graphics.ini rerun_lite = off: no decay (the old way).
+    'SSBU_LS_DECAY': '30',
 }
 
 
@@ -594,6 +599,8 @@ def main():
     if a.play and rollback:                           # (fork) the group's settings and lobby, see PLAY_DEFAULTS
         full_rerun = ini_get(gini, 'rerun_lite') in ('off', '0', 'no', 'false')
         for k, v in PLAY_DEFAULTS.items():
+            if full_rerun and k == 'SSBU_LS_DECAY':
+                continue
             env.setdefault(k, ('5' if k == 'SSBU_RB_NET_RECAP' else '0') if full_rerun and k in ('SSBU_RB_SIM_SKIP', 'SSBU_RB_SIM_LITE', 'SSBU_RB_NET_LASTLITE', 'SSBU_RB_NET_RECAP') else v)
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)

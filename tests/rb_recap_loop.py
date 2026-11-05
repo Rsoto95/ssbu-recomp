@@ -42,7 +42,7 @@ def run(mode, late, delay):
            'SSBU_DETERMINISTIC=1', 'SSBU_R1_LOG=' + r1, 'SSBU_LS_X_WW=1', 'SSBU_RB_AUDIO_OFF=1', 'SSBU_LATENCY=low',
            'SSBU_RB_SIM_SKIP=49', 'SSBU_RB_SIM_LITE=123', 'SSBU_RB_NET_LASTLITE=1',
            'SSBU_RB_NET=loop,%d' % late, 'SSBU_RB_NET_DELAY=%d' % delay, 'SSBU_RB_NET_BOT=7', 'SSBU_RB_NET_LOOP_SEED=7',
-           'SSBU_RB_NET_LOG=' + hlog, 'SSBU_RB_NET_RECAP=%d' % mode]
+           'SSBU_RB_NET_LOG=' + hlog, 'SSBU_RB_NET_RECAP=%d' % mode] + os.environ.get('RBRECAP_EXTRA', '').split()
     cmd = [PY, os.path.join(REPO, 'scripts', 'run.py'), '--build', BUILD, '--userdata', os.path.join(BUILD, 'test_saves', 'a'),
            '--seq', SEQ, '--seconds', str(SECS), '--log', log] + sum((['--env', e] for e in env), [])
     subprocess.run(cmd, cwd=REPO, timeout=SECS + 300)
