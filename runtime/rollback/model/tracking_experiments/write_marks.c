@@ -144,11 +144,20 @@ static void mark_undo(void) {
  * mark_prepare: the shadow's reservation, its maps, the extras listed and allocated (no copy). 1 = done; 0 = out of memory. */
 void mark_abort(void) { mark_undo(); }
 int mark_prepare(void) {
-    size_t big = 0; uint8_t *base = NULL;
+    /* (2026-11-05) window 1 = the reservation with the most committed read-write memory (the game's heap), not the
+     * largest one: on a friend's PC (AMD RX 6600, 16 GB) a 256 GB reservation with 38 MB in it was taken as window 1 and
+     * the heap (1.8 GB) became "extras" compared by write-watch at every capture (~16 ms a frame: ~47 fps in rollback) */
+    size_t big = 0, bigc = 0; uint8_t *base = NULL;
     for (int i = 0; i < g_memory_map.heap_count; i++) {
-        MEMORY_BASIC_INFORMATION m; uint8_t *p = g_memory_map.heap_base[i];
-        while (VirtualQuery(p, &m, sizeof m) && m.AllocationBase == g_memory_map.heap_base[i]) p = (uint8_t *)m.BaseAddress + m.RegionSize;
-        if ((size_t)(p - g_memory_map.heap_base[i]) > big && g_memory_map.heap_base[i] != g_ar) { big = (size_t)(p - g_memory_map.heap_base[i]); base = g_memory_map.heap_base[i]; }
+        MEMORY_BASIC_INFORMATION m; uint8_t *p = g_memory_map.heap_base[i]; size_t com = 0;
+        while (VirtualQuery(p, &m, sizeof m) && m.AllocationBase == g_memory_map.heap_base[i]) {
+            if (m.State == MEM_COMMIT && rw(m.Protect)) com += m.RegionSize;
+            p = (uint8_t *)m.BaseAddress + m.RegionSize;
+        }
+        size_t span = (size_t)(p - g_memory_map.heap_base[i]);
+        LOG("r1: MARK: reservation at %p: %.1f GB, %.1f MB committed read-write\n", (void *)g_memory_map.heap_base[i], span / 1073741824.0, com / 1048576.0);
+        if (g_memory_map.heap_base[i] == g_ar) continue;
+        if (!base || com > bigc || (com == bigc && span > big)) { big = span; bigc = com; base = g_memory_map.heap_base[i]; }
     }
     g_win1 = base; g_wn1 = big;
     g_mctx = g_ctx_save;                               /* main's registers of this (full) save */
