@@ -1752,6 +1752,30 @@ static void exit_game(void) {                              /* F1 -> Exit game: t
     CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(4000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
 }
+
+/* (2026-11-04, owner) online fights read every controller as a Pro Controller (nnhid.c npad_style), a GameCube one too, so
+ * a GameCube player's buttons must be set up on the game's PRO CONTROLLER controls. Said once per run, 20 s after the start
+ * or when a GameCube controller first shows up later: the short note at the bottom (menu_toast: no input, gone after 10 s;
+ * the owner: "it must not get in the way"). SSBU_GC_PRO_NOTE=0: never. */
+static const char k_gc_pro_note[] = "GameCube controller: set up your buttons on the PRO CONTROLLER (Options > Controls).\n"
+                                    "Online every controller is read as a Pro Controller.\n"
+                                    "Control de GameCube: configura tus botones en el PRO CONTROLLER.";
+static void gc_pro_notice(void) {
+    static int done = -1; static ULONGLONG t0, next;
+    if (done < 0) { const char *e = getenv("SSBU_GC_PRO_NOTE"); done = e && e[0] == '0'; }
+    if (done) return;
+    ULONGLONG t = GetTickCount64();
+    if (!t0) t0 = t;
+    if (t - t0 < 20000 || t < next) return;
+    next = t + 1000;
+    if (g_open || popup_on() || toast_on()) return;
+    for (int p = 0; p < 8; p++) if (nnpad_is_gc(p)) {
+        menu_toast(k_gc_pro_note, 10000); done = 1;
+        printf("menu: note: a GameCube controller (player %d): its buttons are set up on the Pro Controller (online every controller is one)\n", p + 1); fflush(stdout);
+        break;
+    }
+}
+
 #ifdef _WIN32
 /* (fork, 2026-11-01) a newer version found while playing: "Play SSBU.bat" (run.py update_watch) asks GitHub every 10 minutes
  * and writes SSBU_UPDATE_FLAG (the new commit's first 7 characters). Here: a message (again every 20 minutes) and, at the top
@@ -1779,28 +1803,6 @@ static void update_check(void) {                           /* render thread, eve
         next_say = t + 20 * 60000;
         menu_popup("New version", "A new version of the game is ready.\nPress F1 (or Home on the controller) and choose \"Update and restart\".\n"
                    "The game closes, installs it (about a minute) and opens again by itself.");
-    }
-}
-/* (2026-11-04, owner) online fights read every controller as a Pro Controller (nnhid.c npad_style), a GameCube one too, so
- * a GameCube player's buttons must be set up on the game's PRO CONTROLLER controls. Said once per run, 20 s after the start
- * or when a GameCube controller first shows up later: the short note at the bottom (menu_toast: no input, gone after 10 s;
- * the owner: "it must not get in the way"). SSBU_GC_PRO_NOTE=0: never. */
-static const char k_gc_pro_note[] = "GameCube controller: set up your buttons on the PRO CONTROLLER (Options > Controls).\n"
-                                    "Online every controller is read as a Pro Controller.\n"
-                                    "Control de GameCube: configura tus botones en el PRO CONTROLLER.";
-static void gc_pro_notice(void) {
-    static int done = -1; static ULONGLONG t0, next;
-    if (done < 0) { const char *e = getenv("SSBU_GC_PRO_NOTE"); done = e && e[0] == '0'; }
-    if (done) return;
-    ULONGLONG t = GetTickCount64();
-    if (!t0) t0 = t;
-    if (t - t0 < 20000 || t < next) return;
-    next = t + 1000;
-    if (g_open || popup_on() || toast_on()) return;
-    for (int p = 0; p < 8; p++) if (nnpad_is_gc(p)) {
-        menu_toast(k_gc_pro_note, 10000); done = 1;
-        printf("menu: note: a GameCube controller (player %d): its buttons are set up on the Pro Controller (online every controller is one)\n", p + 1); fflush(stdout);
-        break;
     }
 }
 static void update_and_restart(void);
