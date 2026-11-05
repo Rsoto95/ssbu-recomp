@@ -13,13 +13,20 @@ from collections import Counter
 
 
 def frames(path):
-    out = {}
+    """{hash frame: [entity lines]} and {hash frame: 'R' or 'S'}. The P field the hash file writes (<pass> <phase>)
+    is test metadata, not game state; a Linux run has no 'r1: RA kinds' lines, so the phase is the kind there."""
+    out, kinds = {}, {}
     for ln in open(path, errors='replace'):
         if not ln.startswith('F ') or ' H ' not in ln:
             continue
         f = int(ln.split()[1])
-        out.setdefault(f, []).append(ln.split(' H ')[0].split(' ', 2)[2])
-    return out
+        body = ln.split(' H ')[0].split(' ', 2)[2]
+        body = re.sub(r'^P \d+ \d+ ', '', body)
+        out.setdefault(f, []).append(body)
+        m = re.match(r'F \d+ P \d+ (\d+) ', ln)
+        if m:
+            kinds[f] = 'S' if int(m.group(1)) == 2 else 'R'
+    return out, kinds
 
 
 def short(body):
@@ -27,15 +34,18 @@ def short(body):
 
 
 def main():
-    sim, log, ref = frames(sys.argv[1]), sys.argv[2], frames(sys.argv[3])
+    sim, sim_kinds = frames(sys.argv[1])
+    log, ref = sys.argv[2], frames(sys.argv[3])[0]
 
-    # 1. kinds, built as in r1_ra_cmp.py
+    # 1. kinds, built as in r1_ra_cmp.py; a Linux SIM logs no 'RA kinds' lines: the hash file's P phase is the kind
     kinds = {}
     for ln in open(log, errors='replace'):
         m = re.match(r'r1: RA kinds (\d+): ([RS]+)', ln)
         if m:
             for i, ch in enumerate(m.group(2)):
                 kinds[int(m.group(1)) + i] = ch
+    if not kinds:
+        kinds = sim_kinds
     nk = max(kinds) if kinds else 0
     spec = sum(1 for v in kinds.values() if v == 'S')
     absent = bool(sim) and max(sim) < nk - spec // 2

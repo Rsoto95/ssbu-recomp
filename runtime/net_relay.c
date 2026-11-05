@@ -57,6 +57,14 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+static void net_set_rcvtimeo(SOCKET s, DWORD ms) {
+#ifdef _WIN32
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof ms);
+#else
+    struct timeval tv = { (time_t)(ms / 1000), (suseconds_t)((ms % 1000) * 1000) };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
+}
 #include <windows.h>
 #include <wincrypt.h>
 #include <stdarg.h>
@@ -1549,7 +1557,11 @@ static int resolve(void) {
 
 /* ---------------------------------------------------------------- no server: room codes, STUN, the in-game lobby */
 #include "net_minilobby.c"                      /* the lobby of tools_net/ssbu_lobby.py in C: runs inside the host's game */
+#ifdef _WIN32
 #include "net_upnp.c"                           /* UPnP-IGD port mapping (HOST mode, online_upnp) */
+#else
+#include "net_upnp_posix.c"                     /* no UPnP here: the port is forwarded by hand */
+#endif
 
 /* A room code is an IPv4 address and a UDP port (6 bytes) in Crockford base32: 10 characters, shown as XXXXX-XXXXX.
  * Reading it ignores '-', spaces and case; O reads as 0, I and L as 1. "a.b.c.d:port" is accepted as well. */
@@ -1621,7 +1633,7 @@ static SOCKET udp_socket(uint32_t ip, uint16_t port, int timeout_ms) {
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(ip); a.sin_port = htons(port);
     DWORD to = (DWORD)timeout_ms, bytes = 0; BOOL off = FALSE;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
+    net_set_rcvtimeo(s, to);
     WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
     if (bind(s, (struct sockaddr *)&a, sizeof a)) { closesocket(s); return INVALID_SOCKET; }
     return s;
@@ -1689,7 +1701,7 @@ static SOCKET beacon_socket(void) {
     BOOL yes = TRUE; DWORD to = 200, bytes = 0, off = FALSE; int ttl = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof yes);
     setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char *)&yes, sizeof yes);
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
+    net_set_rcvtimeo(s, to);
     WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET; a.sin_port = htons(VNET_BEACON_PORT); a.sin_addr.s_addr = test_loopback() ? htonl(INADDR_LOOPBACK) : INADDR_ANY;
@@ -1841,7 +1853,7 @@ static void lobby_fallback_to_lan(void) {       /* (client thread) auto mode, th
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) return;
     DWORD timeout = 50, bytes = 0; BOOL off = FALSE;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+    net_set_rcvtimeo(s, timeout);
     WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
     SOCKET old = g_sock;
     g_sock = s;                                 /* (net_send sends nothing until joined) */
@@ -2038,11 +2050,8 @@ static void leave(void) {
     tx(p, sizeof p, &g_lobby);
 }
 
-void net_start(void) {
-    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
-    BOOL pending;
-    InitOnceBeginInitialize(&once, 0, &pending, NULL);
-    if (!pending) return;
+static BOOL net_start_once(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once; (void)param; (void)ctx;
     {   /* U1: "Restart the game now" of the settings menu starts this copy while the old one is still closing: wait for it to
          * end first (its UPnP mapping and its lobby place are removed by its exit handlers; at most 15 s) */
         const char *w = getenv("SSBU_RESTART_WAIT_PID");
@@ -2061,7 +2070,7 @@ void net_start(void) {
             DWORD timeout = 50, bytes = 0;
             BOOL off = FALSE;
             int big = 1 << 20;
-            setsockopt(g_sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+            net_set_rcvtimeo(g_sock, timeout);
             setsockopt(g_sock, SOL_SOCKET, SO_RCVBUF, (const char *)&big, sizeof big);
             WSAIoctl(g_sock, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);   /* (no ICMP errors on receive) */
             sim_init();                                  /* SSBU_NET_SIM (test only) */
@@ -2070,7 +2079,11 @@ void net_start(void) {
             atexit(leave);
         } else say("no UDP socket (error %d): online play unavailable", WSAGetLastError());
     }
-    InitOnceComplete(&once, 0, NULL);
+    return TRUE;
+}
+void net_start(void) {
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    InitOnceExecuteOnce(&once, net_start_once, NULL, NULL);
 }
 
 /* net_stats.h: the F2 overlay's online fields, read once per drawn frame on the render thread; never blocks.

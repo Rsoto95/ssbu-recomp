@@ -27,7 +27,7 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
 | Keyboard | works (tested); controllers through SDL3 are the same code as on Windows but **not tested with a real pad on Linux** |
 | Album movie recording (the game's video capture to the album) | **not implemented** on Linux; the 7 self-test cases for it are accepted as known failures |
 | OpenGL renderer | not on Linux: Vulkan only |
-| Online play (experimental on Windows, `SSBU_ONLINE`) | not in the Linux build yet: the game's Local Wireless answers as an offline console |
+| Online play (experimental, `SSBU_ONLINE`) | Linux: the UDP transport is built (`net_relay.c`); UPnP is a stub (forward the UDP port by hand). The rollback state save/restore and the POSIX fault-recovery net are ported; the offline simulation is exact for 1,698 real frames, but a load can still restore a job fiber on another host stack and end a long match (known limit below). Use the delay-based fallback (`SSBU_RB_NET_NOROLLBACK=1`) for online play. See [Rollback and online play](#rollback-and-online-play-linux) |
 | Other distributions, AMD / Intel GPUs, X11, Steam Deck | not tested. The package lists for Debian/Ubuntu and Fedora in `install_deps.sh` are best guesses; `setup.py` checks every library and says which one is missing |
 
 ## What you need
@@ -54,6 +54,14 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
   it) shaders are prepared ahead of time and nothing is compiled during a fight.
 - **A distribution with SDL3 and clang 19 or newer:** current Arch and its derivatives, Fedora 42+, Debian 13,
   Ubuntu 25.04+.
+- **For the rollback ring: userfaultfd.** The snapshot ring's write watch uses `userfaultfd` write protection with
+  asynchronous faults (kernel 6.7 or newer; only user-mode-only faults, never kernel ones). `run.py` tries the syscall
+  at start when rollback is on and warns with the fix when the kernel refuses it; without it the ring never starts and
+  the game only says so in its log (`the rollback ring is OFF`). Note `sysctl vm.unprivileged_userfaultfd` is 0 on
+  Fedora by default and that is fine: the knob gates only faults the kernel itself would service. If the warning
+  appears anyway: `echo vm.unprivileged_userfaultfd=1 | sudo tee /etc/sysctl.d/90-ssbu-uffd.conf`, or
+  `sudo sysctl vm.unprivileged_userfaultfd=1` until the next boot, or `sudo setcap cap_sys_ptrace=ep
+  <build>/work/ssbu_native`.
 
 ## 1. Dependencies
 
@@ -185,8 +193,148 @@ keyboard key F1. Text boxes: in Desktop Mode use the keyboard or "Type in a dial
 Steam's on-screen keyboard (Steam + X) types into the active box (SDL may also open it by itself when a box is
 selected; not verified).
 
-Not on Linux yet: **Online play** (the Experimental page saves the settings for later and says so), and the Log page
-shows the log only when the game's output goes to a file (`play.sh` does that).
+Not on Linux yet: **Online play** from the F1 page (it saves the settings and says so; use `SSBU_ONLINE` below), and the
+Log page shows the log only when the game's output goes to a file (`play.sh` does that).
+
+### Rollback and online play (Linux)
+
+The native rollback state save/restore is built on Linux too: the real `game_state.c` branch, the snapshot ring, the
+POSIX page tracker and the cooperative thread gate (`runtime/rollback/rb_park.c`). Threads stop themselves at SDK import
+boundaries; no signals, ptrace or `SIGSTOP` are used. Window 1 (the game's big region) is read with `GetWriteWatch` on
+userfaultfd, window 2 (image and modules) is compared page by page, the extras are compared when their write watch says
+they changed.
+
+Fault recovery is ported as well (`runtime/rollback/controller/fault_recovery_posix.c` and `runtime/nnunwind.c`):
+
+- A pass that faults is marked tainted and the ring reloads the newest healthy state at the next safe point, walking
+  further back if the same pass faults again.
+- A throw whose guest frames cannot be walked is delivered through the host stack to the innermost `nro_catch_call`
+  frame on the faulting thread. `eh_terminate` uses the same path before it ends the game.
+- A `SIGSEGV` / `SIGBUS` in the lifted game code is answered by a `ucontext` handler that steps over a plain memory move
+  or returns from a leaf memory helper. Once the pass is tainted it resumes at the innermost catch frame of the same
+  host stack (`nnunwind_bail_context_posix`), using the registers from its `jmp_buf`; this is not a `longjmp` out of a
+  signal handler.
+- The catch table keeps a record on a host fiber that the ring's live list no longer names when the frame it points at
+  is still the same catch frame (`nnunwind_catch_valid`). This is what fixed the `L2CExceptionShutdown` failure of the
+  first port in the 1,698-frame run below.
+- Pia / NetSystem threads are held at their waits but not rewound: their guest stacks are marked not-simulation
+  (`r1_nosim`) at every thread-table build (`park` and the run-ahead hold path `ra_hold_save`, which the Linux ring's
+  saves and captures use), and `restore_thread_regs` skips their registers. The thread table reuses a finished slot,
+  so a network thread started after the 256th start (Pia is started again for every
+  room) is still held and marked. The network is an external side channel like audio; a rollback must not replay it.
+  At a load, a thread parked at a different wait (a network thread, a TaskWorker, or any service/presentation thread
+  such as the VSync count, render dispatch or a file loader) is taken after 5 ms without refusing the load: it is
+  held for the copy, `same` stays false and its registers are not restored. `SSBU_RB_NET_THREAD_WAIT=0`,
+  `SSBU_RB_WORKER_WAIT=0` and `SSBU_RB_THREAD_WAIT=0` disable the network, worker and generic exceptions. The ring
+  refuses a load only when a thread is still RUNNING guest code after the hold; a thread waiting while owning a mutex
+  still refuses the hold. Absorbable faults on network threads taint the pass for the usual safe-point reload;
+  they are not rejected just because of the thread name. This mitigates the observed NetSystem crash, but the heap
+  objects these threads use can still be rolled back. Full two-instance stability is not established. The network-thread
+  exclusions, wait exceptions and thread-slot reuse are guarded by `__linux__`; they do not change the Windows paths.
+  `SSBU_RB_NET_THREAD_EXCLUDE=0` turns the exclusion off and rewinds Pia/NetSystem guest stacks like the Windows path;
+  their registers are restored only when their wait is the same. This is the A/B experiment for the NetSystem heap
+  fault; replaying the network thread may duplicate Pia traffic. A TaskWorker parked at a different wait is covered by
+  the same 5 ms exception; a running worker or one owning a mutex still refuses the hold. Holding the POSIX task workers
+  through the cooperative gate from H1 to H2 was tried and reverted: the gate parks workers inside jobs and stalled the
+  frame rate (avg 286 ms/frame in the two-instance test).
+
+What is not ported: the presentation pool, the debug-only rollback files, and run-ahead (`SSBU_RUNAHEAD`). The 13.0.5
+address table is audited: every code address used by the rollback files is in `g_code_13_0_5`; data addresses follow the
+documented +0x1000 segment shift (including the run-ahead-only `0x71053365a8`).
+
+**Known limit (the plan's stop condition 2).** The offline simulation is exact for 1,698 real frames (see below), but it
+is not reliable over a long match. Only Pia/NetSystem stacks and registers are excluded, not all their heap objects;
+the two-instance test still crashed on NetSystem after a load. The load admission change, wait exception and restored
+fault absorption above need a two-instance retest (the admission fix removes the blanket mismatch refusal; the
+fiber/heap risks below are separate). Another risk is a load that restores a state whose guest object names a
+job fiber/object that the load did not bring back (the fiber moved to another host fiber between the capture and the
+load). The re-run then faults in a cascade. The signal handler absorbs the first plain moves, but the cascade has no
+`nro_catch_call` frame on the current host stack to cut it back to, so after 4,096 faults the net lets go and the
+process ends. A catch record on another fiber's stack cannot be used: a cross-stack `longjmp` is exactly what the port
+must not do. A throw can also still fail with `f_720052e2f0 handled an exception but was not entered through
+nro_catch_call` when its record is on another fiber. These are the plan's stop conditions 1/2, not something to work
+around with signals or a rewritten safe point. Offline play is unaffected. For online play use the delay-based
+fallback (`SSBU_RB_NET_NOROLLBACK=1`), or turn Rollback off in F1; the ring is then never made.
+(2026-11-03: after the load-admission fix, the offline ring simulation completed 84 loads with k 1..7, no refused
+load, no `FAULT RECOVERY` and no `HOST SIGNAL`; the two-instance retest is still pending. The base state also loads
+now: a stress run that rolled back every 7 passes loaded frame 0 in 23.9 ms with 2 audio threads taken at another
+wait, then hit the known not-saved-page cascade at pass 374.)
+
+**Offline rollback test** (one process, no network). `--seed 1` (`SSBU_FIXED_SEED`) makes both runs pick the same CPU
+fighter and stage, so the reference and the rollback run play the same match:
+
+```
+deps/venv/bin/python scripts/run.py --linux --build build-linux-1305 \
+  --userdata <copy of a save that reached the fight menus> \
+  --seq tests/seq_linux_battle.txt --seconds 150 --seed 1 \
+  --env SSBU_RB_SIM=30,2 --env SSBU_DETERMINISTIC=1 --env SSBU_RB_AUDIO_OFF=1 \
+  --env SSBU_R1_LOG=/tmp/r1_sim.log --env SSBU_FIGHT_HASH=/tmp/sim.hash
+
+deps/venv/bin/python scripts/run.py --linux --build build-linux-1305 \
+  --userdata <another copy of the same save> \
+  --seq tests/seq_linux_battle.txt --seconds 150 --seed 1 \
+  --env SSBU_DETERMINISTIC=1 --env SSBU_RB_AUDIO_OFF=1 \
+  --env SSBU_FIGHT_HASH=/tmp/ref.hash
+
+deps/venv/bin/python tests/rb_sim_cmp.py /tmp/sim.hash /tmp/r1_sim.log /tmp/ref.hash
+```
+
+Result on this PC: 1,698 real frames identical to the reference; 51 re-run runs (76 frames) all equal; no terminate.
+`tests/seq_linux_battle.txt` goes from boot to a fight without waiting for the movie's `@movie` mark (the Linux movie
+path does not raise it); use a save that has already seen the first-boot "Milestones" and "Unlocked!" banners (press A
+through them once), because they sit between the title and the menu. `SSBU_RB_HOLD_PROF=1` prints where a hold's time
+went.
+
+**Fault test** (a test switch, not a full test of the net): add `--env SSBU_RB_FAULT_TEST=100` to the simulation. It
+makes a deliberate leaf read, a plain read and a plain write every 100 real passes; the signal handler implements all
+three shapes. It was not taken to completion here: the test run ended in the Lua catch-record case above before its
+first trigger, so the shapes are covered by the code and the trace, not by a passing run of this switch.
+
+**Online** (loopback bot, one process, room-shaped). Create a Local Wireless room in the game; the waiting-stage fight
+starts alone and the loop bot is the other player (`SSBU_ONLINE=127.0.0.1:39500` without a server only says
+"disconnected"):
+
+```
+deps/venv/bin/python scripts/run.py --linux --build build-linux-1305 \
+  --userdata /tmp/rb-a --seconds 300 --seed 1 \
+  --log /tmp/loop_room.log \
+  --env SSBU_ONLINE=host:39520 --env SSBU_ONLINE_LOOPBACK=1 \
+  --env SSBU_RB_NET=loop,8 --env SSBU_RB_NET_BOT=7 --env SSBU_RB_AUDIO_OFF=1 \
+  --env SSBU_RB_NET_LOG=/tmp/loop_room.netlog
+```
+
+Checks: `grep -c "rollback [0-9]" /tmp/loop_room.log` (dozens+), `grep -c "FAULT RECOVERY"` (want 0),
+`grep "HOST SIGNAL"` (want nothing), `grep "RING load .* REFUSED"` (want nothing), and the `load mean` in the
+`RB NET report` should be a few milliseconds, not 500.
+
+Not run in this pass: the offline test is not reliable over a long match (the stop condition above). The launcher maps
+F1 > Experimental > Rollback netcode (`graphics.ini rollback = on`) to `SSBU_RB_NET=net` on the next start (`play.sh`
+passes `--play`, `scripts/run.py` sets it). The launcher's group settings (`SSBU_RB_AUDIO_OFF=1`, `SSBU_LS_X_WW=1`, the
+input delay) are the same as on Windows; `group_lobby = off` in `graphics.ini` keeps F1's online mode instead of the
+same-network lobby.
+
+**Two instances** on one PC: one `SSBU_ONLINE=host:39520` and one `SSBU_ONLINE=join:127.0.0.1:39520`, each with its
+own `--userdata`, `SSBU_ONLINE_LOOPBACK=1`, `SSBU_RB_NET=net` and `SSBU_RB_AUDIO_OFF=1`, started about 25 s apart. Add
+`SSBU_RB_NET_DELAY=0` and `SSBU_RB_NET_AHEAD=1` on both to force real loads on loopback (with the default delay the
+~0 ms round trip absorbs every guess). The load admission change and fault recovery above need a two-instance retest.
+Use a windowed 1280x720 build for the retest (two fullscreen instances are over the frame budget), and set
+`SSBU_FIGHT_HASH=<file>` on both so the checksums are exercised. The guest log should show
+`r1: NETWORK: Pia ReceiveThreadStream guest stack ... not rolled back`; there should be no `FAULT RECOVERY` cascade on
+the Pia thread and no `HOST SIGNAL`. `tests/linux_pair.py` drives the Linux sequences
+(`tests/seq_lwr_host_linux.txt` / `seq_lwr_join_linux.txt`); play the room manually if they do not fit the save's
+menus.
+
+**Freeze at match start:** `mark_network_threads` must call `r1_nosim(lo, hi - lo)`: its second argument is a byte count,
+not an end address. Passing `hi` scanned billions of pages at the base and every later capture, and excluded unrelated
+heap pages from rollback. A saved two-instance trace showed base saves of 136,165 / 135,385 ms, despite the initial
+memory copies taking about 2 s. `tests/rb_network_stack_test.c` checks the argument using the real marking function
+without loading the game. After the correction, the user's two-instance logs showed base saves of 3,464 / 3,349.7 ms,
+but the join instance later crashed on NetSystem; the wait exception and restored fault absorption still need a retest.
+
+UPnP is not implemented on Linux: in host mode the log says which UDP port to forward on the router.
+`SSBU_RB_NET_NOROLLBACK=1` plays the match delay-based when the ring cannot be made or is turned off; verified with the
+loop bot (the log says `rollback OFF for this match (SSBU_RB_NET_NOROLLBACK): delay-based`, no ring is made, the match
+runs to its end). Crash recovery is the POSIX port described above; it is not a substitute for a correct state restore.
 
 ## Fonts
 

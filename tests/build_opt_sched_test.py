@@ -25,7 +25,8 @@ SPEC = dict({'small%02d' % i: ([500, 300], 0.4, 0.02, 0) for i in range(24)},
             huge=([215493, 2846, 198], 12.0, None, 99),     # like c_00a3.c: over every limit
             same=([77061, 1186], 3.0, None, 99),            # like c_03d9.c: steps 1 and 2 = step 0
             mid=([30000, 6000], 2.5, 0.02, 0),              # needs more than its first reservation
-            lad=([16581, 2101, 1717], 1.0, None, 2))        # like c_03fc.c: fits once two functions are unoptimised
+            lad=([16581, 2101, 1717], 1.0, None, 2),       # like c_03fc.c: fits once two functions are unoptimised
+            crash=([100, 100], 0.4, 0.02, 0))              # clang's optimizer crash: every optnone step still crashes
 
 
 def child(target):
@@ -52,6 +53,8 @@ def child(target):
             assert B._mem_used <= max(B.MEM_BUDGET, 0), 'reservations over the budget'
         if B.MEM_LIMIT and need * GB > (mem or B.MEM_LIMIT):
             return None, B.OOM, 0.005
+        if name == 'crash' and n_off == 0:                # clang's driver: exit 1 with the -cc1 crash report
+            return 1, 'clang: error: clang frontend command failed with exit code 134\nPLEASE ATTACH THE FOLLOWING FILES', 0.005
         if secs is None and n_off < ok_from:
             return None, '', 0.005
         time.sleep(secs or 0.005)
@@ -78,7 +81,7 @@ def child(target):
         res = dict(pool.map(lambda n: (n, B.compile_file(os.path.join(d, n + '.c'), os.path.join(d, n + '.obj'), [])), order))
     import shutil
     shutil.rmtree(d, ignore_errors=True)
-    steps = {n: [c[1] for c in calls if c[0] == n] for n in ('huge', 'same', 'mid', 'lad')}
+    steps = {n: [c[1] for c in calls if c[0] == n] for n in ('huge', 'same', 'mid', 'lad', 'crash')}
     mems = {n: [c[2] for c in calls if c[0] == n] for n in ('huge', 'same', 'mid')}
     bad = []
     if any(r[0] for r in res.values()):
@@ -109,6 +112,8 @@ def child(target):
                 bad.append('same: %r' % steps['same'])
         if steps['lad'] != [0, 1, 3]:
             bad.append('lad: %r' % steps['lad'])
+        if steps['crash'] != [0, 'O0']:
+            bad.append('crash: %r' % steps['crash'])
         if peak[0] > budget:
             bad.append('peak %d over the budget' % peak[0])
     print('%-7s %s   ladder %s   peak reserved %.1f GB' % (target, 'ok' if not bad else 'FAILED: ' + '; '.join(bad), steps, peak[0] / GB))

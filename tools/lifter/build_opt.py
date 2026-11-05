@@ -281,6 +281,13 @@ def hints_write(objdir):
             json.dump(d, f, indent=0, sort_keys=True)
 
 
+def compiler_crashed(code, out):
+    """The compiler itself died (clang's crash report or a signal), not the source: the next ladder step may avoid it.
+    clang's driver exits 1 for a crashed -cc1 and says so in the output, so the code alone is not enough."""
+    return code is not None and (code < 0 or code > 128 or 'PLEASE ATTACH' in out
+                                 or 'clang frontend command failed' in out)
+
+
 def compile_file(src, obj, base_flags, time_limit=None, extra=None):
     """Compile with the fallback ladder. Returns (exit code, output, seconds, description of the fallback or '')."""
     time_limit = time_limit or TIME_LIMIT
@@ -294,6 +301,7 @@ def compile_file(src, obj, base_flags, time_limit=None, extra=None):
     want = mem_estimate(src, function_sizes(src)) if MEM_BUDGET else 0      # Linux / macOS: this compile's share of RAM
     raised = ''
     tried = None
+    crashed = False
     for step, limit in enumerate((OPTNONE_LINES, OPTNONE_LINES // 4, OPTNONE_LINES // 16)):
         if step < first:
             continue
@@ -323,6 +331,9 @@ def compile_file(src, obj, base_flags, time_limit=None, extra=None):
                 continue
             break
         if code is not None:
+            if compiler_crashed(code, out):          # a crashed optimizer may avoid it with more functions unoptimised
+                crashed = True
+                continue
             note = ''
             if count:
                 note = '%d function(s) over %d statements unoptimised (%d statements)' % (count, limit, lines)
@@ -339,8 +350,9 @@ def compile_file(src, obj, base_flags, time_limit=None, extra=None):
             mem_release(want)
     if r.returncode == 0:
         ladder_save(objdir, name, key, 3)
-    return r.returncode, (r.stdout + r.stderr)[-2000:], total, 'WHOLE FILE at -O0 (time limit %.0fs%s exceeded three times)' % (
+    why = 'a compiler crash' if crashed else 'time limit %.0fs%s exceeded three times' % (
         time_limit, ' or memory limit %.1f GB' % (MEM_LIMIT / 2.0 ** 30) if MEM_LIMIT else '')
+    return r.returncode, (r.stdout + r.stderr)[-2000:], total, 'WHOLE FILE at -O0 (%s)' % why
 
 
 _tries = collections.Counter()

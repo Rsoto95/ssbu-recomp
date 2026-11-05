@@ -18,7 +18,7 @@ static double g_rgs_pass_v[2][RG_NST / 4]; static int g_rgs_pass_nv[2];
        /* R3: rb_rollback.c */
 int rgs_wanted(void) {
     if (g_rgs_on < 0 && rbg_on()) { g_rgs_on = 1; g_rgs_n = 1 << 30; return 1; }      /* R3 online rollback (SSBU_RB_NET): the ring driven by the input queues */
-    if (g_rgs_on < 0) { const char *e = getenv("SSBU_RB_SIM"); g_rgs_on = e && e[0] && e[0] != '0'; if (g_rgs_on) sscanf(e, "%d,%d,%d", &g_rgs_n, &g_rgs_k, &g_rgs_warm); if (g_rgs_k < 1) g_rgs_k = 1; if (g_rgs_k > RG_MAXSLOT - 1) g_rgs_k = RG_MAXSLOT - 1; if (g_rgs_n < 1) g_rgs_n = 1; }
+    if (g_rgs_on < 0) { const char *e = getenv("SSBU_RB_SIM"); g_rgs_on = e && e[0] && e[0] != '0'; if (g_rgs_on) sscanf(e, "%d,%d,%d", &g_rgs_n, &g_rgs_k, &g_rgs_warm); if (g_rgs_k < 1) g_rgs_k = 1; if (g_rgs_k > RG_MAXSLOT - 1) g_rgs_k = RG_MAXSLOT - 1; if (g_rgs_n < 1) g_rgs_n = 1; if (g_rgs_on) { const char *ki = getenv("SSBU_RB_SIM_KI"); if (ki) g_rgs_ki = atoi(ki); } }   /* (TEST) SSBU_RB_SIM_KI=<n>: first k index, 6 with k 7 loads the base state */
     return g_rgs_on;
 }
 
@@ -55,6 +55,7 @@ void rgs_step(Ctx *c) {
     if (g_ra_off || !ra_fight_on()) { void rb_audio_fight_over(void); void nnaudio_gate(int on); nnaudio_gate(0); ls_fight_over(); InterlockedExchange(&g_rb_audio_off, 0); rb_audio_fight_over(); if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on()) rbg_fight_off(); { void rb_fibers_reap_tick(void); rb_fibers_reap_tick(); } return; }   /* (R3: the report once at the end of each match; hs12: the session reset for the next match) */
     if (rbg_on()) { rbg_step(c); g_rgs_pass_t0 = now_ms(); g_rgs_cyc0 = rgs_cyc_now(); g_ra_t_mark = g_rgs_pass_t0; return; }      /* R3: online rollback */
     long long i = g_rgs_next;                             /* the pass that ended here */
+    { extern volatile long long g_unwind_trace_frame; g_unwind_trace_frame = i + 1; }      /* (hs15) the frame the next pass simulates, for SSBU_UNWIND_TRACE */
     if (g_rg_keep_on < 0) { const char *e = getenv("SSBU_RB_KEEP"); g_rg_keep_on = !e || atoi(e) != 0; }
     {   /* will a load follow this capture? then the threads stay held from the capture to the load (SSBU_RB_KEEP=0: not) */
         int ph = g_ra_phase == 2 && g_rgs_left - 1 <= 0 ? 0 : g_ra_phase;
@@ -194,6 +195,7 @@ static RgsS *rgss_slot(uint64_t fn) {
     for (int i = 0; i < 64; i++) { RgsS *e = &g_rgss[(h + (unsigned)i) % RGS_SN]; if (e->fn == fn) return e; if (!e->fn) { e->fn = fn; return e; } }
     return NULL;
 }
+#ifdef _WIN32
 static DWORD WINAPI rgss_thread(void *p) {
     (void)p; uint64_t fr[64]; int nf;
     double next = now_ms();
@@ -231,6 +233,9 @@ static void rgs_samp_start(void) {
     CloseHandle(CreateThread(NULL, 0, rgss_thread, NULL, 0, NULL));
     LOG("r1: RB PROF 3: sampling the main thread every 0.1 ms during the fight\n");
 }
+#else
+static void rgs_samp_start(void) {}                     /* the sampler needs SuspendThread/GetThreadContext: Windows only */
+#endif
 static int g_rgss_k[3];
 static int rgss_cmp(const void *a, const void *b) {
     const RgsS *x = a, *y = b; int k = g_rgss_k[0];

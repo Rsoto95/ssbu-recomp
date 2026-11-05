@@ -200,3 +200,77 @@ with `SSBU_AUDIO_MUTE=1`, was seen once each (PR #102); that this row is the cau
   and `rbg_step_body` were not read line by line. The table in 4.4 is from the banners, not from a call-graph.
 - Whether `tests/rb_test.c` is run by any script (a search of the scripts and docs found no reference).
 - Nothing here was run for this document.
+
+## 9. The Linux (POSIX) port
+
+The Linux build runs the same state save/restore and ring, with five platform substitutions:
+
+- **Threads: `rollback/rb_park.c`.** Windows suspends each guest thread with `SuspendThread` and keeps it suspended
+  inside a waiting import. POSIX cannot stop another thread, so every guest thread stops *itself* at an SDK import
+  boundary: `hostrt.c` calls `rb_park_gate(c)` before and after an import handler with `c->in_import` set. The
+  controller requests a park, waits for each slot, then releases. A thread that already sits inside a waiting import
+  when the park starts cannot reach the gate; it is accepted as parked when it holds no guest mutex
+  (`os_mutexes_held_by`). A thread that holds a guest mutex reports `RB_PARK_MUTEX` and the hold is refused, so a
+  simulation thread never waits for a lock owned by a held thread. `LockMutex` / `Acquire` / `Message` are not waiting
+  imports: the host mutex owner is not in the snapshot, so the thread must reach a real wait (`WaitEvent`,
+  `SleepThread`, `TimedWaitEvent`, `SwitchToFiber`) before the hold accepts it. Threads born inside a rolled-back window are kept
+  at the gate (`rb_park_hold_forever`). A thread that reaches the gate holding a guest mutex is not parked there; the
+  controller lets it enter the waiting import and asks the OS who owns each of its mutexes (`os_mutexes_held_by`). A
+  `std::condition_variable::wait` releases its mutex while it waits, so a moment later the thread is blocked with no
+  mutex owned and is taken as it is. If it still owns a mutex after the hold limit, the hold is refused; this is why the
+  graphics update thread and the task workers do not deadlock the copy.
+- **Fibers: `PlatFiberSnapshot` in `plat_posix.c`.** A switched-away fiber's ucontext (or `FiberRegs` on macOS
+  aarch64), stack bounds and host stack bytes are copied; `fibers_restore_all` puts them back. The host stack is still
+  checked against the stack pointers of every held thread before it is copied.
+- **Pages: `rollback/model/page_tracker_posix.c`.** Window 1 uses `GetWriteWatch` (userfaultfd write protection, the
+  same mechanism `nvn_gl.c` uses for texture hashes). Window 2 is compared page by page against `rg_src`. The extras
+  get a write watch of their own (`plat_writewatch_add`); ranges the kernel refuses are compared on every capture.
+  A page committed outside the base ranges joins `g_xls_out_pg` and is captured/restored through the ring's
+  `rg_opg_*` path. `r1_ww_taken` tells `nvn_gl.c` when a window-1 poll consumed write bits of a texture range.
+- **Fault recovery without SEH.** Linux links `rollback/controller/fault_recovery_posix.c`, the portable half of the
+  Windows `fault_recovery.c`. A faulting pass is tainted and the ring reloads the newest healthy state at the next safe
+  point, walking further back if the same pass faults again. The ways in:
+  - `nnunwind.c`'s `reload_via_host_catch` (and `nnunwind_recover_terminate` from `eh_terminate`) unwinds the host stack
+    to the innermost `nro_catch_call` frame on the faulting thread when a throw cannot be walked or delivered.
+  - A `SIGSEGV`/`SIGBUS` in the lifted code is answered by `rb_fault_try_absorb` with a `ucontext`: a leaf memory helper
+    returns 0 (a store does nothing), a plain memory move is stepped over, and once the pass is tainted the handler
+    resumes at the innermost catch frame of the same host stack through `nnunwind_bail_context_posix` (the registers in
+    its glibc `jmp_buf`), so nothing `longjmp`s out of a signal handler.
+  - After a load, the catch table keeps a present record whose host fiber is no longer in the ring's live list when the
+    frame at its `jmp_buf` is still the same catch frame (`nnunwind_catch_valid`). This is the fix for the
+    `L2CExceptionShutdown` failure of the first port (`f_720052e2f0 handled an exception but was not entered through
+    nro_catch_call`).
+  - Pia / NetSystem threads are external network state: `threads.c` marks their guest stacks `r1_nosim` at every
+    thread-table build (`park` and the run-ahead hold path `ra_hold_save`), skips their registers in
+    `restore_thread_regs`. They are held at their waits during the copy but resume at the current network frame, not
+    at the capture. The thread table reuses a finished
+    slot, so threads started after the 256th start (Pia is started again for every room) stay visible to the ring.
+    A thread whose wait moved (network, worker, or any other service/presentation thread) is taken at another wait
+    after 5 ms (`SSBU_RB_NET_THREAD_WAIT=0`, `SSBU_RB_WORKER_WAIT=0`, `SSBU_RB_THREAD_WAIT=0` disable this): it is
+    stopped at the gate or blocked in a wait, `same` stays false so its registers are not restored, and it is held
+    for the copy. The Linux ring refuses a load only when a thread is still RUNNING guest code after the hold
+    (`g_guest_threads.running`); a thread at another wait is safe and no longer refuses it. A thread waiting while
+    owning a guest mutex still refuses the hold. Holding the POSIX task workers
+    through the cooperative gate from H1 to H2 was tried and reverted: the gate parks workers inside jobs and stalled
+    the frame rate. `fault_recovery_posix.c` absorbs supported network-thread
+    faults like other guest faults and taints the pass for a safe-point reload. This is mitigation, not a complete
+    network-state exclusion: network heap objects can still rewind, and full two-instance stability is unverified.
+    These network-thread exclusions, wait exceptions and thread-slot reuse are Linux-only (`__linux__`); Windows is
+    unchanged. `SSBU_RB_NET_THREAD_EXCLUDE=0` disables the exclusion and rewinds network threads like Windows; the
+    network wait exception is then off too.
+  The presentation pool and the debug rollback files are not ported; run-ahead is off and only its shared hold path
+  (`ra_hold_save` / `ra_hold_restore` / `ra_hold_quiet`) drives the ring's safe point.
+
+`net_relay.c` compiles on Linux with `plat/mstcpip.h`; `net_upnp_posix.c` says to forward the UDP port by hand. The
+ring's behavior, wire format and rollback algorithm are unchanged; only the way threads are held, pages are found and
+faults are recovered differs.
+
+Known limit (the plan's stop conditions 1/2): the offline simulation is exact for 1,698 real frames with a matching
+reference (same `SSBU_FIXED_SEED`, 51 re-run runs / 76 frames all equal). Pia/NetSystem stacks and registers are excluded,
+but their heap objects can still rewind; a two-instance run crashed on NetSystem after a load. The wait exception and
+restored fault absorption need a two-instance retest. Another risk is a load that restores a state whose guest
+object names a job fiber/object that was not brought back (the fiber moved to another host fiber between the capture
+and the load). The re-run then faults in a cascade; the signal handler absorbs the plain moves, but no `nro_catch_call`
+frame is on the current host stack to cut it back to, so after 4,096 faults the net lets go. A catch record on another
+fiber's stack cannot be used (cross-stack `longjmp`). These are the port's stop conditions; the fallback is delay-based
+online play (`SSBU_RB_NET_NOROLLBACK=1`) or Rollback off in F1.

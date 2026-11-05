@@ -617,10 +617,20 @@ void eh_enter_pad(Ctx *c, const EhPad *pad) {
 
 /* ---- terminate and raise */
 static uint64_t g_ti_exception[2];
+int nnunwind_recover_terminate(Ctx *c);                   /* nnunwind.c: unwind the host stack to a catch frame and reload */
+static volatile LONG g_terminating;
 void eh_terminate(Ctx *c, const char *why) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
     { void rg_dump_recent_loads(const char *w); rg_dump_recent_loads("the game is about to end (std::terminate)"); }
 #endif
+    /* Before the game ends: with the rollback's safety net on, a throw that could not be walked or delivered is cut back
+     * to the innermost nro_catch_call frame of this stack; the pass is tainted and the ring reloads the last healthy
+     * state at its next safe point. g_terminating stops a terminate inside that recovery from re-entering it; eh_raise
+     * clears it for the next throw. */
+    if (!InterlockedExchange(&g_terminating, 1)) {
+        if (nnunwind_recover_terminate(c)) return;
+        InterlockedExchange(&g_terminating, 0);
+    }
     EhState *st = eh_state(c);
     uint64_t exc = st->in_flight ? st->in_flight : st->caught;
     ExcHeader *h = exc_header(exc);
@@ -651,6 +661,7 @@ void eh_terminate(Ctx *c, const char *why) {
 static EhRaiseFn g_eh_raise;
 void eh_set_unwinder(EhRaiseFn raise) { g_eh_raise = raise; }
 static void eh_raise(Ctx *c, uint64_t exc, int reason, const char *how) {
+    InterlockedExchange(&g_terminating, 0);
     EhState *st = eh_state(c);
     st->in_flight = exc;
     if (g_eh_raise) g_eh_raise(c, reason);

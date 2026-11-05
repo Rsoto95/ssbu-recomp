@@ -32,6 +32,8 @@ int rb_input_remote_newest_consecutive_frame(int p);   /* newest consecutive fra
 RbPad rb_input_get(int p, int frame, int *predicted);
 /* the earliest frame whose prediction was wrong since the last call, or 0; the caller rolls back to it */
 int rb_input_take_mismatch(void);
+/* gives a mismatch back (keeps the earlier one): the rollback could not be done now, so it is taken again next tick */
+void rb_input_put_mismatch(int m);
 /* the newest frame every player's real pad is known for (the "finalized" frame: no rollback can reach before it) */
 int rb_input_finalized(void);
 

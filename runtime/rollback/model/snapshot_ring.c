@@ -29,6 +29,9 @@
  * against a run without it and every re-run frame against the frame it replays. SSBU_RB_SIM_SKIP=<mask>: run-ahead's
  * kick-skip mask in re-run passes except the last one (experiment). SSBU_RB_PARK_MS (default 30): hold limit. */
 #include "game_state_internal.h"
+#ifndef _WIN32
+#include "../rb_park.h"
+#endif
 /* Functions and variables of other runtime files that only this file uses: */
 void nnunwind_catch_reinsert(uint64_t cfa, uint64_t jb);
 void nnunwind_catch_free(unsigned i);
@@ -305,7 +308,15 @@ int fibers_stack_ranges(uint64_t *lo, uint64_t *hi, int max);   /* threads.c */
 static int g_opg_on = -1; static long long g_opg_caps, g_opg_pages, g_opg_gone, g_opg_full, g_opg_loads, g_opg_written, g_opg_skip, g_opg_recommit;
 static void opg_copy_page(uint8_t *d, const uint8_t *s) { memcpy(d, s, PG); }
 static void (*volatile g_opg_cp)(uint8_t *, const uint8_t *) = opg_copy_page;      /* (through a pointer the compiler cannot see through: __try then covers the copy, write_marks.c) */
-static int opg_try_copy(uint8_t *d, const uint8_t *s) { __try { g_opg_cp(d, s); return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; } }
+static int opg_try_copy(uint8_t *d, const uint8_t *s) {
+#ifdef _WIN32
+    __try { g_opg_cp(d, s); return 1; } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+#else
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery((const void *)s, &m, sizeof m) || m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
+    g_opg_cp(d, s); return 1;
+#endif
+}
 static void rg_opg_capture(RgSlot *s) {
     if (g_opg_on < 0) { const char *e = getenv("SSBU_R1_OUTPAGES"); g_opg_on = !(e && e[0] == '0'); }
     s->opg_used = 0;
@@ -447,6 +458,9 @@ static int rg_init(void) {
     for (int k = 0; k < 5; k++) if (!g_rgc[k]) { LOG("r1: RING: statistics allocation FAILED\n"); rg_free_all(); return 0; }
     if (!g_rgc_pg || !g_rgc_xp) { LOG("r1: RING: statistics allocation FAILED\n"); rg_free_all(); return 0; }
     if (getenv("SSBU_RB_PARK_MS")) g_rg_park_ms = atof(getenv("SSBU_RB_PARK_MS"));
+#ifndef _WIN32
+    else g_rg_park_ms = 500;                             /* the cooperative gate waits for a thread to reach its wait */
+#endif
     rg_cb_find(); cp_init();
     LOG("r1: RING on: depth %d frames (%d states), pages: window 1 %zu, window 2 %zu, extras %zu (%.1f MB); pool up to %.0f GB; hold limit %.1f ms\n",
         g_rg_depth, g_rg_cap, g_rg_n1, g_rg_n2, g_rg_nx, g_rg_nx * PG / 1048576.0, (double)RG_POOL_MAX * PG / 1073741824.0, g_rg_park_ms);
@@ -511,6 +525,8 @@ int r1_ring_capture(long long frame, Ctx *c) {
         if (g_rg_nomem) return 0;                         /* (hs13) out of memory: not tried again in this match */
         g_save_failed = 0; g_ra_wd_pause = 1; g_rs_drop = 1;
         { extern volatile int g_ra_base_save; g_ra_base_save = 1;   /* (runahead.c ra_free: Pia not held, Online menu only) */
+          /* stop the audio threads BEFORE the base hold, not after it */
+          if (!g_rb_audio_off && audio_off_wanted()) { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); }
           save(c); release(); g_ra_base_save = 0; }
         g_rs_drop = 0;
         g_ra_wd_pause = 0;
@@ -536,7 +552,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
         if (g_rg_skip_full <= 10) LOG("r1: RING: capture at frame %lld skipped: the ring is full and its oldest state (frame %lld) is the newest one at or before frame %lld, which a rollback may still need\n", frame, rg_slot(0)->frame, g_rg_need);
         return 0;
     }
-    if (!ra_hold_quiet(g_rg_park_ms)) { g_rgp_seg = seg_was; g_rg_cap_fail++; if (g_rg_cap_fail <= 20 || g_rg_cap_fail % 100 == 0) LOG("r1: RING: capture %lld (frame %lld) skipped: thread %s not at a wait within %.1f ms\n", g_rg_cap_fail, frame, g_ra_busy ? g_ra_busy : "?", g_rg_park_ms); return 0; }
+    if (!ra_hold_quiet(g_rg_park_ms)) { g_rgp_seg = seg_was; g_rg_cap_fail++; if (g_rg_cap_fail <= 20 || g_rg_cap_fail % 100 == 0) LOG("r1: RING: capture %lld (frame %lld) skipped: %s not at a wait within %.1f ms\n", g_rg_cap_fail, frame, g_ra_busy_first_save(), g_rg_park_ms); return 0; }
     double t1 = now_ms();
     if (g_rg_count == g_rg_cap) { rg_slot_drop(rg_slot(0), 1); g_rg_head = (g_rg_head + 1) % g_rg_cap; g_rg_count--; }
     RgSlot *s = rg_slot(g_rg_count);
@@ -618,6 +634,7 @@ int r1_ring_rebase(long long frame, Ctx *c) {
     double t1 = now_ms();
     hs_exclude_all();
     int nmod = 0;
+#ifdef _WIN32
     {   HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
         MODULEENTRY32 me; me.dwSize = sizeof me;
         for (BOOL ok = sn != INVALID_HANDLE_VALUE && Module32First(sn, &me); ok; ok = Module32Next(sn, &me)) {
@@ -627,6 +644,7 @@ int r1_ring_rebase(long long frame, Ctx *c) {
             if (*a1 != *pm1) { *a1 = *pm1; *a2 = *pm2; *l1 = (uint64_t)(uintptr_t)g_win1; MemoryBarrier(); *n2 = WN2; *n1 = g_wn1; nmod++; LOG("r1: RING rebase: mark maps set in %s (loaded after the first save)\n", me.szModule); }
         }
         if (sn != INVALID_HANDLE_VALUE) CloseHandle(sn); }
+#endif
     rg_sweep(rg_noop);                                    /* marks since the last capture: the copy below takes everything */
     g_rg_ntl = 0;
     collect(c);
@@ -737,17 +755,18 @@ static void rgc_before(void) {                          /* threads held, before 
     memcpy(g_rgc_now, (void *)(uintptr_t)g_catch_addr, sizeof g_rgc_now);
 }
 void nnunwind_catch_reinsert(uint64_t cfa, uint64_t jb); void nnunwind_catch_free(unsigned i);   /* nnunwind.c (hs15: its hash and probing) */
+int nnunwind_catch_valid(uint64_t cfa, uint64_t jb);   /* nnunwind.c: the CatchFrame at jb is still this CFA's */
 /* (hs15) after a load: the host fiber stacks still in use (some guest fiber's host fiber, a thread's current fiber, a stack a
  * thread's stack pointer is on); a catch record on any other host fiber stack ever made is dead (the coroutine there was made
  * again on a new host fiber, or the fiber exists only in states thrown away): dropped instead of kept for ever. These dead
  * records piled up at the same CFA (h15e0: 25 of one frame) and, with the old hash, overwrote live ones (pp3h). */
-static uint64_t g_rgc_live[2048]; static int g_rgc_nlive; long long g_rgc_dead;
+static uint64_t g_rgc_live[2048]; static int g_rgc_nlive; long long g_rgc_dead, g_rgc_restored, g_rgc_skipped, g_rgc_revived;
 /* ---- LOAD FLIGHT RECORDER (measurement for option 2). Every ring load, the state of the Windows "workers" (job fibers) and of the C++ catch table: fibers put back, not put back, replaced,
  * fibers BORN since that state (they exist now and not in it: the ring leaves them as they are, and nothing counted them before), threads not at their wait, catch records kept / dropped. The last
  * 16 loads are kept in memory and written to the log when the safety net absorbs a fault or the game is about to end (rg_dump_recent_loads), so a crash says what the loads before it did. Loads
  * with anything unusual are also logged as they happen (first 40). */
 #define LR_N 16
-static char g_lr[LR_N][320]; static long long g_lr_n;
+static char g_lr[LR_N][420]; static long long g_lr_n;
 static long long g_lr_born_total, g_lr_unusual;
 int fibers_born_count(char *buf, size_t n);             /* threads.c: right after fibers_restore_all */
 static void rg_load_note(long long frame, int k, long long kept0, long long dropped0, long long dead0) {
@@ -756,9 +775,9 @@ static void rg_load_note(long long frame, int k, long long kept0, long long drop
     int unusual = born || g_guest_fibers.not_restored || g_guest_fibers.replaced || g_guest_threads.mismatch;
     g_lr_born_total += born; if (unusual) g_lr_unusual++;
     char *o = g_lr[g_lr_n % LR_N];
-    snprintf(o, 320, "load %lld: frame %lld (%d states back), pass %lld%s: fibers put back %d, NOT put back %d, replaced %d, born since %d%s; threads not at their wait %d; catch records kept %lld dropped %lld dead %lld",
+    snprintf(o, 420, "load %lld: frame %lld (%d states back), pass %lld%s: fibers put back %d, NOT put back %d, replaced %d, born since %d%s; threads not at their wait %d; catch records kept %lld dropped %lld dead %lld; in all restored %lld, present skipped %lld, dead but kept %lld",
              g_lr_n + 1, frame, k, g_rgs_next, g_ra_phase == 2 ? " (re-run)" : "", g_guest_fibers.restored, g_guest_fibers.not_restored, g_guest_fibers.replaced, born, born ? bb : "",
-             g_guest_threads.mismatch, kept, dropped, dead);
+             g_guest_threads.mismatch, kept, dropped, dead, g_rgc_restored, g_rgc_skipped, g_rgc_revived);
     g_lr_n++;
     if (unusual && g_lr_unusual <= 40) LOG("r1: LOADREC unusual %s\n", o);
 }
@@ -770,7 +789,12 @@ void rg_dump_recent_loads(const char *why) {
 }
 static void rgc_live_cb(uint64_t key, Ctx *c, uint64_t stack, uint64_t size, void *fiber) {
     (void)key; (void)c; (void)stack; (void)size;
+    uintptr_t lo, hi;
+#ifdef _WIN32
     if (fiber && g_rgc_nlive < 2048) g_rgc_live[g_rgc_nlive++] = *(uint64_t *)((uint8_t *)fiber + 0x20);
+#else
+    if (fiber && plat_fiber_bounds(fiber, &lo, &hi) && g_rgc_nlive < 2048) g_rgc_live[g_rgc_nlive++] = lo;
+#endif
 }
 static int rgc_dead(uint64_t jb) {                     /* jb on a host fiber stack that nothing uses now */
     size_t i; for (i = 0; i < g_nbf; i++) if (jb >= g_bf_lo[i] && jb < g_bf_hi[i]) break;
@@ -788,11 +812,20 @@ static void rgc_after(void) {                           /* after the copies and 
     static int tr = -1; if (tr < 0) tr = getenv("SSBU_UNWIND_TRACE") != NULL;
     if (tr) { void nnunwind_trace_note(const char *what, uint64_t cfa, uint64_t jb);
               for (int i = 0; i < 8192; i++) if (t[i].cfa > 1) nnunwind_trace_note(rest_stack(t[i].jb) ? "load: restored record kept (its stack copied back)" : "load: restored record dropped", t[i].cfa, t[i].jb);
-              for (int k = 0; k < 8192; k++) if (g_rgc_now[k].cfa > 1) nnunwind_trace_note(rest_stack(g_rgc_now[k].jb) ? "load: present record not kept (its stack copied back)" : deadfix && rgc_dead(g_rgc_now[k].jb) ? "load: present record dead" : "load: present record kept", g_rgc_now[k].cfa, g_rgc_now[k].jb); }
-    for (int i = 0; i < 8192; i++) if (t[i].cfa > 1 && !rest_stack(t[i].jb)) { nnunwind_catch_free((unsigned)i); dropped++; }
+              for (int k = 0; k < 8192; k++) if (g_rgc_now[k].cfa > 1) {
+                  const char *what = rest_stack(g_rgc_now[k].jb) ? "load: present record not kept (its stack copied back)"
+                                   : deadfix && rgc_dead(g_rgc_now[k].jb) && !nnunwind_catch_valid(g_rgc_now[k].cfa, g_rgc_now[k].jb) ? "load: present record dead"
+                                   : "load: present record kept";
+                  nnunwind_trace_note(what, g_rgc_now[k].cfa, g_rgc_now[k].jb);
+              } }
+    for (int i = 0; i < 8192; i++) if (t[i].cfa > 1) { if (!rest_stack(t[i].jb)) { nnunwind_catch_free((unsigned)i); dropped++; } else g_rgc_restored++; }
     for (int k = 0; k < 8192; k++) {                    /* nnunwind.c catch_put, without its lock (every guest thread is held) */
-        if (g_rgc_now[k].cfa <= 1 || !g_rgc_now[k].jb || rest_stack(g_rgc_now[k].jb)) continue;
-        if (deadfix && rgc_dead(g_rgc_now[k].jb)) { g_rgc_dead++; continue; }
+        if (g_rgc_now[k].cfa <= 1 || !g_rgc_now[k].jb) continue;
+        if (rest_stack(g_rgc_now[k].jb)) { g_rgc_skipped++; continue; }      /* the restored record is this one (its host stack is the capture's) */
+        if (deadfix && rgc_dead(g_rgc_now[k].jb)) {
+            if (!nnunwind_catch_valid(g_rgc_now[k].cfa, g_rgc_now[k].jb)) { g_rgc_dead++; continue; }
+            g_rgc_revived++;                           /* the fiber is not in the table any more but its catch frame is still there (the re-run can resume on it) */
+        }
         nnunwind_catch_reinsert(g_rgc_now[k].cfa, g_rgc_now[k].jb); kept++;     /* (the records are per host stack: nnunwind.c catch_here) */
     }
     if (deadfix) ReleaseSRWLockShared(&g_bf_lock);
@@ -821,12 +854,26 @@ int r1_ring_load(long long frame, Ctx *c) {
         if (!cur[j].held) continue;
         int keep = 0;
         for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].h == cur[j].h) { if (g_guest_threads.table[i].parked && cur[j].from == g_guest_threads.table[i].from && cur[j].imp == g_guest_threads.table[i].imp) { g_guest_threads.table[i].held = 1; g_guest_threads.table[i].rsp = cur[j].rsp; g_guest_threads.table[i].rip = cur[j].rip; g_guest_threads.table[i].cok = cur[j].cok; keep = 1; } break; }
-        if (keep) g_rg_kept_same++; else ResumeThread(cur[j].h);
+        if (keep) g_rg_kept_same++;
+        else {
+#ifndef _WIN32
+            rb_park_let_go(cur[j].c);
+#else
+            ResumeThread(cur[j].h);
+#endif
+        }
     }
     for (double tq = now_ms();;) {                        /* each thread at the wait it was held at in that capture, no job running */
         ra_hold_restore();
         if (ra_fibers_quiet() || now_ms() - tq > 200) { if (g_ra_busy_fibers) LOG("r1: RING load: %d fibers still busy after 200 ms\n", g_ra_busy_fibers); break; }
-        for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held) { ResumeThread(g_guest_threads.table[i].h); g_guest_threads.table[i].held = 0; }
+        for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held) {
+#ifndef _WIN32
+            rb_park_let_go(g_guest_threads.table[i].c);
+#else
+            ResumeThread(g_guest_threads.table[i].h);
+#endif
+            g_guest_threads.table[i].held = 0;
+        }
         SwitchToThread();
     }
     /* (R3 pub1: fx2j / fx3h, c0000005 in the sound thread's memcpy right after "nus3::audio update not back at its wait after 500 ms
@@ -834,14 +881,23 @@ int r1_ring_load(long long frame, Ctx *c) {
      * the middle of its code, and the load then changed the memory under its registers. Now such a load is REFUSED: every thread
      * goes on, nothing was changed yet, the wrong guess stays pending (rb_rollback.c) and the next tick loads again (one frame
      * further back). SSBU_R1_RUNFIX=0: the old way (loaded anyway). SSBU_RB_NET_TEST_REFUSE=<n> (TEST ONLY): every n-th load is
-     * refused as if a thread were running (the timeline must not change). */
+     * refused as if a thread were running (the timeline must not change).
+     * (2026-11-03, Linux) a thread blocked inside a DIFFERENT waiting import is NOT running: it holds no guest mutex and its registers
+     * are left as they are (same = 0), so the load may go on. Windows does the same after its own hold limit. Refusing on that
+     * mismatch refused every Linux load. */
     {   static int runfix = -1, tn = -1; static long long tc;
         if (runfix < 0) { const char *e = getenv("SSBU_R1_RUNFIX"); runfix = !(e && e[0] == '0'); e = getenv("SSBU_RB_NET_TEST_REFUSE"); tn = e ? atoi(e) : 0; }
         int forced = tn > 0 && ++tc % tn == 0;
         if ((runfix && g_guest_threads.running) || forced) {
             unpark();
             Ctx *tc2; const char *nm2; HANDLE h2;                  /* the threads made after that frame (stop_born_threads) go on too */
-            for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc2, &nm2, &h2); i++) if (h2 && GetThreadId(h2) != GetCurrentThreadId()) ResumeThread(h2);
+            for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc2, &nm2, &h2); i++) if (h2 && GetThreadId(h2) != GetCurrentThreadId()) {
+#ifndef _WIN32
+                rb_park_let_go(tc2);
+#else
+                ResumeThread(h2);
+#endif
+            }
             g_rg_refused++;
             if (g_rg_refused <= 20 || g_rg_refused % 100 == 0) LOG("r1: RING load of frame %lld (k %d) REFUSED (%lld so far): %s; every thread goes on, the rollback is tried again next tick\n",
                 frame, k, g_rg_refused, forced ? "test switch SSBU_RB_NET_TEST_REFUSE" : "a thread still running guest code after 500 ms");
@@ -900,7 +956,7 @@ int r1_ring_load(long long frame, Ctx *c) {
     g_mp[4] += t2a - t2; g_mp[5] += t2b - t2a; g_mp[6] += t2c - t2b; g_mp[7] += t3 - t2c; g_mp[8] += now_ms() - t3; g_mp_n[1]++;
     *c = g->ctx;
     g_rg_loads++;
-    if (g_guest_threads.mismatch || g_guest_fibers.not_restored) LOG("r1: RING load of frame %lld (k %d): %d threads not at their wait, %d fibers not restored\n", frame, k, g_guest_threads.mismatch, g_guest_fibers.not_restored);
+    if ((g_guest_threads.mismatch || g_guest_fibers.not_restored) && (g_rg_loads <= 20 || g_rg_loads % 100 == 0)) LOG("r1: RING load of frame %lld (k %d): %d threads taken at another wait (their registers are not restored), %d fibers not restored\n", frame, k, g_guest_threads.mismatch, g_guest_fibers.not_restored);
     g_rg_last[1] = now_ms() - t0; g_rgp_seg = 1;
     if (k < RG_MAXSLOT && g_rgl_n[k] < RG_NL) { int i = g_rgl_n[k]++; g_rgl[k][i][0] = now_ms() - t0; g_rgl[k][i][1] = t1 - t0; g_rgl[k][i][2] = t2 - t1; g_rgl_pg[k][i] = pages; (void)t3; }
     return 1;

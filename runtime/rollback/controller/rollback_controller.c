@@ -459,6 +459,10 @@ static void rbt_body(void) {
     rbg_step_body(g_rbt_c);
 }
 void rbg_step(Ctx *c) {
+#ifndef _WIN32
+    rbg_step_body(c);                       /* SSBU_RB_NET_TEST_STK is a Windows-only diagnosis */
+    return;
+#else
     if (g_rbt < 0) {
         const char *e = getenv("SSBU_RB_NET_TEST_STK"); g_rbt = e && atoi(e) > 0;
         for (uint64_t a = 0x7180000000ull; g_rbt && !g_rbt_stk && a < 0x7300000000ull; a += 0x10000000ull)
@@ -480,6 +484,7 @@ void rbg_step(Ctx *c) {
                      : : "r"(top), "r"(rbt_body)
                      : "rbx", "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "cc", "memory");
     tib->StackBase = ob; tib->StackLimit = ol;
+#endif
 }
 /* (v12, owner 2026-10-28: "no me deja cerrar el de mi amigo") THE RESULTS SCREEN after an agreed match: the session is reset
  * at the end of the fight, so port 2 (the other player) gets no input any more and its card waits for an A that never comes.
@@ -621,14 +626,22 @@ static void rb_mem_report(const char *when) {
         if (next <= a) break;
         a = next;
     }
+#ifdef _WIN32
     PROCESS_MEMORY_COUNTERS_EX pc; memset(&pc, 0, sizeof pc); pc.cb = sizeof pc;
     K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pc, sizeof pc);
+    double private_mb = pc.PrivateUsage / 1048576.0;
+#else
+    double private_mb = 0;
+    { FILE *f = fopen("/proc/self/status", "r"); char line[256];
+      while (f && fgets(line, sizeof line, f)) if (!strncmp(line, "VmRSS:", 6)) { private_mb = atof(line + 6) / 1024.0; break; }
+      if (f) fclose(f); }
+#endif
     memset(top, 0, sizeof top);
     for (int i = 0; i < ncur; i++) for (int k = 0; k < 8; k++) if (cur[i].com > top[k].com) { memmove(top + k + 1, top + k, (7 - k) * sizeof *top); top[k] = cur[i]; break; }
     char buf[900]; int o = 0;
     for (int k = 0; k < 8 && top[k].com; k++) o += snprintf(buf + o, sizeof buf - (size_t)o, " %llx:%.0f", (unsigned long long)top[k].base, top[k].com / 1048576.0);
     LOG("r1: MEM %s: private %.0f MB (process), %.0f MB committed private in %d allocations (walk %.0f ms); largest (base:MB):%s\n",
-        when, pc.PrivateUsage / 1048576.0, total / 1048576.0, ncur, now_ms() - t0, buf);
+        when, private_mb, total / 1048576.0, ncur, now_ms() - t0, buf);
     if (g_mem_nprev >= 0) {          /* both lists are in address order: a merge */
         const size_t BIG = 32u << 20; int i = 0, j = 0, shown = 0; long long grown = 0;
         while (i < ncur || j < g_mem_nprev) {
@@ -690,7 +703,7 @@ void rbg_report(void) {
     LOG("r1: RB NET report: ring memory (hs14, fix %s): captures given up %lld, old states freed early %lld, captures skipped to keep the oldest needed state %lld\n",
         g_rg_poolfix ? "on" : "OFF", g_rg_short_n, g_rg_freed_slots, g_rg_skip_full);
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
-    LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load); loads refused, a thread still running (pub1) %lld\n", g_guest_threads.audio_other, g_guest_threads.mismatch, g_rg_refused);
+    LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads taken at another wait %d (last load, registers not restored); loads refused, a thread still running (pub1) %lld\n", g_guest_threads.audio_other, g_guest_threads.mismatch, g_rg_refused);
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_guest_fibers.live_skipped, g_guest_fibers.live_seen, g_guest_fibers.teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);
     { void nnunwind_catch_stats(long long *, long long *, long long *, long long *, long long *); long long l, d, cr, fu, mp; nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
       LOG("r1: RB NET report: catch table (hs15): %lld live records, %lld removed slots, %lld puts found no free slot in their window, %lld table full, longest probe %lld; dead records dropped at loads %lld (host fiber stacks known %zu)\n", l, d, cr, fu, mp, g_rgc_dead, g_nbf); }

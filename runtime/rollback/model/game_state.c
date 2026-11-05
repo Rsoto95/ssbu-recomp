@@ -12,42 +12,6 @@
  * Check: at the end of the re-run the pages the first pass changed are compared with their first-pass end state
  * (SSBU_R1 report "verify"), next to the fighters' hash (SSBU_FIGHT_HASH) that the comparison script reads.
  * Nothing here runs without SSBU_R1. No game content in this file. */
-#ifndef _WIN32
-/* Linux build: not available yet. The save / restore is built on Windows' vectored exception handlers (the write marks)
- * and on reading suspended threads' contexts; on Linux that would be signal handlers and ucontext. Off as when SSBU_R1 and
- * runahead are not set: every entry answers "off", so the callers take their normal paths. */
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <windows.h>
-__declspec(dllexport) uint8_t *r1_m1, *r1_m2;
-__declspec(dllexport) uint64_t r1_lo1, r1_n1, r1_n2;
-int r1_on(void) {
-    static int said;
-    int gfx_runahead(void);
-    if (!said && ((getenv("SSBU_R1") && getenv("SSBU_R1")[0] != '0') || (getenv("SSBU_RUNAHEAD") ? getenv("SSBU_RUNAHEAD")[0] != '0' : gfx_runahead()))) {
-        said = 1;
-        printf("r1: state save / restore (SSBU_R1, run-ahead) is not available in the Linux build yet: off\n");
-    }
-    return 0;
-}
-int r1_ra_phase(void) { return 0; }
-int r1_ra_quiet(void) { return 0; }
-int r1_ra_present_mode(void) { return 0; }
-void r1_stats_report(void) {}
-int r1_poll(int ticks) { (void)ticks; return 0; }
-void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry) { (void)b; (void)lx; (void)ly; (void)rx; (void)ry; }
-void r1_init(void) { r1_on(); }
-void r1_on_decommit(void *p, size_t n) { (void)p; (void)n; }
-void r1_on_commit(void *p, size_t n) { (void)p; (void)n; }
-void r1_wrote(uint64_t a, uint64_t n) { (void)a; (void)n; }
-void r1_ww_note(void *const *pages, size_t cnt) { (void)pages; (void)cnt; }
-void r1_ww_note_range(const void *p, size_t n) { (void)p; (void)n; }
-int r1_ww_taken(const void *p, size_t n) { (void)p; (void)n; return 0; }
-void r1_nosim(uint64_t a, uint64_t n) { (void)a; (void)n; }
-void r1_read_retry_note(void) {}
-void r1_register_heap(void) { r1_on(); }
-#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,8 +31,8 @@ double now_ms(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.Qua
 FILE *g_log;
 char g_born[2048]; int g_nborn;
 uint64_t g_catch_addr;
-__declspec(dllexport) uint8_t *r1_m1, *r1_m2;          /* the exe's own copy (r1src\sdklift_gen.c built with R1_MARK) */
-__declspec(dllexport) uint64_t r1_lo1, r1_n1, r1_n2;
+R1_EXPORT uint8_t *r1_m1, *r1_m2;          /* the exe's own copy (r1src\sdklift_gen.c built with R1_MARK) */
+R1_EXPORT uint64_t r1_lo1, r1_n1, r1_n2;
 int g_fast = -1, g_learn = 5, g_fcheck;
 
 /* end-of-first-pass copies of the pages the first pass changed */
@@ -196,11 +160,17 @@ void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
 void r1_init(void) {
     if (!r1_on()) return;
     if (getenv("SSBU_R1_PARK_MS")) g_guest_threads.park_ms = atoi(getenv("SSBU_R1_PARK_MS"));
+#ifdef _WIN32
     AddVectoredExceptionHandler(1, r1_veh);
+#endif
     atexit(r1_stats_report);
     g_audio_free = getenv("SSBU_R1_AUDIO_FREE") != NULL; g_async_cap = 65536; g_async = malloc(g_async_cap * sizeof *g_async);
     g_mark = getenv("SSBU_R1_MARK") != NULL;
-    g_prot = getenv("SSBU_R1_MARK_PROT") != NULL; if (g_prot) AddVectoredExceptionHandler(1, prot_veh); g_mcheck = getenv("SSBU_R1_MARK_CHECK") != NULL; if (g_mark && !mark_bind()) g_mark = 0;
+    g_prot = getenv("SSBU_R1_MARK_PROT") != NULL;
+#ifdef _WIN32
+    if (g_prot) AddVectoredExceptionHandler(1, prot_veh);
+#endif
+    g_mcheck = getenv("SSBU_R1_MARK_CHECK") != NULL; if (g_mark && !mark_bind()) g_mark = 0;
     g_fast = getenv("SSBU_R1_FAST") != NULL; g_fcheck = getenv("SSBU_R1_FAST_CHECK") != NULL; if (getenv("SSBU_R1_LEARN")) g_learn = atoi(getenv("SSBU_R1_LEARN"));
     g_r1_keep_fibers = 1; g_wait_idle = getenv("SSBU_R1_WAIT_IDLE") != NULL; g_busy_log = g_wait_idle ? 3 : 0;
     ppool_init();                                          /* R4: the presentation pool of the learned-set save */
@@ -209,5 +179,3 @@ void r1_init(void) {
     int id = hook_install(GA(0x710386fc30ull), r1_frame_end, NULL, &g_orig_frame_end);
     LOG("r1: SSBU_R1 save at fight frame %d, %d frames, every %d frames, %d cycles; hook on the frame end 710386fc30: %s\n", g_session.start_frame, g_session.run_frames, g_session.period, g_session.cycles, id ? "installed" : "FAILED");
 }
-
-#endif
