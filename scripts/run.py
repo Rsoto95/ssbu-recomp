@@ -77,6 +77,9 @@ PLAY_DEFAULTS = {
     'SSBU_RB_SIM_SKIP': '49',
     'SSBU_RB_SIM_LITE': '123',
     'SSBU_RB_NET_LASTLITE': '1',
+    # (2026-11-05) a rollback of 1 frame no longer saves the state of its re-run frame (the next real pass saves the
+    # following one anyway; rollback_controller.c recap mode 6). graphics.ini rerun_lite = off: the old mode 5 too.
+    'SSBU_RB_NET_RECAP': '6',
 }
 
 
@@ -591,7 +594,7 @@ def main():
     if a.play and rollback:                           # (fork) the group's settings and lobby, see PLAY_DEFAULTS
         full_rerun = ini_get(gini, 'rerun_lite') in ('off', '0', 'no', 'false')
         for k, v in PLAY_DEFAULTS.items():
-            env.setdefault(k, '0' if full_rerun and k in ('SSBU_RB_SIM_SKIP', 'SSBU_RB_SIM_LITE', 'SSBU_RB_NET_LASTLITE') else v)
+            env.setdefault(k, ('5' if k == 'SSBU_RB_NET_RECAP' else '0') if full_rerun and k in ('SSBU_RB_SIM_SKIP', 'SSBU_RB_SIM_LITE', 'SSBU_RB_NET_LASTLITE', 'SSBU_RB_NET_RECAP') else v)
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)
         print('Online: %s (play in Local Wireless rooms: 1-on-1 rooms use rollback), rollback on, input delay %s' % (
