@@ -611,6 +611,8 @@ def main():
         for k, v in PLAY_DEFAULTS.items():
             if full_rerun and k == 'SSBU_LS_DECAY':
                 continue
+            if k == 'SSBU_LATENCY' and ini_get(gini, 'latency') in ('lowest', '2'):
+                v = 'lowest'                          # (2026-11-05) F1 > Display > Input latency = lowest is kept (low otherwise)
             env.setdefault(k, ('5' if k == 'SSBU_RB_NET_RECAP' else '0') if full_rerun and k in ('SSBU_RB_SIM_SKIP', 'SSBU_RB_SIM_LITE', 'SSBU_RB_NET_LASTLITE', 'SSBU_RB_NET_RECAP') else v)
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)

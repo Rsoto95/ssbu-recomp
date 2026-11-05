@@ -52,6 +52,7 @@ extern char **environ;
 extern "C" int online_menu_status(int *players, int *ms, int *narenas, char codes[][6], int *members, int *most, int cap);   /* online_menu.inc (nnnet.c) */
 extern "C" const char *online_menu_server(void);
 extern "C" int nnpad_rumble_on(void); extern "C" void nnpad_rumble_set(int on);      /* nnpad_sdl.c: F1 > Controls > Vibration */
+extern "C" int latency_mode(void);             /* display.c: the input latency mode in use (SSBU_LATENCY from the launcher wins over graphics.ini) */
 extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
 extern "C" {
 #include "gfx_options.h"
@@ -617,6 +618,13 @@ static void sec_display(int cw, int ch) {
     help("auto: 'display' on a 60/120/240 Hz monitor, else 'clock'. display: the game's clock is the monitor's refresh. clock: our own 60 Hz clock. off: no wait, tearing. on: FIFO (two clocks). mailbox: as clock, mailbox only.");
     if (combo("Input latency", &S.latency, k_latency, N(k_latency))) ini("latency", k_latency[S.latency]);
     tag(1, S.latency != S0.latency);
+    {   /* (2026-11-05, owner: "dice input latency normal y yo pense que la teniamos en lowest") "Play SSBU" runs at least 'low'
+         * (run.py PLAY_DEFAULTS; 'lowest' when chosen here): the mode IN USE is shown, not only the file's value */
+        int lm = latency_mode(); if (lm < 0 || lm > 2) lm = 0;
+        if (lm != gfx_latency()) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "in use now: %s (\"Play SSBU\" plays with at least 'low')", k_latency[lm]);
+        else ImGui::TextDisabled("in use now: %s", k_latency[lm]);
+        help("normal: the game reads the controller at the start of the frame. low: it reads it a few ms later, just in time for the frame to be ready (same smoothness). lowest: as low, and each picture is shown as soon as it is ready (about 4 ms less; frames may be shown unevenly, best with G-Sync / FreeSync).");
+    }
     if (combo("Renderer", &S.renderer, k_renderer, N(k_renderer))) ini("renderer", k_renderer[S.renderer]);
     tag(1, S.renderer != S0.renderer);
     ImGui::InputText("GPU", S.gpu, sizeof S.gpu);
