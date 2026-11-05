@@ -196,6 +196,16 @@ def dev_update(gini):
         print('=' * 78)
         return False
     before = git_head()
+    # (2026-11-05, owner) F1 > About > Version to follow in a git checkout: the branch update_channel.txt names (main when
+    # there is none) is switched to first
+    import update
+    want = update.channel_branch()
+    cur = subprocess.run(['git', '-C', REPO, 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    if want and cur and want != cur:
+        print('Version to follow: branch %s (this copy was on %s): switching with git.' % (want, cur))
+        subprocess.run(['git', '-C', REPO, 'fetch', 'origin', want])
+        if subprocess.run(['git', '-C', REPO, 'checkout', want]).returncode:
+            print('NOT switched: git checkout %s failed; the copy stays on %s.' % (want, cur))
     rc = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only']).returncode
     if rc:
         print('NOT updated: git pull --ff-only failed (code %d): this copy has commits GitHub does not have.' % rc)

@@ -1981,15 +1981,16 @@ static void about_update_ui(void) {
     LONG st = g_chk_state;
     const char *cur = upd_branch();
     int test = strcmp(cur, "main") != 0, git = upd_repo_is_git();
-    if (git) ImGui::TextDisabled("Updates: this copy is a git checkout (branch %s): git decides what it runs.", cur);
+    if (git) ImGui::TextDisabled("Updates: this copy is a git checkout (branch %s): the version chosen below is switched to with git at \"Update and restart\".", cur);
     else if (test) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Updates: TEST branch \"%s\" (test versions: they may break; thanks for testing).", cur);
     else ImGui::TextDisabled("Updates: normal (main).");
     if (st == 1) ImGui::BeginDisabled();
     if (ImGui::Button(st == 1 ? "Checking..." : "Check for updates")) upd_start_check(cur);
     if (st == 1) ImGui::EndDisabled();
-    if (!git) {
-        /* (2026-11-05, owner) a list of the repository's branches instead of one "staging" button: a change being tried is put
-         * on a branch of its own, and the friends who test it choose it here (main = the normal version) */
+    {   /* (2026-11-05, owner) a list of the repository's branches instead of one "staging" button: a change being tried is put
+         * on a branch of its own, and the friends who test it choose it here (main = the normal version). (2026-11-05, owner:
+         * "cuando yo abro Play ssbu no veo la opcion de elegir ramas") a git checkout has the list too: run.py dev_update
+         * switches it (git checkout) to the branch update_channel.txt names at "Update and restart". */
         if (g_br_state == 0) upd_ask_branches();
         ImGui::SetNextItemWidth(320);
         if (ImGui::BeginCombo("Version to follow##branch", test ? cur : "main (normal)")) {
@@ -2033,8 +2034,8 @@ static void about_update_ui(void) {
         }
         ImGui::EndPopup();
     }
-    if (!git && !test) ImGui::TextDisabled("Test branches = changes being tried, before everyone gets them: they can crash. Only if you want to test; it asks first.");
-    if (!git && test) ImGui::TextDisabled("After choosing a version: \"Update and restart\" below installs it.");
+    if (!test) ImGui::TextDisabled("Test branches = changes being tried, before everyone gets them: they can crash. Only if you want to test; it asks first.");
+    if (test) ImGui::TextDisabled("After choosing a version: \"Update and restart\" below installs it.");
     const char *have = getenv("SSBU_UPDATE_HAVE");
     if (st == 2 && have && *have) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "You have the latest version (%s).", g_chk_latest);
     else if (st == 2) ImGui::TextDisabled("The newest on GitHub is %s; this copy's is not known: start the game with \"Play SSBU.bat\".", g_chk_latest);
