@@ -852,8 +852,23 @@ int r1_ring_load(long long frame, Ctx *c) {
             return -1;
         }
     }
+    /* (2026-11-05) the game's NEX threads (Battle Arenas) held in their read of the connection for the load (runahead.c
+     * ra_nex_hold). One still running after 4 ms: the load is refused like the case above and tried again next tick; after
+     * 3 refusals in a row it goes ahead anyway (as before this change), so a busy NEX thread cannot stop the rollbacks. */
+    {   int ra_nex_hold(double); static int nex_row; extern long long g_nex_forced;
+        if (ra_nex_hold(4.0)) nex_row = 0;
+        else if (++nex_row <= 3) {
+            unpark();
+            Ctx *tc2; const char *nm2; HANDLE h2;
+            for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc2, &nm2, &h2); i++) if (h2 && GetThreadId(h2) != GetCurrentThreadId()) ResumeThread(h2);
+            g_rg_refused++;
+            if (g_rg_refused <= 20 || g_rg_refused % 100 == 0) LOG("r1: RING load of frame %lld (k %d) REFUSED (%lld so far): a NEX thread (the arena's connection) still running after 4 ms; tried again next tick\n", frame, k, g_rg_refused);
+            g_rgp_seg = 1;
+            return -1;
+        } else { nex_row = 0; g_nex_forced++; LOG("r1: RING load of frame %lld (k %d): a NEX thread still running after 3 refusals: loaded anyway (%lld so far)\n", frame, k, g_nex_forced); }
+    }
     double t1 = now_ms();
-    sm_load(frame);                                         /* (debug, SSBU_STATE_MEASURE) what differs from the capture, before anything is restored */
+    sm_load(frame);                                        /* (debug, SSBU_STATE_MEASURE) what differs from the capture, before anything is restored */
     R1_CTR("load (state of frame)", frame, 0);
     rgc_before();
     g_rg_ntl = 0;
@@ -900,6 +915,7 @@ int r1_ring_load(long long frame, Ctx *c) {
     rg_roundtrip_after_load();                              /* (debug, SSBU_RB_ROUNDTRIP) every page must now be what the ring recorded at this frame */
     double t3 = now_ms();
     unpark();
+    { void ra_nex_release(void); ra_nex_release(); }      /* the NEX threads held for this load (above) */
     g_mp[4] += t2a - t2; g_mp[5] += t2b - t2a; g_mp[6] += t2c - t2b; g_mp[7] += t3 - t2c; g_mp[8] += now_ms() - t3; g_mp_n[1]++;
     *c = g->ctx;
     g_rg_loads++;

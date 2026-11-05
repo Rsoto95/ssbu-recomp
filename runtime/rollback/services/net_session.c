@@ -940,7 +940,53 @@ static RbPad g_acc_pad[2]; static int g_acc_n[2], g_acc_var[2];          /* read
 static RbPad g_upad[HR2][2]; static int g_un[HR2][2], g_uvar[HR2][2];   /* reads of the last simulation of each frame */
 static uint8_t g_ulines[HR2][4][40]; static int g_unl[HR2];
 static long long g_padcheck_bad, g_padcheck_first = -1;
+/* (2026-11-05, owner: "at 2 or 3 frames of delay there are still rollbacks") how early or late each of the other player's
+ * pads came: its arrival (the receive thread's time stamp) against the moment this game's first pass of that frame read it.
+ * Positive = it was there before it was needed (the margin the delay left), negative = it came late (guessed: a rollback if
+ * the guess was wrong). And the time between the other game's messages that brought a new frame: a gap well over 16.7 ms is
+ * the other game's frame that took long (or the network held its packets). Reported per match; each pad more than a frame
+ * late gets a line (the first 60 of a match). */
+#define LT_N 1024
+static long long g_lt_af[LT_N], g_lt_nf[LT_N]; static uint64_t g_lt_au[LT_N], g_lt_nu[LT_N]; static uint8_t g_lt_done[LT_N];
+static long long g_lt_n, g_lt_hist[8], g_lt_lines, g_lt_worst_f = -1; static double g_lt_sum, g_lt_worst = 1e9;
+static uint64_t g_gp_prev_us; static long long g_gp_prev_newest, g_gp_n, g_gp_hist[4]; static double g_gp_max, g_gp_last;
+static void lt_reset(void) {
+    memset(g_lt_af, 0xff, sizeof g_lt_af); memset(g_lt_nf, 0xff, sizeof g_lt_nf); memset(g_lt_done, 0, sizeof g_lt_done);
+    g_lt_n = g_lt_lines = 0; g_lt_worst_f = -1; g_lt_sum = 0; g_lt_worst = 1e9; memset(g_lt_hist, 0, sizeof g_lt_hist);
+    g_gp_prev_us = 0; g_gp_prev_newest = 0; g_gp_n = 0; g_gp_max = 0; g_gp_last = 0; memset(g_gp_hist, 0, sizeof g_gp_hist);
+}
+static void lt_note(long long f) {
+    int i = (int)(f % LT_N);
+    if (f < 1 || g_lt_af[i] != f || g_lt_nf[i] != f || g_lt_done[i]) return;
+    g_lt_done[i] = 1;
+    double m = ((double)g_lt_nu[i] - (double)g_lt_au[i]) / 1000.0;
+    g_lt_n++; g_lt_sum += m; if (m < g_lt_worst) { g_lt_worst = m; g_lt_worst_f = f; }
+    int b = m < -33.4 ? 0 : m < -16.7 ? 1 : m < -8.3 ? 2 : m < 0 ? 3 : m < 8.3 ? 4 : m < 16.7 ? 5 : m < 33.4 ? 6 : 7;
+    g_lt_hist[b]++;
+    if (m < -16.7 && g_lt_lines++ < 60) { printf("[rbnet] the other player's pad of frame %lld came %.1f ms after this game needed it (the other game's messages before it: %.1f ms apart)\n", f, -m, g_gp_last); fflush(stdout); }
+}
+static void lt_arrived(long long f, uint64_t at) { if (f < 1) return; int i = (int)(f % LT_N); if (g_lt_af[i] == f) return; g_lt_af[i] = f; g_lt_au[i] = at; g_lt_done[i] = 0; lt_note(f); }
+static void lt_needed(long long f) { if (f < 1) return; int i = (int)(f % LT_N); if (g_lt_nf[i] == f) return; g_lt_nf[i] = f; g_lt_nu[i] = now_us(); lt_note(f); }
+static void gp_msg(long long newest, uint64_t at) {
+    if (newest <= g_gp_prev_newest) return;
+    if (g_gp_prev_us && at > g_gp_prev_us) {
+        double g = (double)(at - g_gp_prev_us) / 1000.0; g_gp_last = g; g_gp_n++;
+        if (g > g_gp_max) g_gp_max = g;
+        if (g > 20) g_gp_hist[0]++; if (g > 25) g_gp_hist[1]++; if (g > 33.4) g_gp_hist[2]++; if (g > 50) g_gp_hist[3]++;
+    }
+    g_gp_prev_us = at; g_gp_prev_newest = newest;
+}
+static void lt_report(FILE *o) {
+    if (!g_lt_n) return;
+    fprintf(o, "[rbnet] report: the other player's pads against the moment this game needed them (%lld frames; mean %.1f ms early; latest %.1f ms %s at frame %lld): "
+               "late by more than 2 frames %lld, 1-2 frames %lld, half to 1 frame %lld, up to half a frame %lld | early by up to half a frame %lld, half to 1 frame %lld, 1-2 frames %lld, more %lld\n",
+            g_lt_n, g_lt_sum / g_lt_n, g_lt_worst < 0 ? -g_lt_worst : g_lt_worst, g_lt_worst < 0 ? "late" : "early", g_lt_worst_f,
+            g_lt_hist[0], g_lt_hist[1], g_lt_hist[2], g_lt_hist[3], g_lt_hist[4], g_lt_hist[5], g_lt_hist[6], g_lt_hist[7]);
+    fprintf(o, "[rbnet] report: time between the other game's messages with a new frame (%lld): over 20 ms %lld, over 25 ms %lld, over 33 ms %lld, over 50 ms %lld; longest %.1f ms\n",
+            g_gp_n, g_gp_hist[0], g_gp_hist[1], g_gp_hist[2], g_gp_hist[3], g_gp_max);
+}
 RbPad rbn_pad(int player, long long f) {
+    if (player == g_remote && !g_spec && !g_loop) lt_needed(f);
     int pred = 0; RbPad p = rb_input_get(player, (int)f, &pred);
     g_stat_padget++; g_stat_pred += pred;
     if (player >= 0 && player < 2) { if (g_acc_n[player] && !rb_pad_equal(&g_acc_pad[player], &p)) g_acc_var[player] = 1; g_acc_pad[player] = p; g_acc_n[player]++; }
@@ -1009,7 +1055,9 @@ void rbn_drain(long long cur) {
         if (g_spec) { if (grp && m.type == RB_MSG_PADS && g_started) spec_rx_pads(&m); continue; }     /* (2026-11-02) a spectator: only the fighters' group PADS */
         if (m.type != RB_MSG_PADS || !g_started || m.player != g_remote) continue;
         g_peer_started = 1;
+        gp_msg(m.newest, at);                           /* (2026-11-05) the other game's message timing */
         for (int k = 0; k < m.count; k++) rb_input_remote_put(g_remote, m.newest - k, m.pads[k]);
+        for (int k = 0; k < m.count; k++) lt_arrived(m.newest - k, at);
         if (m.ack > g_peer_ack && m.ack <= rb_input_local_newest_frame()) g_peer_ack = m.ack;      /* (hs12: never an acknowledgement of pads not sent yet) */
         if (m.check_frame > 0) on_check(m.check_frame, m.check);
     }
@@ -1160,7 +1208,7 @@ double rbn_offset_ms(void) { return rb_ts_offset() / 1000.0; }
  * received messages not drained yet); the round trip, the pings and the transport stay. */
 void rbn_match_reset(void) {
     g_started = 0; g_peer_started = 0; g_f0 = 0; InterlockedExchange(&g_peer_mode, -1); g_peer_ack = 0; g_sent_newest = 0;
-    g_stat_pred = g_stat_padget = g_stat_mis = 0; g_ts_n = 0; g_ts_extra = 0; g_ts_left = 0;
+    g_stat_pred = g_stat_padget = g_stat_mis = 0; g_ts_n = 0; g_ts_extra = 0; g_ts_left = 0; lt_reset();
     g_hacc = 0xcbf29ce484222325ull; g_hlines = 0; g_lacc_n = 0;
     memset(g_hash, 0, sizeof g_hash); memset(g_hframe, 0, sizeof g_hframe); g_hfinal_upto = 0;
     g_desync = 0; g_check_ok = 0; g_desync_first = -1; g_peer_check_f = 0; g_peer_check = 0; memset(g_pcq_f, 0, sizeof g_pcq_f); g_pcq_i = 0;
@@ -1191,6 +1239,7 @@ void rbn_report(FILE *o, long long frames) {
             g_match_n, g_match_id, frames, g_delay, g_rtt_n ? g_rtt_sum / g_rtt_n / 1000.0 : -1.0, g_rtt_min_us > 0 ? g_rtt_min_us / 1000.0 : -1.0, g_rtt_n, rb_ts_offset() / 1000.0, g_ts_n);
     fprintf(o, "[rbnet] report: pads given %lld, predicted %lld (%.1f%%), mispredictions %lld; finalized frames %lld; checksums compared %lld, DESYNCS %lld (first %lld)\n",
             g_stat_padget, g_stat_pred, g_stat_padget ? 100.0 * g_stat_pred / g_stat_padget : 0.0, g_stat_mis, g_hfinal_upto, g_check_ok + g_desync, g_desync, g_desync_first);
+    lt_report(o);
     fprintf(o, "[rbnet] report: pad check of the final simulations: %lld pad values differ from the final ones (first frame %lld)\n", g_padcheck_bad, g_padcheck_first);
     fprintf(o, "[rbnet] report: packets sent %lld (failed %lld), received %lld (bad %lld, queue full %lld); remote pads up to %d, local up to %d\n",
             (long long)g_tx_pkts, (long long)g_tx_fail, (long long)g_rx_pkts, (long long)g_rx_bad, (long long)g_rx_drop, rb_input_remote_newest_consecutive_frame(g_remote), rb_input_local_newest_frame());
