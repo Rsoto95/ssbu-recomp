@@ -443,10 +443,17 @@ static void rbg_step_body(Ctx *c) {
     r1_ring_let_go();
     rbn_finalize(g_rbg_pend > 0 && g_rbg_pend - 1 < i ? g_rbg_pend - 1 : i);      /* (R3 pub1) a refused load: its frames are not final yet */
     if (g_rbg_pace) {
-        double period = 1000.0 / 60.0 + rbn_pace_extra(g_rgs_next), now = now_ms();
+        double extra = rbn_pace_extra(g_rgs_next), period = 1000.0 / 60.0 + extra, now = now_ms();
         if (g_rbg_next <= 0 || now - g_rbg_next > 3 * period) g_rbg_next = now;      /* (far behind: no catching up in a burst) */
+        /* (2026-11-05) the time sync's extra wait is really waited: a game a little behind its own schedule (passes of 17+ ms)
+         * waited nothing at all, the extra only shortened its catching up, and a game 40 ms ahead of the other stayed so for
+         * ~20 s (a friend's log: 38 / 43 ms ahead at frames 600 / 1200) */
+        if (extra > 0 && g_rbg_next < now + extra) g_rbg_next = now + extra;
         rbg_wait_until(g_rbg_next);
         g_rbg_next += period;
+        /* (2026-11-05) the other player's messages that came during the wait are taken now, before the next pass reads its pad:
+         * before, they waited for the next safe point (up to a frame), and a pad there in time was guessed and rolled back */
+        if (!rbn_loop()) rbn_drain(i);
     }
     double go = now_ms();
     if (g_rbg_last_go > 0 && g_rbg_ng < RBG_NT) g_rbg_gap[g_rbg_ng++] = (float)(go - g_rbg_last_go);

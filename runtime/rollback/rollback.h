@@ -60,5 +60,6 @@ void rb_ts_sample(int32_t offset_us);
 /* every 30 frames: what to do (skip one frame, run `advance` extra frames spread out, or a speed factor) */
 RbSyncAction rb_ts_decide(int frame);
 int32_t rb_ts_offset(void);                        /* the current estimate */
+void rb_ts_forget(void);                           /* (2026-11-05) the samples forgotten (a correction starts) */
 
 #endif
