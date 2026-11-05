@@ -109,7 +109,7 @@ static const char *const k_default_ini =
 ";            reads the controller 2-5 ms later = closer to the screen. Same cadence; with four players a few more late frames.\r\n"
 ";   lowest:  as low, and the picture goes to the window as soon as it is ready (no wait for the tick): about 4 ms\r\n"
 ";            less again, but the frames are no longer all on screen for the same time (judder).\r\n"
-"latency = normal\r\n"
+"latency = lowest\r\n"
 "\r\n"
 "; runahead = off | on      (track R1, input latency; Vulkan; needs the build with dirty-page marks)\r\n"
 ";   on: in a fight each frame's picture is drawn one game frame earlier: the state is saved after the game's\r\n"

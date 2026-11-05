@@ -66,7 +66,7 @@ def ini_get(path, key):
 PLAY_LOBBY = 'lan'
 PLAY_DEFAULTS = {
     # (the input delay: graphics.ini input_delay, F1 > Gameplay, default 3; each match uses the larger of the two players')
-    'SSBU_LATENCY': 'low',
+    'SSBU_LATENCY': 'lowest',        # (2026-11-05, owner: "por default tiene que estar en lowest"); graphics.ini latency = low keeps low
     'SSBU_LS_X_WW': '1',             # the ring tracks the writes to the big extras ranges with GetWriteWatch
     'SSBU_RB_AUDIO_OFF': '1',        # the audio threads held in a fight (the main thread empties their queue: SSBU_RB_AUDIO_PUMP)
     # (2026-11-05) re-run passes skip the presentation work that does not change the fight: the preparation kicks + lists
@@ -611,8 +611,8 @@ def main():
         for k, v in PLAY_DEFAULTS.items():
             if full_rerun and k == 'SSBU_LS_DECAY':
                 continue
-            if k == 'SSBU_LATENCY' and ini_get(gini, 'latency') in ('lowest', '2'):
-                v = 'lowest'                          # (2026-11-05) F1 > Display > Input latency = lowest is kept (low otherwise)
+            if k == 'SSBU_LATENCY' and ini_get(gini, 'latency') in ('low', '1'):
+                v = 'low'                             # (2026-11-05) F1 > Display > Input latency = low is kept (lowest otherwise)
             env.setdefault(k, ('5' if k == 'SSBU_RB_NET_RECAP' else '0') if full_rerun and k in ('SSBU_RB_SIM_SKIP', 'SSBU_RB_SIM_LITE', 'SSBU_RB_NET_LASTLITE', 'SSBU_RB_NET_RECAP') else v)
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)

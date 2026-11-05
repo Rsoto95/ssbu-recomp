@@ -619,9 +619,9 @@ static void sec_display(int cw, int ch) {
     if (combo("Input latency", &S.latency, k_latency, N(k_latency))) ini("latency", k_latency[S.latency]);
     tag(1, S.latency != S0.latency);
     {   /* (2026-11-05, owner: "dice input latency normal y yo pense que la teniamos en lowest") "Play SSBU" runs at least 'low'
-         * (run.py PLAY_DEFAULTS; 'lowest' when chosen here): the mode IN USE is shown, not only the file's value */
+         * (run.py PLAY_DEFAULTS: 'lowest' by default since 2026-11-05, 'low' when chosen here): the mode IN USE is shown, not only the file's value */
         int lm = latency_mode(); if (lm < 0 || lm > 2) lm = 0;
-        if (lm != gfx_latency()) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "in use now: %s (\"Play SSBU\" plays with at least 'low')", k_latency[lm]);
+        if (lm != gfx_latency()) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "in use now: %s (\"Play SSBU\" plays with 'lowest' unless 'low' is chosen)", k_latency[lm]);
         else ImGui::TextDisabled("in use now: %s", k_latency[lm]);
         help("normal: the game reads the controller at the start of the frame. low: it reads it a few ms later, just in time for the frame to be ready (same smoothness). lowest: as low, and each picture is shown as soon as it is ready (about 4 ms less; frames may be shown unevenly, best with G-Sync / FreeSync).");
     }
