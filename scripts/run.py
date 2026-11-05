@@ -69,9 +69,14 @@ PLAY_DEFAULTS = {
     'SSBU_LATENCY': 'low',
     'SSBU_LS_X_WW': '1',             # the ring tracks the writes to the big extras ranges with GetWriteWatch
     'SSBU_RB_AUDIO_OFF': '1',        # the audio threads held in a fight (the main thread empties their queue: SSBU_RB_AUDIO_PUMP)
-    'SSBU_RB_SIM_SKIP': '0',         # re-run passes do the whole presentation work (the blue / black fighters)
-    'SSBU_RB_SIM_LITE': '0',
-    'SSBU_RB_NET_LASTLITE': '0',
+    # (2026-11-05) re-run passes skip the presentation work that does not change the fight: the preparation kicks + lists
+    # (49) and every presentation callee but the LIGHTING group (127 - 4 = 123). Lighting (lite group 4) was the cause of the
+    # blue / black fighters that made all of them off on 2026-10-28 (tests/rb_lite_bisect.py: only group 4 turns the
+    # fighters teal; with 49 / 123 / lastlite the re-runs replay the fight exactly and a re-run pass costs 3.0 ms instead
+    # of 4.8). graphics.ini rerun_lite = off: the old full re-run passes (0 / 0 / 0).
+    'SSBU_RB_SIM_SKIP': '49',
+    'SSBU_RB_SIM_LITE': '123',
+    'SSBU_RB_NET_LASTLITE': '1',
 }
 
 
@@ -584,8 +589,9 @@ def main():
     if rollback and 'SSBU_RB_NET' not in env:
         env['SSBU_RB_NET'] = 'net'                    # rollback over the online connection (net_relay); needs online play on
     if a.play and rollback:                           # (fork) the group's settings and lobby, see PLAY_DEFAULTS
+        full_rerun = ini_get(gini, 'rerun_lite') in ('off', '0', 'no', 'false')
         for k, v in PLAY_DEFAULTS.items():
-            env.setdefault(k, v)
+            env.setdefault(k, '0' if full_rerun and k in ('SSBU_RB_SIM_SKIP', 'SSBU_RB_SIM_LITE', 'SSBU_RB_NET_LASTLITE') else v)
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)
         print('Online: %s (play in Local Wireless rooms: 1-on-1 rooms use rollback), rollback on, input delay %s' % (
