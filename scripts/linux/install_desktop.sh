@@ -32,8 +32,9 @@ cat > "$ENTRY" <<EOF
 Type=Application
 Name=Super Smash Bros. Ultimate (recomp)
 Comment=Native Linux build of ssbu-recomp
+Keywords=ssbu;switch;
 Exec="$DATA/launch.sh"
-Icon=applications-games
+Icon=$REPO/media/opensmash_icon_512.png
 Terminal=false
 Categories=Game;
 EOF
