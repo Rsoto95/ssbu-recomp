@@ -325,8 +325,12 @@ static void record_or_replay(uint64_t *buttons, int *lx, int *ly) {
             fclose(f);
             printf("input replay: %d changes from %s\n", g_play_count, play);
         } else if (play) printf("input replay: cannot open %s\n", play);
-        if (!g_play_count) {
-            g_rec = fopen(rec ? rec : "input_last.rec", "w");
+        /* (2026-11-04) only with SSBU_REC (every test tool sets it): before, every game wrote work\input_last.rec, a line and
+         * an fflush at every change of player 1's pad, on the game's main thread, so a moment when the disk was busy (an
+         * SSD spike, OBS recording to the same drive) held the whole game: a friend's online fights froze 8 and 12 s, the
+         * main thread inside this fflush (WriteFile) */
+        if (!g_play_count && rec && rec[0]) {
+            g_rec = fopen(rec, "w");
             if (g_rec) fprintf(g_rec, "# a <anchor> <polls since the anchor> <buttons hex> <lx> <ly>   (see nnhid.c; replay with SSBU_PLAY=<this file>)\n");
         }
     }
@@ -534,7 +538,21 @@ static int net_merge(void) {
     int r1_net_on(void), nnldn_role(void), net_online(void), net_mode(void), net_arena_queued(void), rbn_started(void);
     if (g_x_synth || scripted_run() || !r1_net_on()) return 0;
     int mode = net_online() > 0 ? net_mode() : -1;
-    return nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started();
+    /* (2026-11-03) and a Battle Arena of the game's Online menu (the match block's melee mode 0x14) played by the game's own
+     * netcode (no rollback session): a GameCube controller that came up as player 2 behind the keyboard did not play the
+     * fighter (owner's friend: "se le cambio el control") */
+    int dm_melee_mode(void);
+    int on = nnldn_role() || mode == 2 /* NET_MODE_HOST */ || mode == 3 /* NET_MODE_JOIN */ || net_arena_queued() || rbn_started() || (mode >= 0 && dm_melee_mode() == 0x14);
+    /* (2026-11-04) after a rollback match, still online, port 1 stays the merged pads when it has no device of its own (no
+     * keyboard on player 1, no pad on slot 1). Elias (keyboard: nobody, his GameCube controller came up as player 2): port 1
+     * existed only through the merge, the merge ended with the match (the arena's melee mode is made 0 for rollback, the
+     * session ends), port 1 vanished and the game showed player 1's controller unplugged after every match. A PC with its own
+     * port 1 device (the keyboard) is unchanged: there the merge kept on changed the next match's controls (9345a93). */
+    static int merged_in_match;
+    if (on && rbn_started()) merged_in_match = 1;
+    if (mode < 0) merged_in_match = 0;
+    if (!on && merged_in_match && g_keyboard_player != 0 && !nnpad_present(0)) return 1;
+    return on;
 }
 
 /* Is a controller connected as this npad id? Player 1 always exists in scripted runs (the script is its pad). */
@@ -600,7 +618,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     memset((void *)(uintptr_t)out, 0, size);
     wr64(out, (uint64_t)InterlockedIncrement64(&g_sampling));
     if (id > 7 || !kind) return;                              /* the other styles are never filled */
-    unsigned trig_l = 0, trig_r = 0;
+    unsigned trig_l = 0, trig_r = 0, gc_l = 0, gc_r = 0;        /* (gc_l / gc_r: the GameCube pads' analog triggers, any style) */
     static long long l1_ticks;                               /* L1: fight-frame ticks seen at player 1's polls (SSBU_L1 report) */
     int r1_on(void), r1_poll(int ticks); void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry);    /* R1 (r1_state.c, SSBU_R1 only) */
     if (id == 0) { int fight_seq_ticks(void); int nt = fight_seq_ticks();
@@ -632,6 +650,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
                 if (ps.rx || ps.ry || !rx) { rx = ps.rx; ry = ps.ry; }
                 if (kind == 2 && ps.gc) { trig_l = (unsigned)ps.trig_l; trig_r = (unsigned)ps.trig_r; }
+                if (ps.gc) { if ((unsigned)ps.trig_l > gc_l) gc_l = (unsigned)ps.trig_l; if ((unsigned)ps.trig_r > gc_r) gc_r = (unsigned)ps.trig_r; }
             }
         }
         if (id == 0 && net_merge() && devices_live() && !menu_input_blocked())      /* online: the other pads of this PC play port 1 too */
@@ -643,6 +662,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                     if ((unsigned)ps.trig_l > trig_l) trig_l = (unsigned)ps.trig_l;
                     if ((unsigned)ps.trig_r > trig_r) trig_r = (unsigned)ps.trig_r;
                 }
+                if (ps.gc) { if ((unsigned)ps.trig_l > gc_l) gc_l = (unsigned)ps.trig_l; if ((unsigned)ps.trig_r > gc_r) gc_r = (unsigned)ps.trig_r; }
             }
     } else if (x_present(slot) && devices_live() && !menu_input_blocked()) {
         const XGamepad *g = &g_x[slot].st.pad;
@@ -661,9 +681,21 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
         ry = g->ry < -STICK_MAX ? -STICK_MAX : g->ry;
         wired = !g_x[slot].wireless;
     }
+    /* (2026-11-04) an online rollback match carries buttons and sticks, no analog trigger: a GameCube trigger pressed past 25%
+     * is also its L / R button here, before port 1's pad is recorded for the match (Elias: "no podia poner la R o la L":
+     * shown as a GameCube controller, the game read L / R from the analog triggers, and port 2 had none). */
+    if (id == 0 && r1_on() && (gc_l > 0x7fff / 4 || gc_r > 0x7fff / 4)) {
+        if (gc_l > 0x7fff / 4) buttons |= 1ull << BTN_L;
+        if (gc_r > 0x7fff / 4) buttons |= 1ull << BTN_R;
+    }
     if (id == 0) record_or_replay(&buttons, &lx, &ly);
     if (id == 0 && r1_on()) r1_pad(&buttons, &lx, &ly, &rx, &ry);
     if (id == 1 && r1_on()) { void r1_pad_id(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); r1_pad_id(1, &buttons, &lx, &ly, &rx, &ry); }      /* R3: port 2 in an online rollback match */
+    {   int rbg_pad_synced(int id);                       /* (2026-11-04) the same on both games: a GameCube port's triggers from the synced L / R */
+        if (kind == 2 && (id == 0 || id == 1) && r1_on() && rbg_pad_synced((int)id)) {
+            trig_l = (buttons >> BTN_L & 1) ? 0x7fff : 0;
+            trig_r = (buttons >> BTN_R & 1) ? 0x7fff : 0;
+        } }
     if (lx < -STICK_MAX / 2) buttons |= 1ull << BTN_SL_LEFT;
     if (lx > STICK_MAX / 2) buttons |= 1ull << BTN_SL_RIGHT;
     if (ly > STICK_MAX / 2) buttons |= 1ull << BTN_SL_UP;

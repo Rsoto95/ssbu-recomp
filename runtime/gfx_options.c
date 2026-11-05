@@ -33,7 +33,7 @@ void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
 /* (2026-11-02) the game's own Online menu (Battle Arenas) on our server: online_menu = off | on, online_menu_server =
  * <IPv4 address> (default the project's arena server). Turned into SSBU_ONLINE_MENU / _SERVER and SSBU_ONLINE (the lobby of
  * the arenas' rollback, <server>:39500) at the start by gfx_online_menu_env (boot.c), when SSBU_ONLINE_MENU is not set. */
-static int g_gfx_online_menu; static char g_gfx_online_menu_server[64] = GFX_ONLINE_MENU_SERVER_DEFAULT;
+static int g_gfx_online_menu = 1; static char g_gfx_online_menu_server[64] = GFX_ONLINE_MENU_SERVER_DEFAULT;
 int gfx_online_menu(void) { gfx_options(); return g_gfx_online_menu; }
 static int gfx_ipv4(const char *v) { int a, b, c, d; char x; return sscanf(v, "%d.%d.%d.%d%c", &a, &b, &c, &d, &x) == 4 && a >= 0 && a < 256 && b >= 0 && b < 256 && c >= 0 && c < 256 && d >= 0 && d < 256; }
 void gfx_online_menu_env(void) {
@@ -62,6 +62,9 @@ const char *gfx_screenshot_dir(void) { gfx_options(); return g_gfx_shot_dir; }
 static int g_gfx_shot_key = 0x7b;                    /* screenshot_key = F12 (VK_F12) by default; F1..F24, off = 0 */
 int gfx_screenshot_key(void) { gfx_options(); return g_gfx_shot_key; }
 
+/* (2026-11-04) Battle Arenas and rollback on by default: this comment line in a graphics.ini marks that the file has been
+ * moved to those defaults once (ini_migrate_online_defaults); a later OFF chosen by the player stays OFF. */
+#define GFX_ONLINE_DEFAULTS_MARK ";   (2026-11-04: Battle Arenas and rollback netcode are on by default; F1 turns them off.)\r\n"
 static const char *const k_default_ini =
 "; graphics.ini: display and rendering options of the native build (read once at start by gfx_options.c).\r\n"
 "; Delete the file to get it written again with these defaults. A line starting with ';' is a comment.\r\n"
@@ -210,11 +213,12 @@ static const char *const k_default_ini =
 ";   game. Used from the next match.\r\n"
 "fight_sound = off\r\n"
 "\r\n"
-"; online_menu = off | on\r\n"
+"; online_menu = on | off      (on by default)\r\n"
 ";   The game's own Online menu (Online > Battle Arenas) on the project's server (F1 > Experimental). on: arenas with\r\n"
 ";   rollback 1-on-1 fights and spectators; Local Wireless rooms are not available then. Used from the next start.\r\n"
 ";   online_menu_server = <IPv4 address> changes the server (default " GFX_ONLINE_MENU_SERVER_DEFAULT ").\r\n"
-"online_menu = off\r\n"
+GFX_ONLINE_DEFAULTS_MARK
+"online_menu = on\r\n"
 "\r\n"
 "; sharpening = 0 .. 100      (Vulkan)\r\n"
 ";   0 = off. Sharpens the picture on its way to the window, without halos (kept inside each pixel's neighbours).\r\n"
@@ -305,6 +309,52 @@ static void ini_migrate_shader_load(const char *path) {
            ok ? "" : " - could NOT be written: the file is read as it is");
     free(old); free(out);
 }
+/* (2026-11-04) the players did not know Battle Arenas (online_menu) and rollback had to be turned on in F1: once per file,
+ * online_menu = off becomes on and rollback = off becomes on (a missing key is on already), and the mark line is added before
+ * online_menu (or at the end). With the mark there, the file is left as written: a later OFF from F1 or the launcher stays. */
+static void ini_migrate_online_defaults(const char *path) {
+    static const char mark[] = GFX_ONLINE_DEFAULTS_MARK;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *old = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (old) { n = (long)fread(old, 1, (size_t)n, f); old[n] = 0; }
+    fclose(f);
+    if (!old || strstr(old, "Battle Arenas and rollback netcode are on by default")) { free(old); return; }
+    char *out = malloc((size_t)n + sizeof mark + 256);
+    if (!out) { free(old); return; }
+    size_t o2 = 0; int marked = 0, om = 0, rb = 0;
+    for (char *p = old; *p; ) {
+        char *e = strchr(p, '\n');
+        size_t l = e ? (size_t)(e - p) + 1 : strlen(p);
+        char line[512]; size_t ll = l < sizeof line - 1 ? l : sizeof line - 1;
+        memcpy(line, p, ll); line[ll] = 0; trim(line);
+        int is_om = line[0] != ';' && !_strnicmp(line, "online_menu", 11) && (line[11] == ' ' || line[11] == '\t' || line[11] == '=');
+        int is_rb = line[0] != ';' && !_strnicmp(line, "rollback", 8) && (line[8] == ' ' || line[8] == '\t' || line[8] == '=');
+        const char *q = NULL;
+        if (is_om || is_rb) { q = strchr(line, '='); q = q ? q + 1 : ""; while (*q == ' ' || *q == '\t') q++; }
+        int off = q && (!_stricmp(q, "off") || !strcmp(q, "0") || !_stricmp(q, "no") || !_stricmp(q, "false"));
+        if (is_om && !marked) { memcpy(out + o2, mark, sizeof mark - 1); o2 += sizeof mark - 1; marked = 1; }
+        if (is_om && off) { o2 += (size_t)sprintf(out + o2, "online_menu = on\r\n"); om = 1; }
+        else if (is_rb && off) { o2 += (size_t)sprintf(out + o2, "rollback = on\r\n"); rb = 1; }
+        else { memcpy(out + o2, p, l); o2 += l; }
+        p += l;
+    }
+    if (!marked) {
+        if (o2 && out[o2 - 1] != '\n') { out[o2++] = '\r'; out[o2++] = '\n'; }
+        memcpy(out + o2, mark, sizeof mark - 1); o2 += sizeof mark - 1;
+    }
+    char tmp[MAX_PATH + 8]; int ok = 0;
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if ((f = fopen(tmp, "wb")) != NULL) {
+        ok = fwrite(out, 1, o2, f) == o2;
+        ok = !fclose(f) && ok;
+        ok = ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    }
+    printf("graphics options: %s: Battle Arenas and rollback are on by default now (once)%s%s%s\n", path, om ? "; online_menu = off became on" : "",
+           rb ? "; rollback = off became on" : "", ok ? "" : " - could NOT be written: the file is read as it is");
+    free(old); free(out);
+}
 static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     (void)once; (void)arg; (void)ctx;
     GfxOptions *o = &g_opt;
@@ -314,6 +364,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     o->shader_load_auto = 1;                                                  /* shader_load = auto when the key is missing (2026-11-02) */
     opt_path(o->path);
     ini_migrate_shader_load(o->path);                                         /* (a file of an older version: once) */
+    ini_migrate_online_defaults(o->path);                                     /* (2026-11-04: arenas and rollback on; once) */
     FILE *f = fopen(o->path, "rb");
     if (!f) {
         char b[MAX_PATH];

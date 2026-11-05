@@ -556,12 +556,8 @@ def join_matchmake_session_with_param(client, req):
         if client.pid not in seats:                    # (2026-11-03) the game's seat: the lowest one free now
             taken = set(seats.values())
             seats[client.pid] = next(s for s in range(64) if s not in taken)
-        session = bytearray(a["session"])
-        try:
-            struct.pack_into("<I", session, session_participants_offset(session), len(parts))
-        except struct.error:
-            pass
-        a["session"] = bytes(session)
+        set_session_count(a)
+        session = a["session"]
         conns = a.setdefault("clients", {a["owner"]: a["client"]})
         conns[client.pid] = client
         others = [c for p, c in conns.items() if c is not client and p in parts]
@@ -684,6 +680,19 @@ def leave_arenas(pid, only_gid=None):
             parts.remove(pid)
             a.get("clients", {}).pop(pid, None)
             a.get("seats", {}).pop(pid, None)
+            set_session_count(a)
+
+
+def set_session_count(a):
+    """The participation count inside the stored session (what the arena list shows) = the members now. (2026-11-04) it
+    was set at a join only: a member who left still counted, and after a few came and went the arena was listed as full.
+    Call with ARENAS_LOCK held."""
+    session = bytearray(a["session"])
+    try:
+        struct.pack_into("<I", session, session_participants_offset(session), len(a.get("players") or [a["owner"]]))
+    except struct.error:
+        return
+    a["session"] = bytes(session)
 
 
 def referee_1(client, req):
@@ -832,6 +841,19 @@ def sinkhole(host, port, log):
             with PIA_LOCK:
                 if all(e[1] != addr for e in PIA_SEEN):
                     PIA_SEEN.append((time.time(), addr, cid))
+            # (2026-11-03) a game makes a new Pia socket for each arena it makes or joins, but reports its NAT properties
+            # (pia_claim) only once: the owner joined an arena (socket 62327), then made his own (socket 49746, probed
+            # here, no new report), and the joiners were given the first socket and station id: denied, 2618-0502 on
+            # every join. A probe from the address of exactly one game that already has a Pia socket (another port)
+            # is that game's new socket. Two games on one address (two copies on one PC): left to pia_claim.
+            owners = [c for c in list(CLIENTS_BY_CID.values())
+                      if getattr(c, "pia", None) and c.pia[0] == addr[0] and c.pia != addr]
+            if len(owners) == 1 and not any(getattr(c, "pia", None) == addr for c in list(CLIENTS_BY_CID.values())):
+                c = owners[0]
+                old = (c.pia, getattr(c, "pia_cid", None))
+                c.pia, c.pia_cid = addr, cid
+                log("reachability %s:%d <- %s:%d: the new Pia socket of pid %s (was %s:%d, station id %s; now station id %s)"
+                    % (host, port, addr[0], addr[1], getattr(c, "pid", "?"), old[0][0], old[0][1], old[1], cid))
         if addr not in seen:
             seen.add(addr)
             log("reachability %s:%d <- %s:%d %d bytes (not answered, as it should be): %s" % (host, port, addr[0], addr[1], len(data), hexdump(data[:48])))
@@ -890,7 +912,8 @@ class Client:
     def __init__(self, s, addr, log):
         self.s, self.log, self.who = s, log, "%s:%d" % addr
         self.send_lock = threading.Lock()
-        self.seq_out = 1                 # our next DATA sequence id (UNCONFIRMED: 1 unless the client gave option 3)
+        self.data_lock = threading.Lock()   # (2026-11-04) one message's fragments in a row (notifications come from other clients' threads)
+        self.seq_out = 1                # our next DATA sequence id (UNCONFIRMED: 1 unless the client gave option 3)
         self.fragments = b""
         self.handlers = HANDLERS         # (protocol, method) -> fn(client, Rmc) -> body bytes or int error
         self.local = s.getsockname()     # the address the game reached us on (the secure server's address)
@@ -1023,11 +1046,21 @@ class Client:
         self.log("%s     call to pid %d: protocol %d method %d %s" % (self.who, self.pid or 0, protocol, method, what))
         self.send_data(rmc_request(protocol, self.notify_call, method, body), self.last_ports[0], self.last_ports[1])
 
+    DATA_FRAGMENT = 1300                                     # the game's own fragment size (its fragments: 1300, 1300, ..., the rest)
+
     def send_data(self, payload, src_port=1, dst_port=0x1f):
-        p = Packet(TYPE_DATA, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE, self.seq_out, 10, 10, src_port, dst_port,
-                   0, None, payload)
-        self.seq_out = (self.seq_out + 1) & 0xffff
-        self.send_packet(p)
+        """(2026-11-04) at most 1300 bytes per packet, as the game sends: fragment ids 1, 2, ... and 0 on the last (or only)
+        one, each with its own sequence id. A Battle Arena search answering 2 arenas (1354 bytes) in one packet was never
+        acknowledged by the game (1 of 25 times; 0 / 1 arena: 146 of 146): the arena list stayed on "searching", 2618-0006
+        / 2306-0332 after it."""
+        chunks = [payload[i:i + self.DATA_FRAGMENT] for i in range(0, len(payload), self.DATA_FRAGMENT)] or [b""]
+        with self.data_lock:
+            for k, chunk in enumerate(chunks):
+                frag = 0 if k == len(chunks) - 1 else k + 1
+                p = Packet(TYPE_DATA, FLAG_RELIABLE | FLAG_NEED_ACK | FLAG_HAS_SIZE, self.seq_out, 10, 10, src_port, dst_port,
+                           frag, None, chunk)
+                self.seq_out = (self.seq_out + 1) & 0xffff
+                self.send_packet(p)
 
     # RMC
     def on_rmc(self, data):
