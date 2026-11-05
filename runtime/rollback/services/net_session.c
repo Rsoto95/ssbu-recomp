@@ -677,6 +677,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld; match id %08x; notice updates %llu, frames shown again %llu)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx, g_match_id,
            (unsigned long long)notes, (unsigned long long)redraws);
     hs_print("the match", out);
+    { void r1_find_heaps_early(void); r1_find_heaps_early(); }      /* (memory_map.c, 2026-11-05) the ~90 ms walk for the game's regions here, in the menus, not in the fight's first frame */
     return 1;
 }
 /* rbn_start: the game's match block of this game, sent to the other in chunks (a check of the agreed start) */

@@ -44,6 +44,16 @@ static void find_heaps(void) {             /* once: the reservations of >= 16 GB
     if (cur && span >= (16ull << 30) && g_memory_map.heap_count < 8) g_memory_map.heap_base[g_memory_map.heap_count++] = cur;
     for (int i = 0; i < g_memory_map.heap_count; i++) LOG("r1: game address region %d at %p\n", i, (void *)g_memory_map.heap_base[i]);
 }
+/* (2026-11-05) find_heaps walks the whole address space (~90 ms): it ran inside the first base, with the game held at the
+ * fight's start. r1_find_heaps_early (net_session.c, when a rollback match is agreed, in the menus) runs it before; a game
+ * region reserved after that (nnsdk.c os_AllocateAddressRegion -> r1_region_reserved, >= 16 GB) makes collect walk again. */
+static volatile LONG g_heaps_stale;
+void r1_region_reserved(uint64_t size) { if (size >= (16ull << 30)) InterlockedExchange(&g_heaps_stale, 1); }
+void r1_find_heaps_early(void) {
+    if (g_memory_map.heap_count) return;
+    double t0 = now_ms(); InterlockedExchange(&g_heaps_stale, 0); find_heaps();
+    LOG("r1: game address regions found before the fight (%d, %.1f ms)\n", g_memory_map.heap_count, now_ms() - t0);
+}
 static uint64_t g_ex[512][2]; static int g_nex;                       /* other guest threads' stacks: never saved / restored */
 static void ex_cb(uint64_t key, int sig, int cnt, uint64_t len, uint64_t thread, uint64_t stack, uint64_t size) {
     (void)key; (void)sig; (void)cnt; (void)len; (void)thread;
@@ -92,6 +102,7 @@ void collect(Ctx *c) {
     for (int i = 0; i < g_memory_map.range_count; i++) { rs_free(g_memory_map.ranges[i].s); g_memory_map.ranges[i].s = NULL; free(g_memory_map.ranges[i].dirty); free(g_memory_map.ranges[i].async); }
     g_memory_map.range_count = 0;
     double tc0 = now_ms();
+    if (g_heaps_stale && !g_sh1) { InterlockedExchange(&g_heaps_stale, 0); g_memory_map.heap_count = 0; }      /* (a game region reserved after the early walk, before the ring's first base) */
     if (!g_memory_map.heap_count) find_heaps();
     double tc1 = now_ms();
     for (int i = 0; i < g_memory_map.heap_count; i++) add_alloc(g_memory_map.heap_base[i]);

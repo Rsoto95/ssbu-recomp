@@ -191,22 +191,26 @@ int mark_prepare(void) {
  * place (the shadow or its extra), on the parallel copy's threads; the jobs are kept for mark_recheck. Returns the bytes
  * queued, 0 when a shadow commit failed (mark_undo done). */
 static CopyJob *g_df; static size_t g_ndf, g_cdf; static size_t g_df_shb;
-size_t mark_fill(void) {
-    g_ndf = 0; g_df_shb = 0;
+/* lazy (SSBU_LS_LAZY, page_tracker_learned.c): the windows' pages only get their shadow committed, not copied (a page is copied
+ * at its first write, or by ls_lazy_fill_unprotected when it is not protected); the extras are copied as before. *failed = 1:
+ * a shadow commit failed (mark_undo done). Returns the bytes queued. */
+size_t mark_fill(int lazy, int *failed) {
+    g_ndf = 0; g_df_shb = 0; *failed = 0;
     int cx = 0; size_t xo = 0;
     for (int i = 0; i < g_memory_map.range_count; i++) {
         Rng *r = &g_memory_map.ranges[i]; size_t np = r->n / PG;
         for (size_t p = 0; p < np; p++) {
             uint8_t *a = r->a + p * PG, *cm, *d = NULL; size_t pi; uint8_t *sh = in_shadow(a, &cm, &pi);
             if (sh) {
-                if (!sh_commit(sh, cm, pi)) { LOG("r1: MARK setup: commit of the shadow FAILED after %.1f MB%s: marks OFF\n", g_df_shb / 1048576.0, rb_test_nomem() == 4 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=4)" : ""); mark_undo(); g_ndf = 0; return 0; }
+                if (!sh_commit(sh, cm, pi)) { LOG("r1: MARK setup: commit of the shadow FAILED after %.1f MB%s: marks OFF\n", g_df_shb / 1048576.0, rb_test_nomem() == 4 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=4)" : ""); mark_undo(); g_ndf = 0; *failed = 1; return 0; }
+                if (lazy) continue;
                 d = sh; g_df_shb += PG;
             } else {
                 if (cx < g_nx && xo == g_x[cx].n) { cx++; xo = 0; }
                 if (cx < g_nx && g_x[cx].a + xo == a) { d = g_x[cx].b + xo; xo += PG; }
             }
             if (!d) continue;
-            if (g_ndf == g_cdf) { size_t nc = g_cdf ? g_cdf * 2 : 1u << 19; CopyJob *n2 = realloc(g_df, nc * sizeof *n2); if (!n2) { LOG("r1: MARK setup: the copy list (%zu pages) could not grow: marks OFF\n", g_ndf); mark_undo(); g_ndf = 0; return 0; } g_df = n2; g_cdf = nc; }
+            if (g_ndf == g_cdf) { size_t nc = g_cdf ? g_cdf * 2 : 1u << 19; CopyJob *n2 = realloc(g_df, nc * sizeof *n2); if (!n2) { LOG("r1: MARK setup: the copy list (%zu pages) could not grow: marks OFF\n", g_ndf); mark_undo(); g_ndf = 0; *failed = 1; return 0; } g_df = n2; g_cdf = nc; }
             g_df[g_ndf].d = d; g_df[g_ndf].s = a; g_ndf++;
         }
     }
@@ -246,6 +250,25 @@ int mark_finish_direct(void (*note)(uint8_t *a), size_t *nre) {
     *nre = 0;
     if (note && ov && g_pre_m1 && g_pre_m2) { recheck_begin(); hs_exclude_all(); ok = mark_finish(g_df_shb); *nre = recheck_end(note); }
     else { if (note) *nre = mark_recheck(note); hs_exclude_all(); ok = mark_finish(g_df_shb); }
+    free(g_df); g_df = NULL; g_ndf = g_cdf = 0;
+    return ok;
+}
+/* (SSBU_LS_LAZY, the direct first save without the windows' copy) threads held, the extras copied: the host stacks left out, the
+ * maps set and the windows protected FIRST (their pages pending), the unprotected window pages copied, THEN the hold's pause:
+ * what host threads write meanwhile faults and is learned (ls_lazy_note_learned), the extras are compared again as before.
+ * *nre: the pages written during the pause; *filled: window pages copied because they were not protected. 1 = done */
+size_t ls_lazy_fill_unprotected(void); size_t ls_lazy_note_learned(void (*note)(uint8_t *a));
+int mark_finish_lazy(void (*note)(uint8_t *a), size_t *nre, int pause, size_t *filled) {
+    *nre = 0; *filled = 0;
+    hs_exclude_all();
+    int ok = mark_finish(0);
+    if (ok) {
+        *filled = ls_lazy_fill_unprotected();
+        if (pause > 0) {
+            Sleep((DWORD)pause);
+            if (note) *nre = mark_recheck(note) + ls_lazy_note_learned(note);
+        }
+    }
     free(g_df); g_df = NULL; g_ndf = g_cdf = 0;
     return ok;
 }
