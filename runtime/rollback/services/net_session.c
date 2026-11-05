@@ -1045,9 +1045,12 @@ static void on_check(long long cf, uint32_t ck) {
                     printf("[rbnet] DESYNC frame %lld, fighter line %d here: entry %d status %x motion %llx motion frame %.3f x %.4f y %.4f damage %.2f generators %016llx\n",
                            cf, q, r3.k, r3.st, (unsigned long long)r3.mot, (double)r3.mf, (double)r3.fx, (double)r3.fy, (double)r3.dmg, (unsigned long long)r3.rh); }
                 fflush(stdout); }
-            /* (2026-11-03, owner: "you should send an advice when that happens") the players are told at once */
+            /* (2026-11-03, owner: "you should send an advice when that happens") the players are told at once.
+             * (2026-11-04, owner: it showed in fights that were not desynced and confused the opponents) only in the log now;
+             * SSBU_RB_NET_DESYNC_POPUP=1 shows the window again (tests) */
             void menu_popup(const char *title, const char *text);
-            menu_popup("Desync", "The two games no longer show the same fight (desync detected).\nWhat you see is not what the other player sees: finish or leave this fight.\nThe log has the details (it is sent to the group's server when the game closes).");
+            const char *dp = getenv("SSBU_RB_NET_DESYNC_POPUP");
+            if (dp && dp[0] == '1') menu_popup("Desync", "The two games no longer show the same fight (desync detected).\nWhat you see is not what the other player sees: finish or leave this fight.\nThe log has the details (it is sent to the group's server when the game closes).");
         } }
 }
 /* (hs15, test) SSBU_RB_NET_LOOP_BOT2=<seed>: the loop test's other player is the bot of that seed (11 = the joiner of a pair) */
