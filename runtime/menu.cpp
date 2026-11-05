@@ -1285,8 +1285,8 @@ static void sec_gameplay(void) {
         printf("menu: sound in online fights: %s (from the next match)\n", k_onoff[fs]); fflush(stdout);
     }
     ImGui::SameLine(); ImGui::Text("Sound in online fights (music and effects)");
-    help("OFF (recommended): online rollback fights are silent, and the smoothest. ON: you hear the music and the sound effects, "
-         "but the game may stutter a little and, rarely, crash. Only your game: the other player can choose differently. "
+    help("ON (the default): you hear the music and the sound effects in online rollback fights. OFF: the fights are silent "
+         "(try it if a fight stutters on your PC). Only your game: the other player can choose differently. "
          "Used from your next match. Music and effects volume apart: the game's own Options > Sound.");
     ImGui::Separator();
     if (onoff("unlock", S.unlock != 0, true)) { S.unlock = !S.unlock; ini("unlock_all", k_onoff[S.unlock]); printf("menu: unlock all fighters and stages: %s (at the next start)\n", k_onoff[S.unlock]); fflush(stdout); }
