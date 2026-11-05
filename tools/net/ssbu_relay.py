@@ -27,9 +27,13 @@ import socket
 import struct
 import sys
 import time
+import urllib.error
+import urllib.parse
 
 PROTO, RELAY_HB, RELAY = 1, 32, 33
 HB_EVERY, FORGET_AFTER, RATE_MAX = 10.0, 120.0, 300
+UPNP_EVERY = 1800.0
+UPNP_EXT = [0]            # the external port the router forwards (the one told to the lobby)
 
 
 def tag_of(secret, match_id):
@@ -46,6 +50,64 @@ def lan_address(lobby):
         return "0.0.0.0"
     finally:
         s.close()
+
+
+def upnp_map(port, lan_ip, lease=3600, ext=None):
+    """(2026-11-05) asks the router (UPnP IGD: the owner's TP-Link Archer A6 answers) to forward UDP port to this machine, so
+    nobody has to open it by hand. Renewed every UPNP_EVERY seconds (a router restart forgets it). Returns a short text."""
+    import re
+    import urllib.request
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(3)
+    try:
+        s.sendto(b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n"
+                 b"ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n", ("239.255.255.250", 1900))
+        d, _ = s.recvfrom(4096)
+    except OSError:
+        return "no UPnP router answered"
+    finally:
+        s.close()
+    m = re.search(rb"(?im)^location:\s*(\S+)", d)
+    if not m:
+        return "the UPnP answer named no description"
+    loc = m.group(1).decode()
+    try:
+        xml = urllib.request.urlopen(loc, timeout=5).read().decode("utf-8", "replace")
+    except OSError as e:
+        return "the UPnP description could not be read (%s)" % e
+    svc = None
+    for st in ("urn:schemas-upnp-org:service:WANIPConnection:1", "urn:schemas-upnp-org:service:WANIPConnection:2",
+               "urn:schemas-upnp-org:service:WANPPPConnection:1"):
+        i = xml.find(st)
+        if i >= 0:
+            c = re.search(r"<controlURL>([^<]+)</controlURL>", xml[i:])
+            if c:
+                svc = (st, urllib.parse.urljoin(loc, c.group(1)))
+                break
+    if svc is None:
+        return "the router has no WANIPConnection service"
+    st, url = svc
+    args = ("<NewRemoteHost></NewRemoteHost><NewExternalPort>%d</NewExternalPort><NewProtocol>UDP</NewProtocol>"
+            "<NewInternalPort>%d</NewInternalPort><NewInternalClient>%s</NewInternalClient><NewEnabled>1</NewEnabled>"
+            "<NewPortMappingDescription>ssbu-relay</NewPortMappingDescription><NewLeaseDuration>%d</NewLeaseDuration>"
+            % (ext or port, port, lan_ip, lease))
+    body = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:AddPortMapping xmlns:u="%s">%s'
+            '</u:AddPortMapping></s:Body></s:Envelope>' % (st, args)).encode()
+    req = urllib.request.Request(url, body, {"Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": '"%s#AddPortMapping"' % st})
+    try:
+        urllib.request.urlopen(req, timeout=5).read()
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", "replace")
+        if "<errorCode>718</errorCode>" in err and (ext or port) == port:      # (the owner's TP-Link: 718 for 39500 itself)
+            return upnp_map(port, lan_ip, lease, port + 10)
+        if lease and "<errorCode>718</errorCode>" not in err:   # (some routers take only permanent mappings: lease 0)
+            return upnp_map(port, lan_ip, 0, ext)
+        return "the router refused the forward (HTTP %d)" % e.code
+    except OSError as e:
+        return "the router could not be asked (%s)" % e
+    UPNP_EXT[0] = ext or port
+    return "UDP %d forwarded to %s:%d by the router (UPnP%s)" % (ext or port, lan_ip, port, ", lease %d s" % lease if lease else ", permanent")
 
 
 class Relay:
@@ -115,6 +177,7 @@ def main():
     ap.add_argument("--secret-file", required=True, help="the key shared with the lobby (its --relay-secret)")
     ap.add_argument("--stats", type=float, default=60.0, help="seconds between statistics lines (0: none)")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--upnp", action="store_true", help="ask the router (UPnP) to forward the port here, every 30 min")
     o = ap.parse_args()
     with open(o.secret_file, "rb") as f:
         secret = f.read().strip()
@@ -128,7 +191,14 @@ def main():
     lan_ip = lan_address(lobby)
     relay.say("relay on UDP %s:%d, lobby %s:%d, LAN address %s" % (o.bind, o.port, lobby[0], lobby[1], lan_ip))
     last_hb = last_sweep = last_stats = 0.0
+    last_upnp = -UPNP_EVERY
     while True:
+        if o.upnp and time.monotonic() - last_upnp >= UPNP_EVERY:
+            last_upnp = time.monotonic()
+            said = upnp_map(o.public_port or o.port, lan_ip)
+            if said != getattr(main, "upnp_said", None):
+                main.upnp_said = said
+                relay.say("router: " + said)
         r, _, _ = select.select([sock], [], [], 0.5)
         now = time.monotonic()
         if r:
@@ -141,7 +211,7 @@ def main():
         if now - last_hb >= HB_EVERY:
             last_hb = now
             try:
-                relay.heartbeat(lobby, o.public_port or o.port, lan_ip, o.port)
+                relay.heartbeat(lobby, o.public_port or UPNP_EXT[0] or o.port, lan_ip, o.port)
             except OSError as e:
                 relay.say("heartbeat to the lobby failed: %s" % e)
         if now - last_sweep >= 10:
