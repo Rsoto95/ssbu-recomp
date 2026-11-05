@@ -544,9 +544,15 @@ static int rbg_after(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) { 
     }
     /* (2026-11-05, a friend: "después de la primera partida mi control solo le deja darle la A") his keyboard is player 1,
      * so his pad is port 2 on his own PC: once the fight's merge ended, port 2 was this override (A only) until the select
-     * screen or 3 minutes. A pad of this PC on port 2 is left alone: its own A closes port 2's card, and its A goes to
-     * port 1 too (nnhid_local_a_elsewhere above). */
-    { int nnpad_present(int player); if (nnpad_present(1)) return 0; }
+     * screen or 3 minutes. A pad of this PC on port 2 keeps its own input, with the A's given added to it.
+     * (2026-11-05, owner: "no pude pasar de la pantalla de results") the first version left such a port alone, but a GameCube
+     * adapter shows all four of its ports as pads (players 1..4) even when only one is plugged in: port 2's A was never
+     * given and the other player's card never closed. */
+    { int nnpad_present(int player);
+      if (nnpad_present(1)) {
+          if (g_rbg_after_hold > 0) { *b |= 1; g_rbg_after_hold--; g_rbg_after_polls++; }
+          return 1;
+      } }
     *b = 0; *lx = *ly = *rx = *ry = 0;
     if (g_rbg_after_hold > 0) { *b = 1; g_rbg_after_hold--; g_rbg_after_polls++; }
     return 1;
