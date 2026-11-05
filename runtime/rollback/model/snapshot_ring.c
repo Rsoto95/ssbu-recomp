@@ -630,7 +630,8 @@ int r1_ring_rebase(long long frame, Ctx *c) {
     rg_sweep(rg_noop);                                    /* marks since the last capture: the copy below takes everything */
     g_rg_ntl = 0;
     collect(c);
-    size_t nwin = g_rg_n1 + g_rg_n2, copied = 0, dropped = 0, freed = 0;
+    size_t nwin = g_rg_n1 + g_rg_n2, copied = 0, dropped = 0, freed = 0, filled = 0;
+    int lazy = ls_lazy_ready();                           /* (2026-11-05, SSBU_LS_LAZY) the windows' pages are copied at their first write (ls_new_base marks them pending) */
     uint8_t *in = calloc(nwin, 1);
     static Extra nx[8192]; int nnx = 0;
     for (int i = 0; i < g_memory_map.range_count; i++) {
@@ -643,7 +644,8 @@ int r1_ring_rebase(long long frame, Ctx *c) {
                 if (w2 ? g_ns2[pi] : g_ns1[pi]) continue;                    /* not simulation (a host stack) */
                 in[w2 ? g_rg_n1 + pi : pi] = 1;
                 if (!sh_commit(sh, cm, pi)) { free(in); g_rg_nomem = 2; unpark(); LOG("r1: RING rebase: commit of the shadow FAILED (out of memory): no rollback ring for the rest of this session\n"); return 0; }
-                memcpy(sh, a, PG); copied++;
+                if (!lazy) memcpy(sh, a, PG);
+                copied++;
                 if (!w2) g_dc[pi] = 0;
             } else if (nnx < 8192) {
                 if (nnx && nx[nnx - 1].a + nx[nnx - 1].n == a) nx[nnx - 1].n += PG;
@@ -686,6 +688,7 @@ int r1_ring_rebase(long long frame, Ctx *c) {
     nvn_r1_cb_save();
     rg_meta_capture(s, c);
     ls_new_base();                                          /* R4: the windows read-only again, the learned set emptied */
+    if (lazy) filled = ls_lazy_fill_unprotected();          /* (lazy) the window pages that did not become read-only: copied now */
     {   /* (2026-10-30) SSBU_RB_AUDIO_OFF for this match too: it was set only at the first base (r1_ring_capture) and cleared at
          * every fight's end (ring_simulation.c), so from the second match of a session on the audio threads ran beside the
          * ring (the sound came back; main thread 9 -> 12.5 ms a frame, every hold and load waited for them): the second match
@@ -694,8 +697,8 @@ int r1_ring_rebase(long long frame, Ctx *c) {
         audio_gate_fight(); }
     unpark();
     g_rg_caps++;
-    LOG("r1: RING rebase: base state (frame %lld) made again in %.1f ms (hold %.1f, copy %.1f): %zu window pages copied into the shadow (%.1f MB), %zu pool buffers freed, %zu shadow pages of pages not committed now dropped; extras %d ranges %.1f MB (%zu pages); %d modules got the mark maps\n",
-        frame, now_ms() - t0, t1 - t0, t2 - t1, copied, copied * (double)PG / 1048576.0, freed, dropped, g_nx, g_xbytes / 1048576.0, g_rg_nx, nmod);
+    LOG("r1: RING rebase: base state (frame %lld) made again in %.1f ms (hold %.1f, copy %.1f): %zu window pages %s the shadow (%.1f MB)%s, %zu pool buffers freed, %zu shadow pages of pages not committed now dropped; extras %d ranges %.1f MB (%zu pages); %d modules got the mark maps\n",
+        frame, now_ms() - t0, t1 - t0, t2 - t1, copied, lazy ? "pending (lazy: copied at their first write) in" : "copied into", copied * (double)PG / 1048576.0, lazy ? (filled ? " + the unprotected ones copied" : "") : "", freed, dropped, g_nx, g_xbytes / 1048576.0, g_rg_nx, nmod);
     return 1;
 }
 /* OPTION 1 (root cause): pages the game commits DURING a fight in the big reservations, outside what the ring saved at its base, are never captured nor restored; after a rollback they hold future

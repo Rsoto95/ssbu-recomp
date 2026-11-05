@@ -47,6 +47,8 @@ int r1_ww_taken(const void *p, size_t n) { (void)p; (void)n; return 0; }
 void r1_nosim(uint64_t a, uint64_t n) { (void)a; (void)n; }
 void r1_read_retry_note(void) {}
 void r1_register_heap(void) { r1_on(); }
+void r1_region_reserved(uint64_t size) { (void)size; }
+void r1_find_heaps_early(void) {}
 #else
 #include <stdio.h>
 #include <stdlib.h>
