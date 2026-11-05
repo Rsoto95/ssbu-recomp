@@ -67,8 +67,6 @@ Python 3.8+, standard library only. No encryption: run it for people you know.""
 import argparse
 import json
 import os
-import hashlib
-import hmac
 import secrets
 import select
 import socket
@@ -97,8 +95,6 @@ MATCH, MATCH_STATE = 20, 21                  # O2 matchmaking (net_relay.c): fin
 RESULT, RESULT_ACK = 22, 23                  # 1.5 ladder: a rollback match's result (net_relay.c, ladder_report.c)
 ARENA, ARENA_STATE = 24, 25                  # 1.6 arena: a queue of players taking turns at 1-on-1 rollback matches
 RB_GROUP = 27                                # 1.7 (2026-11-02): a Battle Arena's group (fighters + spectators, key = the arena)
-RELAY_HB = 32                                # (2026-11-05) a relay near the players says it is up (ssbu_relay.py; 33 is its RELAY)
-RELAY_FOR = 30.0                             # s: a relay whose last RELAY_HB is older is not offered
 AR_OUT, AR_WAITING, AR_TURN, AR_PLAYING = range(4)
 ARENA_TURN_FOR, ARENA_PLAY_FOR, ARENA_WATCH_FOR, ARENA_LIST = 120.0, 900.0, 3.0, 16
 LD_UNRANKED, LD_RANKED, LD_UNKNOWN = 0, 1, 2
@@ -206,17 +202,11 @@ class Arena:
         return list(self.queue) + (list(self.pair) if self.pair else [])
 
 
-def relay_tag(secret, match_id):
-    """(2026-11-05) the tag a relay near the players checks before carrying a match's messages (ssbu_relay.py)"""
-    return hmac.new(secret, b"m" + struct.pack(">Q", match_id), hashlib.sha256).digest()[:8]
-
-
 class Match:
     def __init__(self, host, guest, now):
         self.host, self.guest, self.at = host, guest, now
         self.room_said = False    # the guest was told the host's room is open
         self.rb_seen = set()      # (rollback matches) the players whose RB to the other one the lobby relayed
-        self.relay_id = secrets.randbits(64)      # (2026-11-05) this match on the relay near the players
 
     def other(self, c):
         return self.guest if c is self.host else self.host
@@ -238,8 +228,6 @@ class Lobby:
         self.arenas = {}          # 1.6: part (build, code) -> Arena
         self.arena_streak = arena_streak
         self.search_for, self.match_for = search_for, match_for
-        self.relay_secret = None  # (2026-11-05) --relay-secret: the key a relay near the players signs its RELAY_HB with
-        self.relay = None         # its last RELAY_HB: {"ip", "port", "lan_ip", "lan_port", "seen"} (monotonic)
         self.by_at, self.by_ip, self.rooms = {}, {}, {}
         self.next_ip = SUBNET + 2
         self.ladder_said = {}     # match seed -> outcome already logged
@@ -343,8 +331,6 @@ class Lobby:
         if len(p) < 4 or p[:2] != b"SU" or p[2] != PROTO:
             return
         kind = p[3]
-        if kind == RELAY_HB:
-            return self.on_relay_hb(p, at, now)
         c = self.by_at.get(at)
         if kind == JOIN:
             return self.on_join(p, at, c, now)
@@ -679,34 +665,7 @@ class Lobby:
             else:
                 a_ip, a_port = struct.unpack(">I", socket.inet_aton(o.at[0]))[0], o.at[1]
             out += b"A" + struct.pack(">IH", a_ip, a_port)
-        rl = self.relay
-        if (m is not None and c.kind == KIND_ROLLBACK and state == MS_MATCHED and rl is not None and self.relay_secret
-                and now - rl["seen"] <= RELAY_FOR):
-            # (2026-11-05) 'R' + the relay near the players (its LAN address for a game in the relay's own house), the match id
-            # and its tag: the games measure the round trips through it and use it when they beat the lobby's (net_relay.c rbr_*)
-            if c.at[0] == rl["ip"] and rl["lan_ip"]:
-                r_ip, r_port = rl["lan_ip"], rl["lan_port"]
-            else:
-                r_ip, r_port = struct.unpack(">I", socket.inet_aton(rl["ip"]))[0], rl["port"]
-            out += b"R" + struct.pack(">IHQ", r_ip, r_port, m.relay_id) + relay_tag(self.relay_secret, m.relay_id)
         self.send(out, c.at)
-
-    def on_relay_hb(self, p, at, now):
-        """RELAY_HB (2026-11-05, ssbu_relay.py): unix time u64, public port u16, LAN address u32, LAN port u16, then the first
-        16 bytes of HMAC-SHA256(secret, those 16 bytes). The relay's public address is where it comes from."""
-        if not self.relay_secret or len(p) < 36:
-            return
-        body, tag = p[4:20], p[20:36]
-        if not hmac.compare_digest(hmac.new(self.relay_secret, body, hashlib.sha256).digest()[:16], tag):
-            self.stats["dropped"] += 1
-            return
-        ts, port, lan_ip, lan_port = struct.unpack(">QHIH", body)
-        if abs(time.time() - ts) > 120:
-            return
-        new = self.relay is None or (self.relay["ip"], self.relay["port"]) != (at[0], port) or now - self.relay["seen"] > RELAY_FOR
-        self.relay = {"ip": at[0], "port": port, "lan_ip": lan_ip, "lan_port": lan_port, "seen": now}
-        if new:
-            self.say("relay near the players up at %s:%d (LAN %s:%d)" % (at[0], port, socket.inet_ntoa(struct.pack(">I", lan_ip)), lan_port))
 
     def match_end(self, c, state, why):
         """c's search or match is over (state: MS_TIMEOUT, MS_PEER_LEFT, MS_TOGETHER, MS_EXPIRED)."""
@@ -1051,7 +1010,6 @@ def main():
     ap.add_argument("--ladder-db", default="", help="the ranked ladder's sqlite file (ladder.py; empty: no ladder)")
     ap.add_argument("--ladder-open", action="store_true", help="ladder: any new player is ranked the first time it is seen (default: by invitation only)")
     ap.add_argument("--ladder-invite", metavar="NAME", help="ladder: print a one-use invitation code for a player called NAME, and exit")
-    ap.add_argument("--relay-secret", default="", help="a file with the key of the relay near the players (ssbu_relay.py); empty: no relay")
     ap.add_argument("--arena-streak", type=int, default=3, help="arena: wins in a row after which the winner goes to the back of the queue too (default 3, 0: no limit)")
     ap.add_argument("--ladder-stages", default="", help="ladder: the legal stages, comma-separated stage ids (match block + 0x420, hex or decimal; empty: any)")
     o = ap.parse_args()
@@ -1077,10 +1035,6 @@ def main():
             pass
     sock.bind((o.bind, o.port))
     lobby = Lobby(sock, o.verbose, o.search_secs, o.match_secs, ladder, o.arena_streak)
-    if o.relay_secret:
-        with open(o.relay_secret, "rb") as f:
-            lobby.relay_secret = f.read().strip()
-        lobby.say("relay near the players: RELAY_HB accepted (key from %s)" % o.relay_secret)
     lobby.say("lobby on UDP %s:%d (protocol SU %d)" % (o.bind, o.port, PROTO))
     if ladder is not None:
         lobby.say("ladder: %s (%s)" % (o.ladder_db, "open sign-up" if o.ladder_open else "by invitation"))
