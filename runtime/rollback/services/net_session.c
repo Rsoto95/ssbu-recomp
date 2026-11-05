@@ -1282,6 +1282,11 @@ void rbn_report(FILE *o, long long frames) {
         long long dtx, drx, ltx, lrx; int dn; net_rb_path_stats(&dtx, &drx, &ltx, &lrx, &dn);
         fprintf(o, "[rbnet] report: path (whole session): straight to the opponent sent %lld, received %lld; through the lobby sent %lld, received %lld; direct path answering now: %s\n",
                 dtx, drx, ltx, lrx, dn ? "yes" : "NO"); }
+    {   void net_rb_relay_stats(long long *tx, long long *rx, int *rtt, int *peer_rtt, int *lobby, int *peer_lobby, int *now_on);
+        long long rtx, rrx; int r, pr, l, pl, on; net_rb_relay_stats(&rtx, &rrx, &r, &pr, &l, &pl, &on);
+        if (r >= 0 || rtx || rrx)
+            fprintf(o, "[rbnet] report: relay near the players: sent %lld, received %lld; round trips: this game %d ms + the other %d ms through it, %d + %d ms through the lobby; in use now: %s\n",
+                    rtx, rrx, r, pr, l, pl, on ? "yes" : "no"); }
     if (g_spec) spec_report(o, frames);                 /* (2026-11-02) */
     else if (g_rbs_fighter) fprintf(o, "[arena] report: this fighter sent the arena's group %lld messages (pads every pass, answers to NACKs), received %lld; its pad history up to frame %lld\n", (long long)g_rbs_tx, (long long)g_rbs_rx, rbs_hist_upto());
     fflush(o);

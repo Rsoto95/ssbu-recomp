@@ -650,6 +650,98 @@ static void rbd_rx(const uint8_t *b, int n, const struct sockaddr_in *from) {   
     rbn_rx(b + 8, n - 8);
 }
 int net_rb_direct(void) { return g_rbd_last_rx && ms_now() - (uint64_t)g_rbd_last_rx < RBD_STALE_MS; }    /* 1 = the match goes player to player now */
+
+/* (2026-11-05, owner: a relay nearer the players than the Oracle VM in Querétaro: "hazlo pues") A match that cannot go player to
+ * player went through the lobby: ~80 ms to the VM from each player, ~157 ms round trip. A RELAY (tools/net/ssbu_relay.py, on a
+ * machine near the players) tells the lobby it is up (RELAY_HB, signed); the lobby adds to MATCH_STATE 'R' + the relay's
+ * address u32, port u16, match id u64, tag u64 (the relay checks the tag, so only the lobby's matches use it). Both games then:
+ *   33 RELAY  game -> relay: 'S' 'U' 1 33 | match id u64 | tag u64 | own lobby address u32 | kind u8 | data
+ *             relay -> game: 'S' 'U' 1 33 | source lobby address u32 (0 = the relay) | kind u8 | data
+ *   kind 0 hello (data: send time u64, echoed back by the relay: this game's round trip to it), 1 a rollback message (to the
+ *   other game), 2 path info (to the other game: this game's round trips to the relay and to the lobby, u16 ms each).
+ * The relay is used when both round trips through it (this game's + the other's) are shorter than through the lobby by
+ * RBR_MARGIN_MS; then the lobby carries only 1 message in 30 (as with the direct path). A direct path still comes first; a
+ * relay that stops answering (RBD_STALE_MS) puts the messages back on the lobby. SSBU_RELAY=0: never used. */
+#define T_RELAY 33
+#define RBR_MARGIN_MS 10
+static SRWLOCK g_rbr_lock = SRWLOCK_INIT;
+static struct sockaddr_in g_rbr_at;                     /* (g_rbr_lock) the relay; sin_port 0 = none */
+static uint64_t g_rbr_id, g_rbr_tag; static uint32_t g_rbr_peer;
+static volatile LONG64 g_rbr_peer_rx_ms, g_rbr_info_ms, g_rbr_tx, g_rbr_rx;
+static volatile LONG g_rbr_rtt = -1, g_rbr_peer_rtt = -1, g_rbr_peer_lobby = -1, g_rbr_said, g_rbr_used_said;
+static uint64_t g_rbr_hello_t, g_rbr_info_t;
+static int rbr_off(void) { static int off = -1; if (off < 0) { const char *e = getenv("SSBU_RELAY"); off = e && e[0] == '0'; } return off; }
+static void rbr_set(uint32_t peer, uint32_t ip, uint16_t port, uint64_t id, uint64_t tag) {   /* (client thread) MATCH_STATE 'R' */
+    if (rbr_off()) return;
+    AcquireSRWLockExclusive(&g_rbr_lock);
+    int same = g_rbr_id == id && g_rbr_at.sin_port == htons(port);
+    memset(&g_rbr_at, 0, sizeof g_rbr_at);
+    g_rbr_at.sin_family = AF_INET; g_rbr_at.sin_addr.s_addr = htonl(ip); g_rbr_at.sin_port = htons(port);
+    g_rbr_id = id; g_rbr_tag = tag; g_rbr_peer = peer;
+    ReleaseSRWLockExclusive(&g_rbr_lock);
+    if (!same) {
+        char a[16];
+        InterlockedExchange64(&g_rbr_peer_rx_ms, 0); InterlockedExchange64(&g_rbr_info_ms, 0);
+        InterlockedExchange(&g_rbr_rtt, -1); InterlockedExchange(&g_rbr_peer_rtt, -1); InterlockedExchange(&g_rbr_peer_lobby, -1);
+        InterlockedExchange(&g_rbr_said, 0); InterlockedExchange(&g_rbr_used_said, 0); g_rbr_hello_t = g_rbr_info_t = 0;
+        say("match: a relay near the players is offered by the lobby: %s:%u", ip_text(ip, a), port);
+    }
+}
+static int rbr_tx(int kind, const void *d, int n) {     /* 1 = sent */
+    struct sockaddr_in at; uint64_t id, tag;
+    AcquireSRWLockShared(&g_rbr_lock); at = g_rbr_at; id = g_rbr_id; tag = g_rbr_tag; ReleaseSRWLockShared(&g_rbr_lock);
+    if (!at.sin_port || n < 0 || n > 1400) return 0;
+    uint8_t b[1500];
+    hdr(b, T_RELAY); s64(b + 4, id); s64(b + 12, tag); s32(b + 20, g_ip); b[24] = (uint8_t)kind;
+    if (n) memcpy(b + 25, d, (size_t)n);
+    tx(b, 25 + n, &at);
+    return 1;
+}
+/* 1 = this match's messages go through the relay now: both games' round trips through it beat the lobby's, and the other
+ * game's messages are coming through it */
+static int rbr_better(void) {
+    LONG r = g_rbr_rtt, pr = g_rbr_peer_rtt, pl = g_rbr_peer_lobby, l = g_ping;
+    uint64_t now = ms_now();
+    if (r < 0 || pr < 0 || pl < 0 || l < 0 || !g_rbr_info_ms || now - (uint64_t)g_rbr_info_ms > 5000) return 0;
+    return r + pr + RBR_MARGIN_MS < l + pl;
+}
+static int rbr_flowing(void) { return g_rbr_peer_rx_ms && ms_now() - (uint64_t)g_rbr_peer_rx_ms < RBD_STALE_MS; }
+int net_rb_relay(void) { return rbr_better() && rbr_flowing(); }     /* 1 = the match goes through the relay near the players now */
+void net_rb_relay_stats(long long *tx, long long *rx, int *rtt, int *peer_rtt, int *lobby, int *peer_lobby, int *now_on) {
+    *tx = g_rbr_tx; *rx = g_rbr_rx; *rtt = g_rbr_rtt; *peer_rtt = g_rbr_peer_rtt; *lobby = g_ping; *peer_lobby = g_rbr_peer_lobby; *now_on = net_rb_relay();
+}
+static void rbr_tick(uint64_t t) {                      /* (client thread) hello every 500 ms, path info every 1 s, while a relay is set */
+    if (!g_rbr_at.sin_port || !g_rb_match_peer) return;
+    if (t - g_rbr_hello_t >= 500) { uint8_t d[8]; s64(d, t); rbr_tx(0, d, 8); g_rbr_hello_t = t; }
+    if (t - g_rbr_info_t >= 1000 && g_rbr_rtt >= 0 && g_ping >= 0) {
+        uint8_t d[4]; s16(d, (uint16_t)(g_rbr_rtt > 65535 ? 65535 : g_rbr_rtt)); s16(d + 2, (uint16_t)(g_ping > 65535 ? 65535 : g_ping));
+        rbr_tx(2, d, 4); g_rbr_info_t = t;
+    }
+}
+static void rbr_rx(const uint8_t *b, int n) {           /* (client thread) a RELAY packet from the relay's address */
+    if (n < 9 || !g_joined) return;
+    uint32_t src = g32(b + 4); int kind = b[8]; uint64_t now = ms_now();
+    if (kind == 0 && src == 0 && n >= 17) {
+        uint64_t sent = g64(b + 9);
+        if (sent <= now && now - sent < 5000) InterlockedExchange(&g_rbr_rtt, (LONG)(now - sent));
+        if (!g_rbr_said) { InterlockedExchange(&g_rbr_said, 1); say("match: the relay answers: %ld ms round trip from this game (the lobby: %ld ms)", (long)g_rbr_rtt, (long)g_ping); }
+        return;
+    }
+    if (!src || src != g_rbr_peer || src != g_rb_match_peer) return;
+    if (kind == 2 && n >= 13) {
+        InterlockedExchange(&g_rbr_peer_rtt, g16(b + 9)); InterlockedExchange(&g_rbr_peer_lobby, g16(b + 11)); InterlockedExchange64(&g_rbr_info_ms, (LONG64)now);
+        return;
+    }
+    if (kind == 1 && n > 9) {
+        InterlockedExchange64(&g_rbr_peer_rx_ms, (LONG64)now); InterlockedIncrement64(&g_rbr_rx);
+        if (!g_rbr_used_said && rbr_better()) { InterlockedExchange(&g_rbr_used_said, 1);
+            say("match: through the RELAY near the players: ~%ld ms round trip (this game %ld + the other %ld) instead of ~%ld through the lobby",
+                (long)(g_rbr_rtt + g_rbr_peer_rtt), (long)g_rbr_rtt, (long)g_rbr_peer_rtt, (long)(g_ping + g_rbr_peer_lobby)); }
+        g_rb_peer = src;
+        rbn_rx(b + 9, n - 9);
+    }
+}
+
 int net_rb_send(const void *p, int n) {
     if (!net_rb_ready() || n <= 0 || n > 1400) return 0;
     uint32_t dst = nnldn_other_ip(), room = dst;
@@ -666,6 +758,11 @@ int net_rb_send(const void *p, int n) {
             tx(b, 8 + n, &at); InterlockedIncrement64(&g_rbd_tx);
             static unsigned keep;                       /* (the other way works too: the lobby is not needed; 1 in 30 still goes through it, so the */
             if (net_rb_direct() && ++keep % 30) return 1;   /* room sees the match being played: net_minilobby.c rb_seen / ml_arena_playing) */
+        }
+        if (!net_rb_direct() && dst == g_rbr_peer && rbr_better()) {     /* (2026-11-05) the relay near the players */
+            if (rbr_tx(1, p, n)) InterlockedIncrement64(&g_rbr_tx);
+            static unsigned keep2;
+            if (rbr_flowing() && ++keep2 % 30) return 1;
         }
     }
     hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
@@ -1762,8 +1859,12 @@ static void mm_state(const uint8_t *p, int n, uint64_t t) {    /* (client thread
     int rbk = g_mm.kind == 2;
     if (rbk && (st == MM_MATCHED || st == MM_TOGETHER) && g_mm.peer) g_rb_match_peer = g_mm.peer;
     int direct_at = rbk && st == MM_MATCHED && g_mm.peer && n >= 49 + 7 && p[49] == 'A';
+    int ro = direct_at ? 56 : 49;                       /* (2026-11-05) 'R' + the relay near the players (after 'A' when there is one) */
+    int relay_at = rbk && st == MM_MATCHED && g_mm.peer && n >= ro + 23 && p[ro] == 'R';
     ReleaseSRWLockExclusive(&g_mm_lock);
     if (direct_at) rbd_set(g32(p + 7), g32(p + 50), g16(p + 54));     /* (the opponent's address: the match goes player to player) */
+    if (relay_at) rbr_set(g32(p + 7), g32(p + ro + 1), g16(p + ro + 5), g64(p + ro + 7), g64(p + ro + 15));
+    else if (rbk && st == MM_MATCHED && was != MM_MATCHED) { AcquireSRWLockExclusive(&g_rbr_lock); g_rbr_at.sin_port = 0; ReleaseSRWLockExclusive(&g_rbr_lock); }
     if (rbk && st == MM_MATCHED && was != MM_MATCHED) {          /* (2026-11-03) every rollback pairing says whether the lobby gave the address */
         char a[16];
         if (direct_at) say("match: the lobby gave the opponent's address %s:%u (direct path %s now)", ip_text(g32(p + 50), a), g16(p + 54), net_rb_direct() ? "answering" : "not answering yet");
@@ -2261,6 +2362,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         if (g_joined && t - last_tick >= 50) { peers_tick(t); last_tick = t; }
         if (g_joined && t - (uint64_t)g_rooms_wanted < 5000 && t - g_rooms_sent >= 2000) rooms_ask(t);     /* O1: while someone looks */
         if (g_joined) mm_tick(t);                                                                         /* O2 */
+        if (g_joined) rbr_tick(t);                                                                        /* the relay near the players (2026-11-05) */
         if (g_joined) ladder_tick(t);                                                                     /* ladder: a match result until acknowledged */
         if (g_joined) arena_tick(t);                                                                      /* arena (lobby 1.6) */
         if (g_joined) tourney_tick(t);                                                                    /* tournaments (lobby 1.7) */
@@ -2268,7 +2370,10 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         int flen = sizeof from;
         int n = recvfrom(g_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
         if (n < 4 || buf[0] != 'S' || buf[1] != 'U' || buf[2] != PROTO) continue;
-        if (!same_at(&from, &g_lobby)) { if (buf[3] == T_RB_DIRECT) rbd_rx(buf, n, &from); else if (g_joined && g_direct) from_player(buf, n, &from); continue; }
+        if (!same_at(&from, &g_lobby)) {
+            if (buf[3] == T_RELAY && g_rbr_at.sin_port && same_at(&from, &g_rbr_at)) rbr_rx(buf, n);
+            else if (buf[3] == T_RB_DIRECT) rbd_rx(buf, n, &from); else if (g_joined && g_direct) from_player(buf, n, &from);
+            continue; }
         switch (buf[3]) {
         case T_DATA:
             if (n >= 16 && g_joined) {
