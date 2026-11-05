@@ -1803,6 +1803,43 @@ static void gc_pro_notice(void) {
         break;
     }
 }
+/* (2026-11-05, owner: "si alguien dice que no también tiene que tener un mensaje en el juego") run.py could not allow the game
+ * in the Windows Firewall (the administrator prompt refused, or a block rule left): SSBU_FIREWALL = blocked / missing. Said at
+ * the top 25 s after the start, and at the bottom in each online match that still goes through the server 10 s after its
+ * start (the other player cannot reach this PC directly: higher ping). SSBU_FIREWALL unset: never. */
+static const char k_fw_text[] =
+    "Windows Firewall is blocking the game: other players cannot reach you directly, so matches go through the server (higher ping).\n"
+    "Fix: close the game, open it with \"Play SSBU.bat\" and press YES when Windows asks for permission.\n"
+    "El Firewall de Windows bloquea el juego: tus partidas van por el servidor (mas ping). Cierra el juego, abrelo con\n"
+    "\"Play SSBU.bat\" y presiona SI cuando Windows pida permiso.";
+#ifdef _WIN32
+extern "C" int rbn_started(void);
+extern "C" int net_rb_direct(void);
+#endif
+static void firewall_notice(void) {
+    static int state = -1; static ULONGLONG t0, next, match_t0; static int start_done, match_said;
+    if (state < 0) { const char *e = getenv("SSBU_FIREWALL"); state = e && (!strcmp(e, "blocked") || !strcmp(e, "missing")); }
+    if (!state) return;
+    ULONGLONG t = GetTickCount64();
+    if (!t0) t0 = t;
+    if (t < next) return;
+    next = t + 1000;
+    if (!start_done && t - t0 >= 25000 && !g_open && !popup_on()) {
+        start_done = 1;
+        menu_popup("Windows Firewall", k_fw_text);
+        printf("menu: note: the Windows Firewall does not allow the game (%s): told on screen\n", getenv("SSBU_FIREWALL")); fflush(stdout);
+    }
+#ifdef _WIN32
+    if (!rbn_started()) { match_t0 = 0; match_said = 0; return; }
+    if (!match_t0) match_t0 = t;
+    if (!match_said && t - match_t0 >= 10000 && !net_rb_direct() && !toast_on()) {
+        match_said = 1;
+        menu_toast("Firewall blocks the game: match via server (more ping). Next start press YES.\n"
+                   "El Firewall bloquea el juego: partida por el servidor. Al abrir presiona SI.", 12000);
+        printf("menu: note: this match goes through the server and the Windows Firewall does not allow the game: told on screen\n"); fflush(stdout);
+    }
+#endif
+}
 static void update_and_restart(void);
 /* (2026-11-02) F1 > About > "Check for updates": GitHub's newest commit of the project (the repository "Play SSBU.bat"
  * updates from) asked NOW, on a thread of its own (winhttp.dll loaded when pressed: no new link library), and compared with
@@ -2220,6 +2257,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
     update_check();
     gc_pro_notice();
+    firewall_notice();
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif

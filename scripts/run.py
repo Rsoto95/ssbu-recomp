@@ -383,7 +383,7 @@ def ensure_firewall(exe, build, gini):
     try:                                              # a refusal: asked again after a day, not never
         with open(refused, encoding='utf-8') as f:
             if os.path.normcase(f.read().strip()) == os.path.normcase(exe) and time.time() - os.path.getmtime(refused) < 86400:
-                return
+                return 'blocked' if st[1] else 'missing'
     except OSError:
         pass
     if st[1]:
@@ -417,6 +417,7 @@ def ensure_firewall(exe, build, gini):
             f.write(exe)
     except OSError:
         pass
+    return 'blocked' if st and st[1] else 'missing'      # (2026-11-05, owner) the game says it on screen (menu.cpp firewall_notice)
 
 
 def main():
@@ -624,7 +625,9 @@ def main():
         k, _, v = kv.partition('=')
         env[k] = v
     if a.play and os.name == 'nt' and not (a.linux or a.mac) and env.get('SSBU_ONLINE', '') not in ('off', '0', 'no', 'false'):
-        ensure_firewall(os.path.abspath(exe), a.build, gini)
+        fw = ensure_firewall(os.path.abspath(exe), a.build, gini)
+        if fw:
+            env['SSBU_FIREWALL'] = fw                 # 'blocked' / 'missing': the game tells the player on screen
     os.makedirs(a.userdata, exist_ok=True)
     os.makedirs(os.path.join(a.build, 'cache'), exist_ok=True)      # the runtime creates ..\cache\vk below it but not the folder itself (found 2026-10-13: with SSBU_VK_PREP=0 on a clean build nothing was saved)
     cmd = [exe, os.path.join(a.build, 'binaries', state.get('game_version', '13.0.4'), 'main.elf'), str(a.seconds)]
