@@ -22,16 +22,17 @@ Online play is experimental and ON by default: the game joins the project's publ
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).
 
-**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller"). It is the name the
-game and the other players see (`player_name` in `config\graphics.ini`); empty = your Windows user name.
-Used from the next start.
+**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller"; on Linux, "Type in a
+dialog"). It is the name the game and the other players see (`player_name` in `config\graphics.ini`); empty = your
+login name (the Windows user name on Windows). Used from the next start.
 
 ## The easy way: the F1 menu
 
 Press **F1** (or the controller's Home button) -> **Experimental**. Online play is already ON; you can pick another mode:
 **Lobby server** (recommended: the project's public lobby, `opensmash-lobby.duckdns.org:39500`, already filled in),
 **Same network (LAN)**, **Host a room** (shows a ROOM CODE with a Copy button) or **Join with a code**.
-Press **Restart the game now**, then use the game's own Local Wireless: Create Room / Rooms List.
+Press **Restart the game now**, then use the game's own Local Wireless: Create Room / Rooms List. (The Linux launcher,
+`./play.sh`, starts the game with `--play`, so the same settings are applied.)
 
 The rest of this page is the same by hand (environment variables or graphics.ini keys).
 
@@ -64,8 +65,9 @@ Joiner:
 
 The host's router must let the port in:
 
-- UPnP is tried automatically. Set `online_upnp = off` to disable it.
-- Otherwise, forward UDP port 39500 to the host PC.
+- UPnP is tried automatically on Windows; set `online_upnp = off` to disable it. On Linux UPnP is a stub: forward
+  UDP port 39500 to the host PC by hand.
+- If UPnP fails on Windows, forward UDP port 39500 to the host PC.
 - If it still fails, the joiner's log prints "your code". The host puts that code in `online_peer`, and both restart. Both sides then open their NAT at the same time.
 - If nothing works, use a lobby server (way 3).
 
@@ -132,22 +134,30 @@ sees rooms of its own build.
 ## Status and limits
 
 - Experimental.
-- Tested with two game instances on one PC: lobby, LAN and host/join modes. Full matches ran with both players' inputs, and the fighters' states were identical frame by frame on both sides.
-- NOT yet tested between two PCs, over the internet, against a real UPnP router, or with STUN.
+- Tested on Linux (2026-11-04) against a Windows player, over the internet and on the same LAN: Local Wireless Create
+  Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches,
+  no desync or crash.
+- Earlier, tested with two game instances on one PC: lobby, LAN and host/join modes. Full matches ran with both players'
+  inputs, and the fighters' states were identical frame by frame on both sides.
+- NOT yet tested between two Windows PCs, against a real UPnP router, or with STUN. On Linux, UPnP is a stub: forward
+  UDP port 39500 by hand.
 - No encryption and no authentication. Play only with people you know.
-- By default it uses the game's own delay-based netcode. **Rollback netcode** (experimental) is an option, see below.
+- Rollback netcode is on by default (since 2026-11-04). The game's own delay-based netcode is the fallback when it is
+  off or the snapshot ring cannot start, see below.
 - For now the room code is shown only in the log, on lines starting with `[online]`.
-- On first start, Windows may ask to allow the game through the firewall. LAN and host modes need it.
+- On first start, Windows may ask to allow the game through the firewall. LAN and host modes need it. On Linux, allow
+  the game's UDP ports in your firewall if you use one.
 
 ## Rollback netcode (experimental)
 
 Smooth fights at high ping: each game runs the match locally and only the players' inputs travel; a late input rolls the
 game back a few frames and replays them, instead of slowing both players down.
 
-1. **Switch it on:** in the game, **F1 -> Experimental -> Rollback netcode: ON**, then restart the game (Play SSBU.bat).
-   Nothing extra to build: rollback runs on the normal game build (the game saves the fight by learning, at the start of
-   each fight, which memory it writes). An older install's second copy for rollback (`ssbu_game_r1.dll`,
-   `ssbu_native_rb.exe`, the folder `nro_bin_eh_o2r1`) is not used any more and can be deleted.
+1. **It is on by default.** F1 -> Experimental -> Rollback netcode switches it off or on; **Restart the game now** (or
+   the next Play SSBU.bat / `./play.sh`) uses the change. Nothing extra to build: rollback runs on the normal game build
+   (the game saves the fight by learning, at the start of each fight, which memory it writes). An older install's second
+   copy for rollback (`ssbu_game_r1.dll`, `ssbu_native_rb.exe`, the folder `nro_bin_eh_o2r1`) is not used any more and
+   can be deleted.
 2. **Both players** need it on, the same game update (13.0.4 or 13.0.5) and the same version of this project.
 3. **Smash (versus) stays local:** without a room code a Smash fight is a normal local fight (friends, CPUs), rollback
    on or not. Finding an opponent will come with the game's own Online menu (Quickplay), in progress.
@@ -166,11 +176,13 @@ Input delay is chosen from the best measured round trip: 1 frame below about 117
 **Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
 because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**
 brings the sound back (graphics.ini `fight_sound = on`), at the cost of some stutter and, rarely, a crash. It is each
-player's own choice and is used from the next match.
+player's own choice and is used from the next match. On Linux the same switch exists; the launcher holds the audio
+threads by default, and turning sound on has the same risk.
 
-Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
-Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between
-real players over the internet. Please report how it feels.
+Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping).
+Rollback works on Windows and Linux; tested on Linux against Windows over the internet and on the same LAN in several
+matches (2026-11-04, no desyncs or crashes), and earlier between two games on one PC with simulated 150 ms ping and
+loss (0 desyncs). Please report how it feels.
 
 
 ## Credit

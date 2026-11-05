@@ -254,7 +254,8 @@ The Linux build runs the same state save/restore and ring, with five platform su
     through the cooperative gate from H1 to H2 was tried and reverted: the gate parks workers inside jobs and stalled
     the frame rate. `fault_recovery_posix.c` absorbs supported network-thread
     faults like other guest faults and taints the pass for a safe-point reload. This is mitigation, not a complete
-    network-state exclusion: network heap objects can still rewind, and full two-instance stability is unverified.
+    network-state exclusion: network heap objects can still rewind. Full two-instance stability is still unverified,
+    but the online matches below did not hit it.
     These network-thread exclusions, wait exceptions and thread-slot reuse are Linux-only (`__linux__`); Windows is
     unchanged. `SSBU_RB_NET_THREAD_EXCLUDE=0` disables the exclusion and rewinds network threads like Windows; the
     network wait exception is then off too.
@@ -265,12 +266,17 @@ The Linux build runs the same state save/restore and ring, with five platform su
 ring's behavior, wire format and rollback algorithm are unchanged; only the way threads are held, pages are found and
 faults are recovered differs.
 
-Known limit (the plan's stop conditions 1/2): the offline simulation is exact for 1,698 real frames with a matching
-reference (same `SSBU_FIXED_SEED`, 51 re-run runs / 76 frames all equal). Pia/NetSystem stacks and registers are excluded,
-but their heap objects can still rewind; a two-instance run crashed on NetSystem after a load. The wait exception and
-restored fault absorption need a two-instance retest. Another risk is a load that restores a state whose guest
-object names a job fiber/object that was not brought back (the fiber moved to another host fiber between the capture
-and the load). The re-run then faults in a cascade; the signal handler absorbs the plain moves, but no `nro_catch_call`
-frame is on the current host stack to cut it back to, so after 4,096 faults the net lets go. A catch record on another
-fiber's stack cannot be used (cross-stack `longjmp`). These are the port's stop conditions; the fallback is delay-based
-online play (`SSBU_RB_NET_NOROLLBACK=1`) or Rollback off in F1.
+**Status (2026-11-04).** The Linux build was played online against a Windows player, over the internet and on the same
+LAN: Local Wireless Create Room and Battle Arenas, with delay-based and rollback netcode. Several matches completed
+with no desync or crash. This is the first reported real online test of the port.
+
+**Remaining risk.** The offline simulation is exact for 1,698 real frames with a matching reference (same
+`SSBU_FIXED_SEED`, 51 re-run runs / 76 frames all equal). Pia/NetSystem stacks and registers are excluded, but their
+heap objects can still rewind; the earlier two-instance run crashed on NetSystem after a load, a case not seen in the
+online matches. The wait exception and restored fault absorption were not seen to fail online, but the automated
+two-instance retest has not been repeated. Another risk is a load that restores a state whose guest object names a job fiber/object
+that was not brought back (the fiber moved to another host fiber between the capture and the load). The re-run then
+faults in a cascade; the signal handler absorbs the plain moves, but no `nro_catch_call` frame is on the current host
+stack to cut it back to, so after 4,096 faults the net lets go. A catch record on another fiber's stack cannot be used
+(cross-stack `longjmp`). These are the port's known limits; the fallback is delay-based online play
+(`SSBU_RB_NET_NOROLLBACK=1`) or Rollback off in F1.
