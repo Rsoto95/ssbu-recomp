@@ -745,6 +745,9 @@ void rbg_report(void) {
         g_rg_poolfix ? "on" : "OFF", g_rg_short_n, g_rg_freed_slots, g_rg_skip_full);
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
     LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load); loads refused, a thread still running (pub1) %lld\n", g_guest_threads.audio_other, g_guest_threads.mismatch, g_rg_refused);
+    { extern long long g_nex_holds, g_nex_waits, g_nex_busy, g_nex_forced; extern double g_nex_wait_ms, g_nex_wait_max;
+      if (g_nex_holds || g_nex_busy) LOG("r1: RB NET report: NEX threads (the arena's connection) held at loads %lld; of them %lld had to be waited for (%.2f ms mean, %.2f ms longest); still running after 4 ms %lld (load refused), loaded anyway after 3 refusals %lld (since the process start)\n",
+          g_nex_holds, g_nex_waits, g_nex_waits ? g_nex_wait_ms / g_nex_waits : 0.0, g_nex_wait_max, g_nex_busy, g_nex_forced); }
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_guest_fibers.live_skipped, g_guest_fibers.live_seen, g_guest_fibers.teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);
     { void nnunwind_catch_stats(long long *, long long *, long long *, long long *, long long *); long long l, d, cr, fu, mp; nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
       LOG("r1: RB NET report: catch table (hs15): %lld live records, %lld removed slots, %lld puts found no free slot in their window, %lld table full, longest probe %lld; dead records dropped at loads %lld (host fiber stacks known %zu)\n", l, d, cr, fu, mp, g_rgc_dead, g_nbf); }
@@ -760,4 +763,12 @@ void rbg_report(void) {
     rbg_dist("main-thread CPU per tick with rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 1);
     rbg_dist("main-thread CPU per tick without rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 0);
     rbn_report(g_log, g_rbg_real);
+}
+/* (2026-11-05) display.c: 1 while an agreed online rollback match runs with this file's 60 Hz pacing (rbg_step: the
+ * schedule plus the time sync's extra wait); the display then does not hold the game for its own refresh tick as well.
+ * SSBU_RB_PACE_ONLY=0: both clocks as before. */
+int rbg_owns_pacing(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_RB_PACE_ONLY"); on = !(e && e[0] == '0'); }
+    return on && g_rbg_pace > 0 && g_rbg_in_match == 1;
 }
