@@ -49,6 +49,7 @@ def run(name, skip, lite, last, ref_hash):
            'SSBU_DETERMINISTIC=1', 'SSBU_FIGHT_HASH=' + hashf, 'SSBU_R1_LOG=' + r1, 'SSBU_SHOT_FIGHT=' + SHOTS,
            'SSBU_SHOT_DIR=' + d, 'SSBU_LS_X_WW=1', 'SSBU_RB_AUDIO_OFF=1', 'SSBU_LATENCY=low',
            'SSBU_RB_SIM_SKIP=%d' % skip, 'SSBU_RB_SIM_LITE=%d' % lite, 'SSBU_RB_NET_LASTLITE=%d' % last]
+    env += os.environ.get('RBLITE_EXTRA', '').split()     # more NAME=value settings for every run (e.g. SSBU_RB_SIM_PAGES=1)
     if name != 'ref':
         env.append('SSBU_RB_SIM=10,7')      # a rollback every 10 real passes, k = 1..7 in turn
     cmd = [PY, os.path.join(REPO, 'scripts', 'run.py'), '--build', BUILD, '--userdata', os.path.join(BUILD, 'test_saves', 'a'),
