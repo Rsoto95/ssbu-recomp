@@ -1517,7 +1517,9 @@ void rbs_rx(uint32_t src, const uint8_t *p, int n) {
         if (m.flags & 1) snprintf(why, sizeof why, "the spectator at seat %d watches this match with the game's own netcode", m.seat);
         else if (m.h.proto != RBH_PROTO) snprintf(why, sizeof why, "the spectator at seat %d has another version of the rollback (protocol %d here, %d there)", m.seat, RBH_PROTO, m.h.proto);
         else if (m.h.game_build != g_rbs_expect.h.game_build) snprintf(why, sizeof why, "the spectator at seat %d has another game version (build %d here, %d there)", m.seat, g_rbs_expect.h.game_build, m.h.game_build);
-        else if (m.h.exe_stamp != g_rbs_expect.h.exe_stamp) snprintf(why, sizeof why, "the spectator at seat %d runs another build of the PC port (exe stamp %08x here, %08x there)", m.seat, g_rbs_expect.h.exe_stamp, m.h.exe_stamp);
+        /* (2026-11-05) the exe stamp is NOT a reason to refuse (a note only, as for the other fighter): a Linux / macOS game
+         * has none (0), and a fighter on Linux played Windows players with 0 desyncs; the refusal cost the fighters their
+         * rollback whenever a Linux player watched. Same protocol + same game build is what the feed needs. */
         else if (!bit || (g_rbs_expect.mask & bit)) snprintf(why, sizeof why, "seat %d is not a spectator's seat here", m.seat);
         else if (m.mask != g_rbs_expect.mask) snprintf(why, sizeof why, "the spectator at seat %d sees other fighting seats (mask %02x here, %02x there)", m.seat, g_rbs_expect.mask, m.mask);
         else if (m.rule_kind != g_rbs_expect.rule_kind || m.stock != g_rbs_expect.stock || ((g_rbs_expect.mask & 1) && m.chara0 != g_rbs_expect.chara0))
@@ -1529,7 +1531,8 @@ void rbs_rx(uint32_t src, const uint8_t *p, int n) {
         int have = rbs_popc(g_rbs_seats), need = (int)g_rbs_need;
         ReleaseSRWLockExclusive(&g_rbs_lock);
         if (fresh == 1) printf("[arena] HELLO from the spectator at seat %d REFUSED: %s\n", m.seat, why);
-        if (fresh == 2) printf("[arena] HELLO from the spectator at seat %d: ready (%d of %d spectators)\n", m.seat, have, need);
+        if (fresh == 2) printf("[arena] HELLO from the spectator at seat %d: ready (%d of %d spectators)%s\n", m.seat, have, need,
+                               m.h.exe_stamp != g_rbs_expect.h.exe_stamp ? " (NOTE: its exe has another stamp: another build or a Linux / macOS game)" : "");
         if (fresh) fflush(stdout);
         break; }
     case RBS_MATCH:                                     /* (a spectator at its set-up) */
