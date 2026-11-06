@@ -144,6 +144,7 @@ static int my_delay(void) { int d = g_delay_cfg >= 0 ? g_delay_cfg : gfx_input_d
 /* (2026-11-03) the host resolves "auto" (0) from the round trip it measured, so both games play with the same number (before, each
  * game chose its own from its own round trip at the match start: two numbers near a boundary differed); -1 = no round trip yet */
 static int hs_auto_delay(int dm, int dp, uint64_t waited_ms);
+static char g_hs_opp[64];                               /* (2026-11-05) the opponent the lobby found for this set-up ("" = not known) */
 static volatile LONG g_hs_cancelled;                    /* this match: 1 = no agreement: played locally and left at once; 2 = (pub2) set up
                                                            * inside a Local Wireless room: the game's own netcode plays it, no rollback, nothing changed */
 static int g_match_n;                                   /* (hs12) online matches of this session so far (1 = the first; rbn_start) */
@@ -417,6 +418,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     InterlockedExchange(&g_hs_room, 0);
     InterlockedExchange(&g_hs_agreed, 0);
     InterlockedExchange(&g_norb, 0);
+    g_hs_opp[0] = 0;
     /* (2026-11-02) spectators: what the last set-up left (a watched match that never reached its fight; a fighter's group) */
     AcquireSRWLockExclusive(&g_hs_lock); if (g_spec) { g_local = g_spec_saved_local; InterlockedExchange(&g_spec, 0); } ReleaseSRWLockExclusive(&g_hs_lock);
     InterlockedExchange(&g_rbs_fighter, 0); InterlockedExchange(&g_rbs_need, 0); InterlockedExchange(&g_rbs_match_tx, 0); g_rbs_gid = 0;
@@ -556,6 +558,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
                 int want = arena ? g_local : mm.role == MM_ROLE_JOIN;      /* (an arena: the player order of its set-up, the same on both PCs) */
                 AcquireSRWLockExclusive(&g_hs_lock); g_local = want; ReleaseSRWLockExclusive(&g_hs_lock);
                 rtt_reset();
+                snprintf(g_hs_opp, sizeof g_hs_opp, "%s", mm.peer_name);
                 printf("[rbnet] handshake %ld: the lobby found an opponent after %.1f s: %s (10.13.%u.%u); this game is the %s\n", (long)round, (now - t0) / 1000.0, mm.peer_name, mm.peer >> 8 & 255, mm.peer & 255, want ? "joiner (player 2)" : "host (player 1)");
                 fflush(stdout);
                 phase = 1; t0 = now; last_note = 0;
@@ -837,14 +840,31 @@ static int delay_for_rtt(long rtt_us) {
     int d = (int)ceil(one_way - 0.001) + 1;
     return d < 2 ? 2 : d > 7 ? 7 : d;
 }
+/* (2026-11-05, owner: "the delay changes by itself, it does not feel good") the auto delay is measured on at least 10 round
+ * trips (1 s; at most 3 s of waiting) and taken from their MIDDLE one (before: the highest of 3 taken during the stage's
+ * loading: one spike of 103 ms at a 47 ms ping gave 5 instead of 3), and against the same opponent in this session it stays
+ * the one of the first match unless the new measure is 2+ frames away (a real change of the connection) */
+static long rtt_mid_us(int *n) {
+    long v[RTTR]; int k;
+    AcquireSRWLockShared(&g_rq_lock); k = g_rttr_n < RTTR ? (int)g_rttr_n : RTTR; memcpy(v, g_rttr, sizeof v); ReleaseSRWLockShared(&g_rq_lock);
+    *n = k; if (!k) return 0;
+    for (int a = 1; a < k; a++) { long x = v[a]; int b = a - 1; while (b >= 0 && v[b] > x) { v[b + 1] = v[b]; b--; } v[b + 1] = x; }
+    return v[k / 2];
+}
 static int hs_auto_delay(int dm, int dp, uint64_t waited_ms) {
     if (dm > 0 && dp > 0) return dm > dp ? dm : dp;
-    int n; long med = rtt_p75_us(&n);
-    if (n < 3 && waited_ms < 3000) return -1;           /* (pings every 100 ms: a few more tenths of a second) */
-    int a = delay_for_rtt(n ? med : -1);
+    int n; long mid = rtt_mid_us(&n);
+    if (n < 10 && waited_ms < 3000) return -1;          /* (pings every 100 ms: about a second) */
+    int a = delay_for_rtt(n ? mid : -1), measured = a;
+    static char last_opp[64]; static int last_a;
+    int kept = 0;
+    if (g_hs_opp[0] && last_a > 0 && !strcmp(last_opp, g_hs_opp) && abs(a - last_a) <= 1) { a = last_a; kept = 1; }
+    if (g_hs_opp[0] && !kept) { snprintf(last_opp, sizeof last_opp, "%s", g_hs_opp); last_a = a; }
     if (dm <= 0) dm = a;
     if (dp <= 0) dp = a;
-    { static uint64_t said; if (GetTickCount64() - said > 2000) { said = GetTickCount64(); printf("[rbnet] handshake: auto input delay %d (round trip %.1f ms: 3 of 4 of the latest %d under it)\n", a, med / 1000.0, n); fflush(stdout); } }
+    { static uint64_t said; if (GetTickCount64() - said > 2000) { said = GetTickCount64();
+        printf("[rbnet] handshake: auto input delay %d (round trip %.1f ms, the middle of the latest %d; measured %d%s)\n", a, mid / 1000.0, n, measured,
+               kept ? ", the same opponent's delay kept" : ""); fflush(stdout); } }
     return dm > dp ? dm : dp;
 }
 /* a thread that pings the other player every 100 ms from the start (the delay is chosen from it when the match begins) */
