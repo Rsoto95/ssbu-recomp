@@ -836,7 +836,7 @@ static long rtt_p75_us(int *n) {
  * ring's depth). Before 2026-11-03: one-way - 2 rounded, at most 4 (120 ms -> 2: rollbacks of 2-4 frames, hitches). */
 static int delay_for_rtt(long rtt_us) {
     if (rtt_us <= 0) return 3;
-    if (rtt_us < 12000) return 1;                       /* (2026-11-05, owner) a ping under 12 ms: delay 1 (the other pad comes within the frame) */
+    if (rtt_us < 20000) return 1;                       /* (2026-11-05, owner) a ping under 20 ms: delay 1 (the other pad comes within the frame) */
     double one_way = rtt_us / 2000.0 / (1000.0 / 60.0);
     int d = (int)ceil(one_way - 0.001) + 1;
     return d < 2 ? 2 : d > 7 ? 7 : d;
