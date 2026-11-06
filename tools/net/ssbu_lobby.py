@@ -705,7 +705,10 @@ class Lobby:
         self.say("match: %s searches an opponent%s (build %s)" % (c.name, " for a rollback match" if op == KIND_ROLLBACK else "", c.part[0].decode("ascii", "replace")))
         waiting = [x for x in self.by_at.values() if x is not c and x.part == c.part and x.search_since is not None and x.match is None and x.kind == op
                    and getattr(x, "match_key", 0) == key]   # (a key: the game's own Online menu, one Battle Arena: its two players only)
-        a = self.arenas.get(c.part)
+        # (2026-11-05) a Battle Arena's search (a key) is paired by its key alone: the lobby's own room queue (F1, 1.6) must
+        # not hold it back. A player left in that queue (joined it earlier, never left) was never paired in a Battle Arena,
+        # and both fighters fell back to the game's own netcode (no rollback).
+        a = self.arenas.get(c.part) if not key else None
         pair = a.pair if a is not None and op == KIND_ROLLBACK else None
         if pair and c in pair:                      # 1.6 arena: a player taking its turn meets only its opponent of the turn
             waiting = [x for x in waiting if x is (pair[1] if c is pair[0] else pair[0])]
