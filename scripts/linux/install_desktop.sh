@@ -24,7 +24,7 @@ mkdir -p "$APPS" "$DATA"
 # a small launcher script, so that the desktop entry holds no quoting of paths with spaces
 cat > "$DATA/launch.sh" <<EOF
 #!/bin/sh
-exec "$REPO/deps/venv/bin/python" "$REPO/scripts/run.py" --linux --log "$DATA/last_run.log" "\$@"
+exec "$REPO/deps/venv/bin/python" "$REPO/scripts/run.py" --linux --play --log "$DATA/last_run.log" "\$@"
 EOF
 chmod +x "$DATA/launch.sh"
 cat > "$ENTRY" <<EOF
