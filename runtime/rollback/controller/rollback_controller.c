@@ -182,6 +182,12 @@ static long long g_rbg_test_f = -2; static int g_rbg_test_ms, g_rbg_test_k;    /
  * 5 = (R3 net3, DEFAULT) 4 for a rollback of exactly 3 frames, 1 for the others: the 3-frame rollback ticks (just over the frame
  * time; 4 or more are over it anyway and doing the same there made the later rollbacks longer: fz5 k 4 -> 7) save a capture; a
  * later wrong guess at exactly the next frame then runs at most as many frames as this one.
+ * 6 = (2026-11-05, branch rollback-rerun-lite, DEFAULT there) 5, and a rollback of exactly 1 frame captures nothing: its one
+ * re-run pass (the last) is the frame the next real pass follows and captures anyway; only a wrong guess at exactly the next
+ * frame needs it, and that one loads the state this rollback loaded and runs 2 frames instead of 1. The capture was a few ms
+ * of every 1-frame rollback tick (the most common rollback): those ticks get nearer to the frame time.
+ * In mode 6 the last re-run pass also captures nothing when its frame is older than the newest frame with both pads known
+ * (no later wrong guess can load it).
  * A later rollback whose state was not captured loads
  * the newest older one and runs a frame or two more. SSBU_RB_NET_KEEP: before a load, 1 = a capture with the threads kept
  * held (the old way), 2 = the threads held without a capture (default; the capture was thrown away by the load), 0 = neither. */
@@ -244,7 +250,7 @@ static void rbg_step_body(Ctx *c) {
     long long i = g_rgs_next;
     g_rbg_refused_tick = 0;
     if (g_rbg_wdfix < 0) { const char *e = getenv("SSBU_RB_NET_WDFIX"); g_rbg_wdfix = !e || atoi(e) != 0; e = getenv("SSBU_RB_NET_DETAIL"); g_rbg_detail = e && atoi(e) > 0;
-        e = getenv("SSBU_RB_NET_RECAP"); g_rbg_recap = e ? atoi(e) : 5; e = getenv("SSBU_RB_NET_KEEP"); g_rbg_keep = e ? atoi(e) : 2; }
+        e = getenv("SSBU_RB_NET_RECAP"); g_rbg_recap = e ? atoi(e) : 6; e = getenv("SSBU_RB_NET_KEEP"); g_rbg_keep = e ? atoi(e) : 2; }
     if (g_rbg_wdfix) g_ra_wd_pause = 1;                 /* (until H2 lets the workers go: r1_state.c ra_kick2) */
     if (g_rbg_wd_before != g_ra_wd_fired) { if (g_rg_ready) LOG("r1: RB NET: the task-worker watchdog let them go before the safe point of frame %lld (%lld times so far)\n", i, g_ra_wd_fired); g_rbg_wd_before = g_ra_wd_fired; }
     if (g_rbg_in_match == 3) return;                    /* (R3 lwr, run lwr2: both games crashed here) a room fight already running stays one until its fight-off:
@@ -340,8 +346,9 @@ static void rbg_step_body(Ctx *c) {
         long long cf = rbn_confirmed(); int want;
         if (g_rbg_recap_first < 0 && i >= cf) g_rbg_recap_first = i;          /* the first re-run frame a later rollback may load */
         g_rbg_t_rerun += now_ms() - g_rbg_t_pass0; g_rbg_n_rerun++;
-        int r4 = g_rbg_recap == 4 || (g_rbg_recap == 5 && g_rbg_cur_k == 3);
-        if (g_rgs_left <= 1) want = !r4 || g_rbg_recap_first < 0 || g_rbg_recap_first == i;     /* (4: not the last, see above) */
+        int r4 = g_rbg_recap == 4 || (g_rbg_recap >= 5 && g_rbg_cur_k == 3);
+        if (g_rgs_left <= 1 && g_rbg_recap >= 6 && (g_rbg_cur_k == 1 || i < cf)) want = 0;       /* (6: see above) */
+        else if (g_rgs_left <= 1) want = !r4 || g_rbg_recap_first < 0 || g_rbg_recap_first == i;     /* (4: not the last, see above) */
         else if (i < cf) want = 0;
         else if (g_rbg_recap == 0) want = 1;
         else if (g_rbg_recap == 2) want = ((i - g_rbg_recap_first) & 1) == 0;
@@ -751,6 +758,9 @@ void rbg_report(void) {
         g_rg_poolfix ? "on" : "OFF", g_rg_short_n, g_rg_freed_slots, g_rg_skip_full);
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
     LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads taken at another wait %d (last load, registers not restored); loads refused, a thread still running (pub1) %lld\n", g_guest_threads.audio_other, g_guest_threads.mismatch, g_rg_refused);
+    { extern long long g_nex_holds, g_nex_waits, g_nex_busy, g_nex_forced; extern double g_nex_wait_ms, g_nex_wait_max;
+      if (g_nex_holds || g_nex_busy) LOG("r1: RB NET report: NEX threads (the arena's connection) held at loads %lld; of them %lld had to be waited for (%.2f ms mean, %.2f ms longest); still running after 4 ms %lld (load refused), loaded anyway after 3 refusals %lld (since the process start)\n",
+          g_nex_holds, g_nex_waits, g_nex_waits ? g_nex_wait_ms / g_nex_waits : 0.0, g_nex_wait_max, g_nex_busy, g_nex_forced); }
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_guest_fibers.live_skipped, g_guest_fibers.live_seen, g_guest_fibers.teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);
     { void nnunwind_catch_stats(long long *, long long *, long long *, long long *, long long *); long long l, d, cr, fu, mp; nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
       LOG("r1: RB NET report: catch table (hs15): %lld live records, %lld removed slots, %lld puts found no free slot in their window, %lld table full, longest probe %lld; dead records dropped at loads %lld (host fiber stacks known %zu)\n", l, d, cr, fu, mp, g_rgc_dead, g_nbf); }
@@ -766,4 +776,12 @@ void rbg_report(void) {
     rbg_dist("main-thread CPU per tick with rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 1);
     rbg_dist("main-thread CPU per tick without rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 0);
     rbn_report(g_log, g_rbg_real);
+}
+/* (2026-11-05) display.c: 1 while an agreed online rollback match runs with this file's 60 Hz pacing (rbg_step: the
+ * schedule plus the time sync's extra wait); the display then does not hold the game for its own refresh tick as well.
+ * SSBU_RB_PACE_ONLY=0: both clocks as before. */
+int rbg_owns_pacing(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_RB_PACE_ONLY"); on = !(e && e[0] == '0'); }
+    return on && g_rbg_pace > 0 && g_rbg_in_match == 1;
 }

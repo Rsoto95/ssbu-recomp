@@ -227,6 +227,9 @@ void ls_start_after_base(void) {
 void ls_new_base(void) { ls_start_after_base(); }
 void ls_fight_over(void) { g_ls_active = 0; g_npending = 0; }
 void ls_after_capture(void) {}
+/* the lazy base (page_tracker_learned.c, Windows-only): never on Linux, so the ring copies every page as before */
+int ls_lazy_ready(void) { return 0; }
+size_t ls_lazy_fill_unprotected(void) { return 0; }
 /* One capture can name the same page twice (a host write both in the pending list and in GetWriteWatch). The ring's undo
  * log must not get two entries for one page, so a small open-addressing set keeps the first. */
 typedef struct { uint32_t id, gen; } CapSeen;

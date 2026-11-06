@@ -50,6 +50,8 @@ static CONDITION_VARIABLE g_vsync_cv = CONDITION_VARIABLE_INIT;
 static LONG64 g_latch;                       /* refresh at which the last queued frame is shown */
 static volatile LONG g_latch_pending;        /* a frame was queued and nobody has waited for its refresh yet */
 static volatile LONG64 g_tick_at[16];        /* L1: QPC time at which tick n was published (index n & 15) */
+int rbg_owns_pacing(void);                    /* rollback_controller.c: 1 while an agreed online rollback match paces the game itself */
+static long long g_rbo_skips;                /* refresh waits left out for that reason */
 static int old_pacing(void) {
     if (g_old_pacing < 0) { const char *e = getenv("SSBU_OLD_PACING"); g_old_pacing = e && atoi(e) != 0; g_clockstat = getenv("SSBU_CLOCKSTAT") && atoi(getenv("SSBU_CLOCKSTAT")) != 0; }
     return g_old_pacing;
@@ -708,7 +710,7 @@ static void frame_queued(void) {
     } else {
     LONG64 at = g_vsync_n + 1, iv = g_interval;
     if (!iv) at = g_vsync_n;                                       /* interval 0: shown at once, nobody waits */
-    else if (at < g_latch + iv) at = g_latch + iv;
+    else if (!rbg_owns_pacing() && at < g_latch + iv) at = g_latch + iv;
     g_latch = at;
     InterlockedExchange(&g_latch_pending, iv != 0);
     }
@@ -929,9 +931,10 @@ void display_present_plan(int vulkan) {
     if (!vulkan || old_pacing()) return;
     pace_options();
     LONG64 now_n = g_vsync_n, iv = g_interval, prev = g_latch, at = now_n + 1;
-    int on_time = iv && now_n < prev + iv && prev + iv - now_n <= 6;
+    int rbo = rbg_owns_pacing();                           /* (2026-11-05) an online rollback match: shown at the next tick, no schedule of our own */
+    int on_time = iv && (rbo || (now_n < prev + iv && prev + iv - now_n <= 6));
     if (!iv) at = now_n;
-    else if (at < prev + iv) at = prev + iv;
+    else if (!rbo && at < prev + iv) at = prev + iv;
     g_latch = at;
     InterlockedExchange(&g_latch_pending, iv != 0);
     if (iv && !on_time) g_hold_late++;
@@ -1021,6 +1024,14 @@ void display_present_done(int fight) {
 /* New pacing, part 2: holds the caller until the refresh that shows the last queued frame. Returns 1 if it waited. */
 int display_wait_refresh(void) {
     if (old_pacing() || !InterlockedExchange(&g_latch_pending, 0)) return 0;
+    /* (2026-11-05, owner: rollbacks at 1-3 frames of delay with a 10 ms round trip) during an agreed online rollback match the
+     * rollback controller's 60 Hz schedule (with the time sync's extra wait) already released this frame. Waiting here too
+     * for the display's tick made two clocks: the controller's fine corrections (a few ms) were lost until they crossed a
+     * tick, then the game moved by a whole frame (the clock offset to the other game swung by +-17 ms, the delay's margin
+     * gone: a rollback). Now the controller is the only clock; the present is still held for the next tick (what the screen
+     * shows stays even). No extra logic frames come of it (fighter_host.c clears the dropped-refresh report in such a match).
+     * SSBU_RB_PACE_ONLY=0: the old way. */
+    if (rbg_owns_pacing()) { g_rbo_skips++; return 0; }
     if (g_vsync_n >= g_latch) return 0;
     if (g_lockstep) {                                              /* SSBU_SPEED: see the comment at g_speed */
         static LONG64 due;                                         /* wall-clock time of the next refresh (QPC ticks) */
@@ -1145,6 +1156,7 @@ void display_pace(void) {
 void display_report(FILE *out) {
     fprintf(out, "\ndisplay: %lld frames presented\n", (long long)g_frames);
     fprintf(out, "display: %s; %lld vsync signals, %lld refreshes slept through by the vsync thread\n", old_pacing() ? "old pacing (SSBU_OLD_PACING=1: two clocks)" : "one refresh clock", (long long)g_vsync_signals, (long long)g_vsync_late);
+    if (g_rbo_skips) fprintf(out, "display: refresh waits left to the online rollback match's own 60 Hz schedule: %lld (SSBU_RB_PACE_ONLY=0: waited as before)\n", g_rbo_skips);
     if (g_pc_n > 0) fprintf(out, "display: the game's thread was on an EFFICIENCY core at %lld of %lld presents (%s)\n", (long long)g_pc_frames_slow, (long long)g_pc_frames, g_pc_on ? "performance cores asked for" : "SSBU_PCORES=0: left to the system");
     if (g_vb_state == 2) {
         fprintf(out, "display: refresh %.3f Hz measured; %s; presents held for their tick %lld, late frames presented at once %lld\n", (double)g_freq.QuadPart / g_vb_period,

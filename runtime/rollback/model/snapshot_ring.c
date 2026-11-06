@@ -649,7 +649,8 @@ int r1_ring_rebase(long long frame, Ctx *c) {
     rg_sweep(rg_noop);                                    /* marks since the last capture: the copy below takes everything */
     g_rg_ntl = 0;
     collect(c);
-    size_t nwin = g_rg_n1 + g_rg_n2, copied = 0, dropped = 0, freed = 0;
+    size_t nwin = g_rg_n1 + g_rg_n2, copied = 0, dropped = 0, freed = 0, filled = 0;
+    int lazy = ls_lazy_ready();                           /* (2026-11-05, SSBU_LS_LAZY) the windows' pages are copied at their first write (ls_new_base marks them pending) */
     uint8_t *in = calloc(nwin, 1);
     static Extra nx[8192]; int nnx = 0;
     for (int i = 0; i < g_memory_map.range_count; i++) {
@@ -662,7 +663,8 @@ int r1_ring_rebase(long long frame, Ctx *c) {
                 if (w2 ? g_ns2[pi] : g_ns1[pi]) continue;                    /* not simulation (a host stack) */
                 in[w2 ? g_rg_n1 + pi : pi] = 1;
                 if (!sh_commit(sh, cm, pi)) { free(in); g_rg_nomem = 2; unpark(); LOG("r1: RING rebase: commit of the shadow FAILED (out of memory): no rollback ring for the rest of this session\n"); return 0; }
-                memcpy(sh, a, PG); copied++;
+                if (!lazy) memcpy(sh, a, PG);
+                copied++;
                 if (!w2) g_dc[pi] = 0;
             } else if (nnx < 8192) {
                 if (nnx && nx[nnx - 1].a + nx[nnx - 1].n == a) nx[nnx - 1].n += PG;
@@ -705,6 +707,7 @@ int r1_ring_rebase(long long frame, Ctx *c) {
     nvn_r1_cb_save();
     rg_meta_capture(s, c);
     ls_new_base();                                          /* R4: the windows read-only again, the learned set emptied */
+    if (lazy) filled = ls_lazy_fill_unprotected();          /* (lazy) the window pages that did not become read-only: copied now */
     {   /* (2026-10-30) SSBU_RB_AUDIO_OFF for this match too: it was set only at the first base (r1_ring_capture) and cleared at
          * every fight's end (ring_simulation.c), so from the second match of a session on the audio threads ran beside the
          * ring (the sound came back; main thread 9 -> 12.5 ms a frame, every hold and load waited for them): the second match
@@ -713,8 +716,8 @@ int r1_ring_rebase(long long frame, Ctx *c) {
         audio_gate_fight(); }
     unpark();
     g_rg_caps++;
-    LOG("r1: RING rebase: base state (frame %lld) made again in %.1f ms (hold %.1f, copy %.1f): %zu window pages copied into the shadow (%.1f MB), %zu pool buffers freed, %zu shadow pages of pages not committed now dropped; extras %d ranges %.1f MB (%zu pages); %d modules got the mark maps\n",
-        frame, now_ms() - t0, t1 - t0, t2 - t1, copied, copied * (double)PG / 1048576.0, freed, dropped, g_nx, g_xbytes / 1048576.0, g_rg_nx, nmod);
+    LOG("r1: RING rebase: base state (frame %lld) made again in %.1f ms (hold %.1f, copy %.1f): %zu window pages %s the shadow (%.1f MB)%s, %zu pool buffers freed, %zu shadow pages of pages not committed now dropped; extras %d ranges %.1f MB (%zu pages); %d modules got the mark maps\n",
+        frame, now_ms() - t0, t1 - t0, t2 - t1, copied, lazy ? "pending (lazy: copied at their first write) in" : "copied into", copied * (double)PG / 1048576.0, lazy ? (filled ? " + the unprotected ones copied" : "") : "", freed, dropped, g_nx, g_xbytes / 1048576.0, g_rg_nx, nmod);
     return 1;
 }
 /* OPTION 1 (root cause): pages the game commits DURING a fight in the big reservations, outside what the ring saved at its base, are never captured nor restored; after a rollback they hold future
@@ -911,8 +914,23 @@ int r1_ring_load(long long frame, Ctx *c) {
             return -1;
         }
     }
+    /* (2026-11-05) the game's NEX threads (Battle Arenas) held in their read of the connection for the load (runahead.c
+     * ra_nex_hold). One still running after 4 ms: the load is refused like the case above and tried again next tick; after
+     * 3 refusals in a row it goes ahead anyway (as before this change), so a busy NEX thread cannot stop the rollbacks. */
+    {   int ra_nex_hold(double); static int nex_row; extern long long g_nex_forced;
+        if (ra_nex_hold(4.0)) nex_row = 0;
+        else if (++nex_row <= 3) {
+            unpark();
+            Ctx *tc2; const char *nm2; HANDLE h2;
+            for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc2, &nm2, &h2); i++) if (h2 && GetThreadId(h2) != GetCurrentThreadId()) ResumeThread(h2);
+            g_rg_refused++;
+            if (g_rg_refused <= 20 || g_rg_refused % 100 == 0) LOG("r1: RING load of frame %lld (k %d) REFUSED (%lld so far): a NEX thread (the arena's connection) still running after 4 ms; tried again next tick\n", frame, k, g_rg_refused);
+            g_rgp_seg = 1;
+            return -1;
+        } else { nex_row = 0; g_nex_forced++; LOG("r1: RING load of frame %lld (k %d): a NEX thread still running after 3 refusals: loaded anyway (%lld so far)\n", frame, k, g_nex_forced); }
+    }
     double t1 = now_ms();
-    sm_load(frame);                                         /* (debug, SSBU_STATE_MEASURE) what differs from the capture, before anything is restored */
+    sm_load(frame);                                        /* (debug, SSBU_STATE_MEASURE) what differs from the capture, before anything is restored */
     R1_CTR("load (state of frame)", frame, 0);
     rgc_before();
     g_rg_ntl = 0;
@@ -959,6 +977,7 @@ int r1_ring_load(long long frame, Ctx *c) {
     rg_roundtrip_after_load();                              /* (debug, SSBU_RB_ROUNDTRIP) every page must now be what the ring recorded at this frame */
     double t3 = now_ms();
     unpark();
+    { void ra_nex_release(void); ra_nex_release(); }      /* the NEX threads held for this load (above) */
     g_mp[4] += t2a - t2; g_mp[5] += t2b - t2a; g_mp[6] += t2c - t2b; g_mp[7] += t3 - t2c; g_mp[8] += now_ms() - t3; g_mp_n[1]++;
     *c = g->ctx;
     g_rg_loads++;

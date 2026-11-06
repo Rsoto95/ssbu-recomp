@@ -21,6 +21,12 @@
  *     outside the game code (CRT memcpy, libopus, the exe's helpers, nnldn.c receives) fault like the game code and are served;
  *   - at the end of the fight every page still read-only is made writable again (menus, loads: no protection); the next
  *     match's base (r1_ring_rebase) protects everything again with an empty learned set.
+ *   SSBU_LS_LAZY (default ON, =0 off; after ssbu-recomp PR #80 by Frank Fly): the base copies NOTHING of the windows into the
+ *   shadow. A page protected at the base is "pending" (g_ls_pend); its first write (the fault, r1_wrote, a decommit: all go
+ *   through ls_open_page) copies it into the shadow before it opens: until then its bytes ARE the base's. A fight writes ~2%
+ *   of the ~1.9 GB the base protects, so the base's copy (~0.6 s with the game held at "GO": the hitch at the start of every
+ *   online fight, 2026-11-05) goes; the window pages that are NOT protected (not wholly in a window, a protect that failed)
+ *   are still copied at the base (ls_lazy_fill_unprotected), as before.
  *   SSBU_LS_CMP (default ON since R3 net3; =0 off): a capture compares each learned page with its newest value first (in parallel, the ring's copy threads)
  *   and copies only the pages that changed (less ring memory, smaller loads; the compare reads both copies).
  *   SSBU_LS_DECAY=<n> (implies CMP; default off): every n captures the pages unchanged for n captures go read-only again.
@@ -56,6 +62,8 @@ int g_ls_active;                        /* 1 from a base until the fight is over
 static int g_ls_compare_before_copy;           /* SSBU_LS_CMP (default 1): a capture compares each learned page with its newest value first */
 static int g_ls_fight_over_done;               /* ls_fight_over already ran for this fight */
 static volatile uint8_t *g_ls_page_state;      /* per page id (window 1 pages, then window 2 pages): 0 not tracked, 1 read-only, 2 learned, 3 being opened */
+static volatile uint8_t *g_ls_pend;            /* SSBU_LS_LAZY, per page id: 1 = read-only since the base, its base bytes NOT in the shadow yet */
+static size_t g_ls_pend_n; static int g_ls_lazy_on = -1; static volatile LONG64 g_ls_lazy_copies; static long long g_ls_lazy_filled;
 static size_t g_ls_win1_pages, g_ls_total_pages;     /* pages in window 1; pages in both windows */
 static uint32_t *g_ls_learned_ids;             /* the learned set: page id + 1 (0 = being added), in the order learned */
 static volatile LONG g_ls_learned_count;       /* entries used in g_ls_learned_ids */
@@ -153,6 +161,11 @@ static int ls_open_page(size_t id, EXCEPTION_POINTERS *e) {
         if (s == 2) { DWORD old; InterlockedIncrement64(&g_ls_refault); return VirtualProtect(ls_page_address(id), PG, PAGE_READWRITE, &old) ? 1 : 0; }
         if (s == 3) { InterlockedIncrement64(&g_ls_spin); YieldProcessor(); continue; }
         if (__sync_bool_compare_and_swap(&g_ls_page_state[id], (uint8_t)1, (uint8_t)3)) {
+            if (g_ls_pend && id < g_ls_pend_n && g_ls_pend[id]) {     /* (SSBU_LS_LAZY) still the base's bytes: into the shadow before anything writes it */
+                uint8_t *cm; size_t pi; uint8_t *sh = in_shadow(ls_page_address(id), &cm, &pi);
+                if (sh && cm[pi]) memcpy(sh, ls_page_address(id), PG);
+                g_ls_pend[id] = 0; InterlockedIncrement64(&g_ls_lazy_copies);
+            }
             DWORD old; int ok = VirtualProtect(ls_page_address(id), PG, PAGE_READWRITE, &old) != 0;
             if (!ok) InterlockedIncrement64(&g_ls_protfail);
             ls_list_append(id); MemoryBarrier(); g_ls_page_state[id] = 2;
@@ -454,10 +467,11 @@ static void ls_protect_id_range(size_t a, size_t b) {
     /* The state is 1 BEFORE the page is read-only: a host thread (the renderer, a loader) that is not held and writes the page the moment it becomes read-only faults into
      * ls_open_page, which needs state 1 to open it. With the state set after the protect (as before) that write saw state 0, was not handled and ended the game; it never
      * showed at the start of a fight (nothing writes then) but does in a base made again during one. */
+    if (g_ls_pend) memset((void *)(g_ls_pend + a), 1, b - a);     /* (SSBU_LS_LAZY: pending BEFORE the state says read-only: a write after the protect finds it pending) */
     for (size_t i = a; i < b; i++) g_ls_page_state[i] = 1;
     MemoryBarrier();
     if (VirtualProtect(ls_page_address(a), (b - a) * PG, PAGE_READONLY, &old)) { g_ls_prot_pages += (long long)(b - a); return; }
-    for (size_t i = a; i < b; i++) { if (VirtualProtect(ls_page_address(i), PG, PAGE_READONLY, &old)) g_ls_prot_pages++; else { g_ls_page_state[i] = 0; g_ls_protfail++; } }
+    for (size_t i = a; i < b; i++) { if (VirtualProtect(ls_page_address(i), PG, PAGE_READONLY, &old)) g_ls_prot_pages++; else { g_ls_page_state[i] = 0; if (g_ls_pend) g_ls_pend[i] = 0; g_ls_protfail++; } }
 }
 /* At a new base, with the guest threads held: empties the learned set and makes every committed read-write simulation page
  * of both windows read-only (state 1), going by the ranges r1 collected (g_memory_map.ranges). Pages marked not-simulation are left
@@ -467,6 +481,7 @@ static void ls_protect_all_pages(void) {
     /* A base made again while the learned set is active (a rebase in a fight): the table is NOT zeroed. Pages that are read-only now must keep a state that the fault handler
      * accepts while this runs; every page of the ranges below gets state 1 and is protected again. */
     if (!g_ls_active) memset((void *)g_ls_page_state, 0, g_ls_total_pages);
+    if (g_ls_pend) memset((void *)g_ls_pend, 0, g_ls_pend_n);
     g_ls_learned_count = 0; g_ls_list_overflow = 0;
     for (int i = 0; i < g_memory_map.range_count; i++) {
         size_t id0, idn; uint8_t *a = g_memory_map.ranges[i].a; size_t np = g_memory_map.ranges[i].n / PG;
@@ -478,6 +493,50 @@ static void ls_protect_all_pages(void) {
     g_ls_prot_ms += now_ms() - t0; g_ls_bases++; g_ls_active = 1; g_ls_fight_over_done = 0;
     xls_protect();                                       /* the big extras ranges too (SSBU_LS_X=0: they are compared whole as before) */
     LOG("r1: LS: %lld pages (%.1f MB) made read-only in %.1f ms; learned set emptied\n", g_ls_prot_pages - before, (g_ls_prot_pages - before) * (double)PG / 1048576.0, now_ms() - t0);
+}
+/* SSBU_LS_LAZY (default on; =0 off): whether a base may leave the windows' copy to the first writes. Only with the learned
+ * set (with a marked game DLL the ring copies everything as before). Called before the first base's copy, after mark_prepare
+ * (the windows' sizes known): allocates the pending table. 1 = this base is lazy. */
+int ls_lazy_prepare(void) {
+    if (g_ls_lazy_on < 0) { const char *e = getenv("SSBU_LS_LAZY"); g_ls_lazy_on = !(e && e[0] == '0'); LOG("r1: LS lazy base (SSBU_LS_LAZY): %s\n", g_ls_lazy_on ? "on: a page is copied into the base at its first write" : "off: the base copies every page"); }
+    if (!g_ls_lazy_on || !ls_enabled() || pm1 != &r1_m1 || !g_wn1) return 0;
+    size_t n = (size_t)(g_wn1 >> 12) + (size_t)(WN2 >> 12);
+    if (g_ls_pend && g_ls_pend_n != n) return 0;         /* (windows of another size than the table: not expected; the copy then) */
+    if (!g_ls_pend) {
+        g_ls_pend = VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (!g_ls_pend) { LOG("r1: LS lazy base: allocation FAILED: the base copies every page\n"); g_ls_lazy_on = 0; return 0; }
+        g_ls_pend_n = n;
+    }
+    return 1;
+}
+/* 1 when a base made now (a rebase) may be lazy: the table exists and the learned set is in use */
+int ls_lazy_ready(void) { return g_ls_lazy_on > 0 && g_ls_pend && g_ls_page_state && pm1 == &r1_m1; }
+/* (lazy base, threads held, right after the windows were protected) every page of the save's ranges inside a window that was
+ * NOT made read-only (state 0: a range not wholly in one window, a protect that failed) is copied into the shadow now, as
+ * the non-lazy base does for every page. Returns the pages copied. */
+size_t ls_lazy_fill_unprotected(void) {
+    size_t n = 0;
+    for (int i = 0; i < g_memory_map.range_count; i++) {
+        uint8_t *a = g_memory_map.ranges[i].a; size_t np = g_memory_map.ranges[i].n / PG;
+        for (size_t p = 0; p < np; p++) {
+            uint8_t *pg = a + p * PG, *cm; size_t pi, id; uint8_t *sh = in_shadow(pg, &cm, &pi);
+            if (!sh || !ls_page_id(pg, &id)) continue;
+            if ((g_ls_page_state && g_ls_page_state[id] != 0) || ls_page_is_not_simulation(id)) continue;      /* (no state table: the learned set failed to start, every page copied) */
+            if (!cm[pi] && !sh_commit(sh, cm, pi)) continue;
+            memcpy(sh, pg, PG); n++;
+        }
+    }
+    g_ls_lazy_filled += (long long)n;
+    return n;
+}
+/* (lazy first base, after the hold's pause) the pages learned since the protection were written by host threads during the
+ * hold (the guest threads were held): note(a) for each (left out of restore / verify, as the copy's recheck did). Returns
+ * their number. */
+size_t ls_lazy_note_learned(void (*note)(uint8_t *a)) {
+    LONG n = g_ls_learned_count; if (n > g_ls_learned_capacity) n = g_ls_learned_capacity;
+    size_t k = 0;
+    for (LONG i = 0; i < n; i++) { uint32_t v = g_ls_learned_ids[i]; if (!v) continue; if (note) note(ls_page_address(v - 1)); k++; }
+    return k;
 }
 /* Called when r1's first full save (the base) is made, threads still held. The first time: allocates the state table and
  * the list, reads the options (SSBU_LS_CMP, default on; SSBU_LS_DECAY), looks up the game DLL's and the exe's module
@@ -829,6 +888,7 @@ void ls_report(void) {
         LOG("r1: LS report: bases %lld (%.1f ms protecting), pages made read-only %lld, writable again at fight ends %lld; learned set %ld pages (%.1f MB; list overflow %ld); first-write faults %lld: game DLL %lld, script modules %lld, exe %lld, other %lld, unknown %lld; repeated faults %lld, busy waits %lld, protect failures %lld; kernel-write opens (r1_wrote) %lld, decommits learned %lld, commits made read-only %lld; file reads repeated after ERROR_NOACCESS %lld\n",
             g_ls_bases, g_ls_prot_ms, g_ls_prot_pages, g_ls_unprot_pages, (long)g_ls_learned_count, g_ls_learned_count * (double)PG / 1048576.0, (long)g_ls_list_overflow, (long long)g_ls_faults, (long long)g_ls_fault_mod[0], (long long)g_ls_fault_mod[1], (long long)g_ls_fault_mod[2], (long long)g_ls_fault_mod[3], (long long)g_ls_fault_mod[4],
             (long long)g_ls_refault, (long long)g_ls_spin, (long long)g_ls_protfail, (long long)g_ls_wrote_open, (long long)g_ls_dec_learn, (long long)g_ls_commit_prot, (long long)g_read_retry);
+        if (g_ls_pend) LOG("r1: LS lazy base: %lld pages copied into the shadow at their first write (%.1f MB); %lld window pages that were not protected copied at the bases\n", (long long)g_ls_lazy_copies, g_ls_lazy_copies * (double)PG / 1048576.0, g_ls_lazy_filled);
         if (g_ls_decays) LOG("r1: LS decay every %d captures: %lld runs, %lld pages made read-only again (%.0f per run), %.3f ms per run\n", g_ls_decay_every, g_ls_decays, g_ls_decayed, (double)g_ls_decayed / g_ls_decays, g_ls_decay_ms / g_ls_decays);
         LOG("r1: LS captures %lld: pages taken %.0f per capture%s (compare %.3f ms per capture, %.0f unchanged pages skipped per capture)\n", g_ls_capture_count, g_ls_capture_count ? (double)g_ls_cap_pages / g_ls_capture_count : 0, g_ls_compare_before_copy ? " (changed only)" : " (the whole set)",
             g_ls_capture_count ? g_ls_cmp_ms / g_ls_capture_count : 0, g_ls_capture_count ? (double)g_ls_cap_same / g_ls_capture_count : 0);

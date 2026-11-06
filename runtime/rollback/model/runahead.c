@@ -105,6 +105,36 @@ static int ra_free(const char *n) {      /* never in a waiting import; its pages
     extern volatile int g_ra_base_save;
     return strstr(n, "nopus") != NULL || (om && (!strncmp(n, "NEX ", 4) || (g_ra_base_save && !strncmp(n, "Pia ", 4))));
 }
+/* (2026-11-05, a friend's Battle Arena match on rollback-rerun-lite, and SUKO's on main 2026-11-04: c0000005 in "NEX
+ * TransportBufferThread(recv )" right after a ring load, the game frozen, the other player's game left after 10 s) the NEX
+ * threads stay free at captures (ra_free: they block in our NEX server's connection, not in a waiting import), but a LOAD
+ * wrote the pages back while one of them was RUNNING through objects on them. Now a load first holds every NEX thread that
+ * is blocked in a system call (its read of the connection: it touches no guest memory until it wakes) and lets it go after
+ * the load; one that is running is waited for (yielding) up to `limit_ms`; 0 = one was still running then (nothing held).
+ * Only with the Online menu on (the NEX threads exist only then). SSBU_RB_NEX_HOLD=0: the old way (never held). */
+static HANDLE g_nex_held[16]; static int g_nex_nheld;
+long long g_nex_holds, g_nex_waits, g_nex_busy, g_nex_forced; double g_nex_wait_ms, g_nex_wait_max;
+void ra_nex_release(void) { for (int i = 0; i < g_nex_nheld; i++) ResumeThread(g_nex_held[i]); g_nex_nheld = 0; }
+int ra_nex_hold(double limit_ms) {
+    static int on = -1, om = -1;
+    if (on < 0) { const char *e = getenv("SSBU_RB_NEX_HOLD"); on = !(e && e[0] == '0'); e = getenv("SSBU_ONLINE_MENU"); om = e && e[0] == '1'; }
+    g_nex_nheld = 0;
+    if (!on || !om) return 1;
+    DWORD me = GetCurrentThreadId(); Ctx *tc; const char *nm; HANDLE h; double t0 = now_ms(); int waited = 0;
+    for (int i = 0; guest_thread_info(i, &tc, &nm, &h); i++) {
+        if (!h || !nm || strncmp(nm, "NEX ", 4) || GetThreadId(h) == me) continue;
+        for (;;) {
+            if (SuspendThread(h) == (DWORD)-1) break;
+            if (th_blocked(h)) { if (g_nex_nheld < 16) g_nex_held[g_nex_nheld++] = h; else ResumeThread(h); break; }
+            ResumeThread(h); waited = 1;
+            if (now_ms() - t0 > limit_ms) { ra_nex_release(); g_nex_busy++; return 0; }
+            SwitchToThread();
+        }
+    }
+    g_nex_holds++;
+    if (waited) { double w = now_ms() - t0; g_nex_waits++; g_nex_wait_ms += w; if (w > g_nex_wait_max) g_nex_wait_max = w; }
+    return 1;
+}
 /* save: every other guest thread held inside a waiting import (its place and registers noted); 0 = one was not there in time */
 /* (R3 hs16, TEST ONLY) SSBU_RB_HOLD_PROF=1: where a hold's time goes, per thread (suspend + context + retries), and the
  * fiber check; printed in the rollback report */
@@ -615,7 +645,7 @@ void ra_init(void) {
 #endif
     if (rgs_wanted() && rbg_on()) {                       /* R3: re-run passes but the last skip the preparation kicks + lists (49) and the presentation callees (127), proven exact in R2 round 3 */
         g_rgs_skip = getenv("SSBU_RB_SIM_SKIP") ? atoi(getenv("SSBU_RB_SIM_SKIP")) : 49;
-        if (!getenv("SSBU_RB_SIM_LITE")) _putenv("SSBU_RB_SIM_LITE=127");
+        if (!getenv("SSBU_RB_SIM_LITE")) _putenv("SSBU_RB_SIM_LITE=123");      /* (2026-11-05) not group 4, the lighting: it turned the fighters blue / black (tests/rb_lite_bisect.py) */
         rbn_init();
         LOG("r1: RB NET on (R3 online rollback on the snapshot ring): kick skip mask in re-run passes %d\n", g_rgs_skip);
         rgs_lite_init(); }

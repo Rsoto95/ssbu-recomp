@@ -66,12 +66,25 @@ def ini_get(path, key):
 PLAY_LOBBY = 'lan'
 PLAY_DEFAULTS = {
     # (the input delay: graphics.ini input_delay, F1 > Gameplay, default 3; each match uses the larger of the two players')
-    'SSBU_LATENCY': 'low',
+    'SSBU_LATENCY': 'lowest',        # (2026-11-05, owner: "por default tiene que estar en lowest"); graphics.ini latency = low keeps low
     'SSBU_LS_X_WW': '1',             # the ring tracks the writes to the big extras ranges with GetWriteWatch
     'SSBU_RB_AUDIO_OFF': '1',        # the audio threads held in a fight (the main thread empties their queue: SSBU_RB_AUDIO_PUMP)
-    'SSBU_RB_SIM_SKIP': '0',         # re-run passes do the whole presentation work (the blue / black fighters)
-    'SSBU_RB_SIM_LITE': '0',
-    'SSBU_RB_NET_LASTLITE': '0',
+    # (2026-11-05) re-run passes skip the presentation work that does not change the fight: the preparation kicks + lists
+    # (49) and every presentation callee but the LIGHTING group (127 - 4 = 123). Lighting (lite group 4) was the cause of the
+    # blue / black fighters that made all of them off on 2026-10-28 (tests/rb_lite_bisect.py: only group 4 turns the
+    # fighters teal; with 49 / 123 / lastlite the re-runs replay the fight exactly and a re-run pass costs 3.0 ms instead
+    # of 4.8). graphics.ini rerun_lite = off: the old full re-run passes (0 / 0 / 0).
+    'SSBU_RB_SIM_SKIP': '49',
+    'SSBU_RB_SIM_LITE': '123',
+    'SSBU_RB_NET_LASTLITE': '1',
+    # (2026-11-05) a rollback of 1 frame no longer saves the state of its re-run frame (the next real pass saves the
+    # following one anyway; rollback_controller.c recap mode 6). graphics.ini rerun_lite = off: the old mode 5 too.
+    'SSBU_RB_NET_RECAP': '6',
+    # (2026-11-05) the learned set forgets the pages that did not change in the last 30 captures (they are made read-only
+    # again; their next write brings them back): every capture compares and every load restores ~5,000 pages fewer.
+    # tests/rb_lite_bisect.py: capture 1.97 -> 1.36 ms, load 2.04 -> 1.29 ms, the real pass ~0.6 ms slower (the page
+    # faults), re-runs exact. graphics.ini rerun_lite = off: no decay (the old way).
+    'SSBU_LS_DECAY': '30',
 }
 
 
@@ -196,6 +209,16 @@ def dev_update(gini):
         print('=' * 78)
         return False
     before = git_head()
+    # (2026-11-05, owner) F1 > About > Version to follow in a git checkout: the branch update_channel.txt names (main when
+    # there is none) is switched to first
+    import update
+    want = update.channel_branch()
+    cur = subprocess.run(['git', '-C', REPO, 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    if want and cur and want != cur:
+        print('Version to follow: branch %s (this copy was on %s): switching with git.' % (want, cur))
+        subprocess.run(['git', '-C', REPO, 'fetch', 'origin', want])
+        if subprocess.run(['git', '-C', REPO, 'checkout', want]).returncode:
+            print('NOT switched: git checkout %s failed; the copy stays on %s.' % (want, cur))
     rc = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only']).returncode
     if rc:
         print('NOT updated: git pull --ff-only failed (code %d): this copy has commits GitHub does not have.' % rc)
@@ -618,8 +641,13 @@ def main():
     if rollback and 'SSBU_RB_NET' not in env:
         env['SSBU_RB_NET'] = 'net'                    # rollback over the online connection (net_relay); needs online play on
     if a.play and rollback:                           # (fork) the group's settings and lobby, see PLAY_DEFAULTS
+        full_rerun = ini_get(gini, 'rerun_lite') in ('off', '0', 'no', 'false')
         for k, v in PLAY_DEFAULTS.items():
-            env.setdefault(k, v)
+            if full_rerun and k == 'SSBU_LS_DECAY':
+                continue
+            if k == 'SSBU_LATENCY' and ini_get(gini, 'latency') in ('low', '1'):
+                v = 'low'                             # (2026-11-05) F1 > Display > Input latency = low is kept (lowest otherwise)
+            env.setdefault(k, ('5' if k == 'SSBU_RB_NET_RECAP' else '0') if full_rerun and k in ('SSBU_RB_SIM_SKIP', 'SSBU_RB_SIM_LITE', 'SSBU_RB_NET_LASTLITE', 'SSBU_RB_NET_RECAP') else v)
         if ini_get(gini, 'group_lobby') not in ('off', '0', 'no', 'false'):   # (graphics.ini group_lobby = off: F1 > Online's mode instead)
             env.setdefault('SSBU_ONLINE', PLAY_LOBBY)
         print('Online: %s (play in Local Wireless rooms: 1-on-1 rooms use rollback), rollback on, input delay %s' % (

@@ -72,8 +72,10 @@ void save(Ctx *c) {
         if (bad) { release(); g_save_failed = 2; return; }
     }
     double tprep = now_ms();
+    int lazy = 0;                                     /* (SSBU_LS_LAZY is Windows-only: page_tracker_posix.c has no lazy base) */
 #ifdef _WIN32
     if (direct && !mark_prepare()) { release(); g_save_failed = 2; return; }      /* (the shadow's reservation and the extras' buffers, before the hold) */
+    lazy = direct && ls_lazy_prepare();               /* (2026-11-05, SSBU_LS_LAZY) the windows' pages are copied at their first write, not here */
 #endif
     tprep = now_ms() - tprep;
     if (g_fast > 0 && g_session.cycle < g_learn) async_learn();
@@ -88,7 +90,7 @@ void save(Ctx *c) {
     double t1b = now_ms();
     int dfail = 0;
 #ifdef _WIN32
-    if (direct) { g_saved_bytes = mark_fill(); dfail = !g_saved_bytes; }
+    if (direct) { g_saved_bytes = mark_fill(lazy, &dfail); if (!lazy && !g_saved_bytes) dfail = 1; }
     else
 #endif
     for (int i = 0; i < g_memory_map.range_count; i++) { memcpy(g_memory_map.ranges[i].s, g_memory_map.ranges[i].a, g_memory_map.ranges[i].n); g_saved_bytes += g_memory_map.ranges[i].n; }
@@ -96,8 +98,10 @@ void save(Ctx *c) {
     {   /* pages the OTHER threads write while main is held here (audio, vsync counter, loaders, render threads): they are
          * not the simulation's; they are left out of restore and verify. SSBU_R1_PAUSE=<ms> (default 50, 0 = none) */
         const char *pe = getenv("SSBU_R1_PAUSE"); int pause = pe ? atoi(pe) : 30;
-        size_t np = 0; int shown = 0;
-        if (pause > 0 && direct && !dfail) {
+        size_t np = 0, filled = 0; int shown = 0;
+        if (lazy) {
+            /* (lazy) no pause here: mark_finish_lazy protects the windows first and pauses after, so what host threads write in the pause is learned */
+        } else if (pause > 0 && direct && !dfail) {
             Sleep((DWORD)pause);                      /* (the recheck itself runs inside mark_finish_direct, overlapped with the marks being set) */
         } else if (pause > 0 && !direct) {
             Sleep((DWORD)pause);
@@ -118,11 +122,14 @@ void save(Ctx *c) {
             if (!direct) mfail = !mark_setup();
 #ifdef _WIN32
             else if (dfail) mfail = 1;
+            else if (lazy) { mfail = !mark_finish_lazy(pause > 0 ? direct_note : NULL, &np, pause, &filled); shown = g_direct_shown; g_direct_shown = 0; }
             else { mfail = !mark_finish_direct(pause > 0 ? direct_note : NULL, &np); shown = g_direct_shown; g_direct_shown = 0; }
 #endif
         }     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
         tfin = now_ms() - tfin;
-        if (direct) LOG("r1: FULL SAVE (direct, one copy on the parallel copy's threads): buffers %.1f ms before the hold; copy %.1f MB in %.1f ms; pause %d ms; recheck (%zu pages differed) + marks set %.1f ms%s\n",
+        if (lazy) LOG("r1: FULL SAVE (lazy, SSBU_LS_LAZY: the windows' pages are copied at their first write): buffers %.1f ms before the hold; extras %.1f MB copied in %.1f ms; marks set + windows protected + %zu unprotected window pages copied + pause %d ms (%zu pages written in it) %.1f ms%s\n",
+                      tprep, g_saved_bytes / 1048576.0, t2 - t1b, filled, pause, np, tfin, dfail ? " (the copy FAILED: no ring)" : "");
+        else if (direct) LOG("r1: FULL SAVE (direct, one copy on the parallel copy's threads): buffers %.1f ms before the hold; copy %.1f MB in %.1f ms; pause %d ms; recheck (%zu pages differed) + marks set %.1f ms%s\n",
                         tprep, g_saved_bytes / 1048576.0, t2 - t1b, pause, np, tfin, dfail ? " (the copy FAILED: no ring)" : "");
         if (g_ra > 0 && !mfail) nvn_r1_cb_save();
         unpark();

@@ -120,10 +120,13 @@ static RgsLite g_rgl_h[] = {
 };
 
 int g_rgs_lite; static uint64_t g_rgl_lo, g_rgl_hi;
+/* (2026-11-05) SSBU_RB_SIM_LASTRUN=<mask>: lite groups that still run in the LAST re-run pass when that pass skips too
+ * (SSBU_RB_NET_LASTLITE=1): e.g. 4 = the lighting skipped in the passes before the last only (default 0) */
+int g_rgs_lastrun;
 static void rgs_lite_hook(Ctx *c, void *user) {
     RgsLite *h = user; uint64_t lr = c->x[30];
     int inloop = lr >= g_rgl_lo && lr < g_rgl_hi, kd = g_ra_phase == 2;
-    if (inloop && (g_rgs_lite & h->grp) && g_rgs_on > 0 && g_ra_phase == 2 && (g_rgs_left > 1 || g_rgs_lastlite)) { h->sk++; c->x[0] = h->ret; return; }
+    if (inloop && (g_rgs_lite & h->grp) && g_rgs_on > 0 && g_ra_phase == 2 && (g_rgs_left > 1 || (g_rgs_lastlite && !(g_rgs_lastrun & h->grp)))) { h->sk++; c->x[0] = h->ret; return; }
     if (!g_rgs_prof || !inloop) { h->orig(c); return; }
     double t = now_ms(); h->orig(c); h->ms[kd] += now_ms() - t; h->n[kd]++;
 }
@@ -285,12 +288,14 @@ static void rgp_report(void) {
 }
 void rgs_lite_init(void) {
     const char *e = getenv("SSBU_RB_SIM_LITE"); g_rgs_lite = e ? atoi(e) : 0; g_rgs_prof = getenv("SSBU_RB_SIM_PROF") ? atoi(getenv("SSBU_RB_SIM_PROF")) : 0;
+    e = getenv("SSBU_RB_SIM_LASTRUN"); g_rgs_lastrun = e ? atoi(e) : 0;
+    if (!rbg_on() && (e = getenv("SSBU_RB_NET_LASTLITE")) && *e) g_rgs_lastlite = atoi(e) != 0;    /* (2026-11-05) the simulation honours it too (it ran the last re-run pass fully before) */
     if (g_rgs_prof == 2) rgp_init();
     if (!g_rgs_lite && !g_rgs_prof) return;
     g_rgl_lo = GA(0x7103747270ull); g_rgl_hi = GA(0x710374e000ull);
     int ok = 0;
     for (int i = 0; i < RGL_N; i++) if ((g_rgs_prof || (g_rgs_lite & g_rgl_h[i].grp)) && hook_install(GA(g_rgl_h[i].a), rgs_lite_hook, &g_rgl_h[i], &g_rgl_h[i].orig)) ok++;
-    LOG("r1: RB SIM logic-only re-run: skip mask %d, profile %d: %d hooks installed\n", g_rgs_lite, g_rgs_prof, ok);
+    LOG("r1: RB SIM logic-only re-run: skip mask %d, profile %d: %d hooks installed; last re-run pass skips too %d (groups run there anyway %d)\n", g_rgs_lite, g_rgs_prof, ok, g_rgs_lastlite, g_rgs_lastrun);
 }
 static void rgs_lite_report(void) {
     if (!g_rgs_lite && !g_rgs_prof) return;

@@ -88,6 +88,7 @@ static void ldn_MakeIpv4Address(Ctx *c) { RET(((A0 & 0xff) << 24) | ((A1 & 0xff)
 static void os_AllocateAddressRegion(Ctx *c) {
     void *p = VirtualAlloc(NULL, (SIZE_T)A1, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);      /* write watch: nvn_gl.c asks the OS which texture pages were written (P3) */
     if (p) cxxrt_guest_region((uint64_t)(uintptr_t)p, A1);      /* nncxxrt.c: readable checks inside this region are remembered (P3) */
+    if (p) { void r1_region_reserved(uint64_t size); r1_region_reserved(A1); }      /* (memory_map.c) a game region after the early walk: walked again */
     wr64(A0, (uint64_t)p);
     RET(p ? 0 : 0x1015);                                 /* any non-zero nn::Result means failure */
 }

@@ -441,7 +441,12 @@ void r1_host_stack_note(uint64_t lo, uint64_t hi);    /* model/tracking_experime
 void hs_exclude_all(void);    /* model/tracking_experiments/write_marks.c */
 int mark_setup(void);    /* model/tracking_experiments/write_marks.c */
 int mark_prepare(void);    /* model/tracking_experiments/write_marks.c (2026-11-02: the ring's direct first save, full_save.c) */
-size_t mark_fill(void);    /* model/tracking_experiments/write_marks.c */
+size_t mark_fill(int lazy, int *failed);    /* model/tracking_experiments/write_marks.c */
+int mark_finish_lazy(void (*note)(uint8_t *a), size_t *nre, int pause, size_t *filled);    /* model/tracking_experiments/write_marks.c (SSBU_LS_LAZY) */
+int ls_lazy_prepare(void);                   /* page_tracker_learned.c: SSBU_LS_LAZY for the first base (1 = lazy) */
+int ls_lazy_ready(void);                     /* page_tracker_learned.c: a rebase may be lazy */
+size_t ls_lazy_fill_unprotected(void);       /* page_tracker_learned.c: (lazy base) the window pages that were not protected copied now */
+size_t ls_lazy_note_learned(void (*note)(uint8_t *a));      /* page_tracker_learned.c: (lazy first base) the pages written during the hold's pause */
 size_t mark_recheck(void (*note)(uint8_t *a));    /* model/tracking_experiments/write_marks.c */
 int mark_finish_direct(void (*note)(uint8_t *a), size_t *nre);    /* model/tracking_experiments/write_marks.c */
 void mark_abort(void);    /* model/tracking_experiments/write_marks.c */
