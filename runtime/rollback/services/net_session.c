@@ -200,7 +200,14 @@ void rbn_arena_hint(int p1_is_network) { g_arena_p1_net = p1_is_network; }      
 static int rbn_peer_heard_ms(void);                     /* (R3 lwr) ms since the other game's rollback session was last heard, -1 = never */
 static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11]; static uint8_t g_lay_peer_ctl[0x2d];
 static RbhMsg g_lay_mine;
-const char *rbn_hs_why(void) { return g_hs_why; }      /* (R3 pub1) why the last handshake failed (rb_rollback.c's notice) */
+const char *rbn_hs_why(void) { return g_hs_why; }
+/* (2026-11-05, owner) a room's / Battle Arena's match the handshake could not make a rollback one (the game's own netcode plays
+ * it): the reason, kept until its fight starts, where rollback_controller.c says so on the screen (rbn_take_norb) */
+static volatile LONG g_norb; static char g_norb_why[300];
+int rbn_take_norb(char *why, int n) {
+    if (!InterlockedExchange(&g_norb, 0)) return 0;
+    snprintf(why, n, "%s", g_norb_why); return 1;
+}      /* (R3 pub1) why the last handshake failed (rb_rollback.c's notice) */
 static void rtt_reset(void);                            /* (R3 net3) a new opponent: its round trip is measured afresh */
 static void hs_head(RbhMsg *m, int type) { memset(m, 0, sizeof *m); m->type = (uint8_t)type; m->proto = RBH_PROTO; m->game_build = (int16_t)g_game_build; m->exe_stamp = exe_stamp(); m->nonce = g_hs_nonce; }
 static void hs_send(const void *p, int n) { if (net_rb_send(p, n)) g_hs_tx++; }
@@ -409,6 +416,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * once. Rollback matches: Smash (versus) with a room code (host / join modes). SSBU_RB_NET_ROOM_MATCH=1: the old way (test). */
     InterlockedExchange(&g_hs_room, 0);
     InterlockedExchange(&g_hs_agreed, 0);
+    InterlockedExchange(&g_norb, 0);
     /* (2026-11-02) spectators: what the last set-up left (a watched match that never reached its fight; a fighter's group) */
     AcquireSRWLockExclusive(&g_hs_lock); if (g_spec) { g_local = g_spec_saved_local; InterlockedExchange(&g_spec, 0); } ReleaseSRWLockExclusive(&g_hs_lock);
     InterlockedExchange(&g_rbs_fighter, 0); InterlockedExchange(&g_rbs_need, 0); InterlockedExchange(&g_rbs_match_tx, 0); g_rbs_gid = 0;
@@ -658,6 +666,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         if (g_rbs_gid) rbs_native(g_hs_why, -1);         /* (2026-11-02) the spectators: the game's own netcode shows them this match */
         if (lwr) {                                       /* (R3 lwr) */
             menu_notice(NULL);
+            snprintf(g_norb_why, sizeof g_norb_why, "%s", g_hs_why); InterlockedExchange(&g_norb, 1);
             printf("[rbnet] handshake %ld FAILED in the %s: %s. The %s match is played by the game's own online netcode, as set up (no rollback)\n", (long)round, arena ? "Battle Arena" : "Local Wireless room", g_hs_why, arena ? "arena's" : "room's");
             fflush(stdout); return 0;
         }

@@ -256,7 +256,17 @@ static void rbg_step_body(Ctx *c) {
     if (g_rbg_in_match == 3) return;                    /* (R3 lwr, run lwr2: both games crashed here) a room fight already running stays one until its fight-off:
                                                          * the room's match is set up (handshake, rbn_match_cancelled() 0 again) while the waiting-stage fight still runs */
     if (rbn_match_cancelled() == 2) {                   /* (R3 pub2) a Local Wireless room fight: the game's own netcode, no ring, pads untouched */
-        if (!g_rbg_in_match) { g_rbg_in_match = 3; LOG("r1: RB NET: a Local Wireless room fight: no rollback (the game's own netcode)\n"); }
+        if (!g_rbg_in_match) {
+            g_rbg_in_match = 3; LOG("r1: RB NET: a Local Wireless room fight: no rollback (the game's own netcode)\n");
+            /* (2026-11-05, owner) a match that should have had rollback (its handshake failed): said on the screen as the fight starts */
+            {   int rbn_take_norb(char *why, int n); void menu_popup(const char *title, const char *text); char why[300], t[512];
+                if (rbn_take_norb(why, sizeof why)) {
+                    snprintf(t, sizeof t, "Rollback is not on: this fight is played with the game's normal online netcode.\nWhy: %s.", why);
+                    menu_popup("NO ROLLBACK IN THIS FIGHT", t);
+                    LOG("r1: RB NET: told on the screen: no rollback in this fight (%s)\n", why);
+                }
+            }
+        }
         return;
     }
     if (rbn_match_cancelled()) {                        /* (hs12) not agreed with the other game: no rollback; rbg_pad leaves this match */
