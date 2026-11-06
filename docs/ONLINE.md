@@ -181,6 +181,11 @@ number: the whole one-way trip in frames, rounded up, plus one frame of margin, 
 4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above); rollbacks are rare. graphics.ini `input_delay` is no longer read or written;
 `SSBU_RB_NET_DELAY=<n>` still fixes it for tests. A game without the snapshot ring (not enough memory) plays with at
 least the delay that covers the whole trip (it waits for every pad). The match report in the log says the delay.
+Auto also learns from the opponent: a match in which 2% or more of the other player's pads came more than 2 frames late
+makes the next matches against the same player (this session) start from that match's delay + 1. A PC at its limit (8%
+or more of a fight's frames with more than 16.7 ms of work) turns the sound of online fights off for the rest of the
+session, with a message (F1 -> Gameplay turns it on again; a player's own choice there is never overridden;
+`SSBU_AUTO_SOUND_OFF=0`: never). The game runs at above-normal Windows priority (`SSBU_PRIORITY=normal`: off).
 
 **Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
 because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**

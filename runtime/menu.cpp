@@ -72,6 +72,7 @@ const char *ssbu_version(void);                                      /* boot.c *
 int osk_active(void);                                               /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
+extern "C" void display_refresh_switched(int *from, int *to);       /* display.c: refresh_switch (0, 0 = not switched) */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 }
@@ -587,6 +588,11 @@ static void sec_display(int cw, int ch) {
     {   /* a screen that is not k x 60 Hz (75, 144, 165 Hz ...): the game is 60 frames per second, so frames cannot all stay
          * on screen equally long and motion stutters (testers, 2026-10-20: "frame pacing is terrible, 144 Hz screen") */
         double hz; int k; display_refresh_info(&hz, &k);
+        int rs_from, rs_to; display_refresh_switched(&rs_from, &rs_to);
+        if (rs_to) {       /* (2026-11-06) refresh_switch = auto set the screen to a k x 60 Hz mode while the game runs */
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Screen set from %d Hz to %d Hz while the game runs: every frame is shown equally long.", rs_from, rs_to);
+            help("Windows puts the old rate back when the game closes. graphics.ini refresh_switch = off: the screen is never changed.");
+        }
         if (hz > 30 && k == 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Your screen runs at %.0f Hz: not a multiple of 60, so motion is uneven.", hz);
 #ifdef _WIN32
@@ -1259,6 +1265,7 @@ static int online_differs(void) {
 /* Gameplay: the input delay of online fights (graphics.ini input_delay; net_session.c reads it at each match's handshake, both
  * games take the larger of the two players' values) and every fighter and stage unlocked (unlock_all, unlock_all.c; read at start) */
 extern "C" int rbn_delay(void);
+extern "C" void gfx_fight_sound_chosen(void); extern "C" int gfx_fight_sound_was_auto_off(void);
 static void sec_gameplay(void) {
     /* (2026-11-05, owner) Auto at every start (graphics.ini is not read or written for it); a player may pick a number for
      * this session only: the match uses the larger of the two players' numbers, an Auto side counts as the delay the host
@@ -1286,13 +1293,13 @@ static void sec_gameplay(void) {
          "Kept only until you close the game; used from your next match.");
     if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, a test): it wins over this setting. Start the game with \"Play SSBU.bat\" to use it.", getenv("SSBU_RB_NET_DELAY"));
     ImGui::Separator();
-    static int fs = -1;
-    if (fs < 0) fs = gfx_fight_sound();
+    int fs = gfx_fight_sound();                   /* (2026-11-05: read every frame: the game may turn it off by itself) */
     if (onoff("fsnd", fs != 0, true)) {
-        fs = !fs; gfx_set_fight_sound(fs); ini("fight_sound", k_onoff[fs]);
+        fs = !fs; gfx_set_fight_sound(fs); gfx_fight_sound_chosen(); ini("fight_sound", k_onoff[fs]);
         printf("menu: sound in online fights: %s (from the next match)\n", k_onoff[fs]); fflush(stdout);
     }
     ImGui::SameLine(); ImGui::Text("Sound in online fights (music and effects)");
+    if (gfx_fight_sound_was_auto_off()) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Turned OFF by the game for this session: your PC was at its limit in a fight. Press the button to turn it on again.");
     help("ON (the default): you hear the music and the sound effects in online rollback fights. OFF: the fights are silent "
          "(try it if a fight stutters on your PC). Only your game: the other player can choose differently. "
          "Used from your next match. Music and effects volume apart: the game's own Options > Sound.");

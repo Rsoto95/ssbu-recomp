@@ -729,6 +729,20 @@ void rbg_fight_off(void) {
     if (!g_rbg_in_match) return;
     rb_fault_report();                                  /* once per match: the safety net and the quiet states (fault_recovery.c, snapshot_ring.c) */
     { void ladder_fight_off(void); if (g_rbg_in_match == 1) ladder_fight_off(); }   /* (lobby 1.5) an agreed rollback match: its result to the ladder (ladder_report.c) */
+    if (g_rbg_in_match == 1) {                          /* (2026-11-05) a PC at its limit: the sound off from the next fight (never over a choice in F1) */
+        int over = 0, n = 0;
+        for (int k = 0; k < g_rbg_nw; k++) if (!g_rbg_wk[k]) { n++; if (g_rbg_work[k] > 1000.0f / 60.0f) over++; }
+        static int off = -1; if (off < 0) { const char *e = getenv("SSBU_AUTO_SOUND_OFF"); off = e && e[0] == '0'; }
+        if (!off && n >= 1800 && over * 100 >= n * 8) {
+            int gfx_fight_sound_auto_off(void); void menu_popup(const char *title, const char *text);
+            if (gfx_fight_sound_auto_off()) {
+                LOG("r1: RB NET: this PC was at its limit in the fight (%d of %d frames' work over 16.7 ms, %.1f%%): the sound of online fights is turned OFF for this session (F1 > Gameplay turns it on again)\n", over, n, 100.0 * over / n);
+                menu_popup("SOUND TURNED OFF IN ONLINE FIGHTS", "Your PC was at its limit in that fight, which makes it stutter for both players.\n"
+                           "The sound of online fights is off until you close the game, to free the processor.\n"
+                           "To turn it on again: F1 > Gameplay > Sound in online fights.");
+            }
+        } else if (n >= 1800) LOG("r1: RB NET: this PC's work per frame: %d of %d frames over 16.7 ms (%.1f%%)\n", over, n, 100.0 * over / n);
+    }
     if (g_rbg_in_match == 1) { rbg_report(); r1_ring_let_go(); if (g_rg_ready) r1_ring_release(); g_rbg_rebase = 1; rbg_after_begin(); }
     else if (g_rbg_in_match == 3) LOG("r1: RB NET: the Local Wireless room fight is over\n");
     else LOG("r1: RB NET: the match that was not agreed is over after %.1f s (player 1 walked off)\n", (now_ms() - g_rbg_quit_t0) / 1000.0);

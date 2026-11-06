@@ -5,6 +5,7 @@
 #ifndef _WIN32
 #include "../rb_park.h"
 #endif
+#include <stdlib.h>                       /* qsort (the hold cost line) */
 /* Functions and variables of other runtime files that only this file uses: */
 uint64_t hook_address(const char *name);
 int hook_install_name(const char *name, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);
@@ -145,14 +146,28 @@ static void hp_add(const char *n, double ms, int spins) {
     if (i == g_hp_n) { if (g_hp_n >= 64) return; g_hp[g_hp_n++].n = n; }
     g_hp[i].ms += ms; g_hp[i].cnt++; g_hp[i].spins += spins; if (ms > g_hp[i].mx) g_hp[i].mx = ms;
 }
+/* (2026-11-05, owner: "make the state saving cheaper") on by default in a compact form (one line: the threads whose hold
+ * costs the most, from a weak PC's log); SSBU_RB_HOLD_PROF=1: every thread (the old test form), =0: off */
+static int hp_cmp(const void *a, const void *b) { double x = ((const double *)a)[0], y = ((const double *)b)[0]; return x < y ? 1 : x > y ? -1 : 0; }
 void r1_hold_prof_report(void) {
     if (g_hp_on <= 0) return;
+    if (g_hp_on == 2) {
+        double v[64][2]; double all = 0; long long spins = 0;
+        for (int i = 0; i < g_hp_n; i++) { v[i][0] = g_hp[i].ms; v[i][1] = i; all += g_hp[i].ms; spins += g_hp[i].spins; }
+        qsort(v, (size_t)g_hp_n, sizeof v[0], hp_cmp);
+        char t[900]; int o = 0;
+        for (int k = 0; k < g_hp_n && k < 6 && o < (int)sizeof t - 160; k++) { int i = (int)v[k][1];
+            o += snprintf(t + o, sizeof t - o, "%s%s %.3f ms/hold (max %.1f, retries %lld)", k ? "; " : "", g_hp[i].n, g_hp_holds ? g_hp[i].ms / g_hp_holds : 0.0, g_hp[i].mx, g_hp[i].spins); }
+        LOG("r1: HOLD COST: %lld holds, %.3f ms each in the threads (%d threads, %lld retries) + fiber check %.3f ms; most: %s\n",
+            g_hp_holds, g_hp_holds ? all / g_hp_holds : 0.0, g_hp_n, spins, g_hp_fib_n ? g_hp_fib_ms / g_hp_fib_n : 0.0, o ? t : "-");
+        return;
+    }
     LOG("r1: HOLD PROF: %lld holds; fiber checks %lld, %.4f ms each\n", g_hp_holds, g_hp_fib_n, g_hp_fib_n ? g_hp_fib_ms / g_hp_fib_n : 0.0);
     for (int i = 0; i < g_hp_n; i++) LOG("r1: HOLD PROF thread %s: %lld times, mean %.4f ms, max %.3f ms, retries %lld\n", g_hp[i].n, g_hp[i].cnt, g_hp[i].ms / (g_hp[i].cnt ? g_hp[i].cnt : 1), g_hp[i].mx, g_hp[i].spins);
 }
 static int ra_hold_save(void) {
     DWORD me = GetCurrentThreadId(); Ctx *tc; const char *nm; HANDLE h;
-    if (g_hp_on < 0) g_hp_on = getenv("SSBU_RB_HOLD_PROF") && atoi(getenv("SSBU_RB_HOLD_PROF")) > 0;
+    if (g_hp_on < 0) { const char *e = getenv("SSBU_RB_HOLD_PROF"); g_hp_on = !e || !*e ? 2 : atoi(e) > 0 ? 1 : 0; }
     if (g_hp_on) g_hp_holds++;
     g_guest_threads.count = 0;
     for (int i = 0; guest_thread_info(i, &tc, &nm, &h) && g_guest_threads.count < 256; i++) {

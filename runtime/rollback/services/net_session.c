@@ -140,7 +140,8 @@ static uint64_t g_hs_seed; static uint32_t g_match_id;  /* the agreed match: its
 static int g_hs_delay;
 /* (2026-11-05, owner) Auto (0) at every start; F1 > Gameplay may pick a number for the session (gfx_input_delay, never saved);
  * SSBU_RB_NET_DELAY (tests) wins. The match takes the larger of the two; an Auto side counts as the host's measured delay */
-static int my_delay(void) { int d = g_delay_cfg >= 0 ? g_delay_cfg : gfx_input_delay(); return d < 0 ? 0 : d > 12 ? 12 : d; }
+static int opp_floor(void);
+static int my_delay(void) { int d = g_delay_cfg >= 0 ? g_delay_cfg : gfx_input_delay(); if (d <= 0 && g_delay_cfg < 0) d = opp_floor(); return d < 0 ? 0 : d > 12 ? 12 : d; }
 /* (2026-11-03) the host resolves "auto" (0) from the round trip it measured, so both games play with the same number (before, each
  * game chose its own from its own round trip at the match start: two numbers near a boundary differed); -1 = no round trip yet */
 static int hs_auto_delay(int dm, int dp, uint64_t waited_ms);
@@ -1047,6 +1048,33 @@ static void gp_msg(long long newest, uint64_t at) {
     }
     g_gp_prev_us = at; g_gp_prev_newest = newest;
 }
+/* (2026-11-05, owner) Auto learns from the opponent: a match in which many of the other player's pads came more than 2 frames
+ * late (its PC or connection hitched: 10% of the frames in a friend's match) makes the next matches against the same
+ * opponent in this session start from one frame more (at most 7). my_delay sends it as this game's own choice, so the host
+ * takes it whichever game measured the late pads. */
+#define OPP_N 16
+static struct { char name[64]; int floor; } g_opp[OPP_N];
+static int opp_find(const char *name, int make) {
+    for (int i = 0; i < OPP_N; i++) if (g_opp[i].name[0] && !strcmp(g_opp[i].name, name)) return i;
+    if (!make) return -1;
+    for (int i = 0; i < OPP_N; i++) if (!g_opp[i].name[0]) { snprintf(g_opp[i].name, sizeof g_opp[i].name, "%s", name); return i; }
+    return -1;
+}
+static int opp_floor(void) { int i = g_hs_opp[0] ? opp_find(g_hs_opp, 0) : -1; return i >= 0 ? g_opp[i].floor : 0; }
+static void opp_learn(void) {                           /* at the match's end (rbn_report with the match's frames) */
+    static uint32_t done_id;
+    if (!g_hs_opp[0] || g_lt_n < 1800 || done_id == g_match_id || g_delay_cfg >= 0 || gfx_input_delay() > 0) return;
+    long long late = g_lt_hist[0];
+    if (late * 100 < g_lt_n * 2) return;                /* (2% of the frames more than 2 frames late) */
+    done_id = g_match_id;
+    int i = opp_find(g_hs_opp, 1); if (i < 0) return;
+    int f = g_hs_delay + 1; if (f > 7) f = 7;
+    if (f > g_opp[i].floor) {
+        g_opp[i].floor = f;
+        printf("[rbnet] auto delay: %s's pads came more than 2 frames late in %lld of %lld frames (%.1f%%): the next matches against them start from delay %d\n", g_hs_opp, late, g_lt_n, 100.0 * late / g_lt_n, f);
+        fflush(stdout);
+    }
+}
 static void lt_report(FILE *o) {
     if (!g_lt_n) return;
     fprintf(o, "[rbnet] report: the other player's pads against the moment this game needed them (%lld frames; mean %.1f ms early; latest %.1f ms %s at frame %lld): "
@@ -1311,6 +1339,7 @@ void rbn_report(FILE *o, long long frames) {
     fprintf(o, "[rbnet] report: pads given %lld, predicted %lld (%.1f%%), mispredictions %lld; finalized frames %lld; checksums compared %lld, DESYNCS %lld (first %lld)\n",
             g_stat_padget, g_stat_pred, g_stat_padget ? 100.0 * g_stat_pred / g_stat_padget : 0.0, g_stat_mis, g_hfinal_upto, g_check_ok + g_desync, g_desync, g_desync_first);
     lt_report(o);
+    opp_learn();
     fprintf(o, "[rbnet] report: pad check of the final simulations: %lld pad values differ from the final ones (first frame %lld)\n", g_padcheck_bad, g_padcheck_first);
     fprintf(o, "[rbnet] report: packets sent %lld (failed %lld), received %lld (bad %lld, queue full %lld); remote pads up to %d, local up to %d\n",
             (long long)g_tx_pkts, (long long)g_tx_fail, (long long)g_rx_pkts, (long long)g_rx_bad, (long long)g_rx_drop, rb_input_remote_newest_consecutive_frame(g_remote), rb_input_local_newest_frame());
