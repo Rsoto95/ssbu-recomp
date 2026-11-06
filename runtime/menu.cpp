@@ -1280,7 +1280,7 @@ static void sec_gameplay(void) {
     }
     ImGui::SetWindowFontScale(1.0f);
     help("Auto (recommended, and what the game starts with every time): chosen from the ping at the start of every match, with "
-         "one frame of margin (2 frames up to 33 ms of ping, 3 up to 67 ms, 4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above), "
+         "one frame of margin (1 frame under 20 ms of ping, 2 up to 33 ms, 3 up to 67 ms, 4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above), "
          "so rollbacks are rare. A number: lower responds quicker but fighters jump more with a slow connection; higher is smoother "
          "but slower to respond. The match uses the larger of the two players' choices (Auto counts as the measured one). "
          "Kept only until you close the game; used from your next match.");
