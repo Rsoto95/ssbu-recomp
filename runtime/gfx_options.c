@@ -27,7 +27,7 @@ int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
 const char *gfx_language(void) { gfx_options(); return g_gfx_language; }
 static int g_gfx_unlock_all;                         /* unlock_all = off | on (unlock_all.c) */
 int gfx_unlock_all(void) { gfx_options(); return g_gfx_unlock_all; }
-static volatile int g_gfx_input_delay = 0;            /* input_delay = 1 .. 8 | auto 0 (net_session.c); the F1 menu changes it while running */
+static volatile int g_gfx_input_delay = 0;            /* 0 = auto at every start; 1 .. 7 chosen in F1 for the session (net_session.c) */
 int gfx_input_delay(void) { gfx_options(); return g_gfx_input_delay; }
 void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
 /* (2026-11-02) the game's own Online menu (Battle Arenas) on our server: online_menu = off | on, online_menu_server =
@@ -444,7 +444,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "volume")) { g_gfx_volume = -1; if (_stricmp(val, "auto")) { int v = atoi(val); g_gfx_volume = v < 0 ? 0 : v > 100 ? 100 : v; } }
         else if (!_stricmp(key, "language")) { g_gfx_language[0] = 0; if (_stricmp(val, "auto")) snprintf(g_gfx_language, sizeof g_gfx_language, "%s", val); }
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
-        else if (!_stricmp(key, "input_delay")) { int v = atoi(val); g_gfx_input_delay = !_stricmp(val, "auto") ? 0 : v < 1 ? 3 : v > 8 ? 8 : v; }      /* net_session.c */
+        else if (!_stricmp(key, "input_delay")) { }    /* (2026-11-05, owner) not read: every start is Auto (F1 > Gameplay changes it for the session) */
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
         else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
         else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }

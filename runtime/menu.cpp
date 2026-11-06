@@ -1258,13 +1258,31 @@ static int online_differs(void) {
  * games take the larger of the two players' values) and every fighter and stage unlocked (unlock_all, unlock_all.c; read at start) */
 extern "C" int rbn_delay(void);
 static void sec_gameplay(void) {
-    /* (2026-11-05, owner) no choice any more: the delay is automatic, from the ping (net_session.c hs_auto_delay) */
-    ImGui::Text("Input delay of online fights: AUTOMATIC");
+    /* (2026-11-05, owner) Auto at every start (graphics.ini is not read or written for it); a player may pick a number for
+     * this session only: the match uses the larger of the two players' numbers, an Auto side counts as the delay the host
+     * measures from the ping (net_session.c hs_auto_delay) */
+    static int dl = -1;
+    if (dl < 0) dl = gfx_input_delay();
+    ImGui::Text("Input delay of online fights (frames)");
     { int d = rbn_delay(); if (d > 0) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "(this match: %d frame%s)", d, d == 1 ? "" : "s"); } }
-    help("Chosen by itself at the start of every online match from the ping between the two players: the delay covers the "
-         "trip of the other player's buttons plus one frame of margin (2 frames up to 33 ms of ping, 3 up to 67 ms, 4 up to 100 ms, "
-         "5 up to 133 ms, 6 up to 167 ms, 7 above), so rollbacks are rare. Both players always play with the same number. Nothing to set.");
-    if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, a test): it wins over the automatic one. Start the game with \"Play SSBU.bat\" for the automatic delay.", getenv("SSBU_RB_NET_DELAY"));
+    ImGui::SetWindowFontScale(1.2f);
+    for (int d = 0; d <= 7; d++) {
+        char l[16];
+        if (d) snprintf(l, sizeof l, "%d##dl%d", d, d); else snprintf(l, sizeof l, "Auto##dl0");
+        if (d) ImGui::SameLine();
+        if (ImGui::RadioButton(l, dl == d)) {
+            dl = d; gfx_set_input_delay(d);
+            if (d) printf("menu: input delay of online fights: %d (this session only)\n", d); else printf("menu: input delay of online fights: auto (this session only)\n");
+            fflush(stdout);
+        }
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    help("Auto (recommended, and what the game starts with every time): chosen from the ping at the start of every match, with "
+         "one frame of margin (2 frames up to 33 ms of ping, 3 up to 67 ms, 4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above), "
+         "so rollbacks are rare. A number: lower responds quicker but fighters jump more with a slow connection; higher is smoother "
+         "but slower to respond. The match uses the larger of the two players' choices (Auto counts as the measured one). "
+         "Kept only until you close the game; used from your next match.");
+    if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, a test): it wins over this setting. Start the game with \"Play SSBU.bat\" to use it.", getenv("SSBU_RB_NET_DELAY"));
     ImGui::Separator();
     static int fs = -1;
     if (fs < 0) fs = gfx_fight_sound();

@@ -138,10 +138,9 @@ static uint64_t g_hs_seed; static uint32_t g_match_id;  /* the agreed match: its
  * 0 = auto) travels in RbhMatch.pad0 (the joiner's CHOICE); the host's proposal carries the larger of the two and both games
  * play the match with it (a different delay on each side would desync: each takes the other's first frames as empty) */
 static int g_hs_delay;
-/* (2026-11-05, owner: "players choosing the delay is a problem") the delay is always automatic, from the round trip the host
- * measures (hs_auto_delay): graphics.ini input_delay / F1 no longer choose it; only SSBU_RB_NET_DELAY (tests) fixes it.
- * 0 = auto (sent to the other game as such; an older host still takes the larger of the two, i.e. its own setting) */
-static int my_delay(void) { int d = g_delay_cfg >= 0 ? g_delay_cfg : 0; return d < 0 ? 0 : d > 12 ? 12 : d; }
+/* (2026-11-05, owner) Auto (0) at every start; F1 > Gameplay may pick a number for the session (gfx_input_delay, never saved);
+ * SSBU_RB_NET_DELAY (tests) wins. The match takes the larger of the two; an Auto side counts as the host's measured delay */
+static int my_delay(void) { int d = g_delay_cfg >= 0 ? g_delay_cfg : gfx_input_delay(); return d < 0 ? 0 : d > 12 ? 12 : d; }
 /* (2026-11-03) the host resolves "auto" (0) from the round trip it measured, so both games play with the same number (before, each
  * game chose its own from its own round trip at the match start: two numbers near a boundary differed); -1 = no round trip yet */
 static int hs_auto_delay(int dm, int dp, uint64_t waited_ms);
