@@ -36,6 +36,7 @@ int gfx_online_menu(void);               /* online_menu = off 0 | on 1: the game
 void gfx_online_menu_env(void);          /* (boot.c, first thing) online_menu = on: SSBU_ONLINE_MENU / _SERVER / SSBU_ONLINE set unless given */
 int gfx_fight_sound(void);                /* fight_sound = off 0 | on 1: music and effects in online rollback fights (snapshot_ring.c) */
 void gfx_set_fight_sound(int on);         /* (the F1 menu: used from the next match) */
+int gfx_refresh_switch(void);             /* refresh_switch = auto (1, default) | off (0): display.c sets a k x 60 Hz mode while the game runs */
 int gfx_sharpening(void);                 /* sharpening = 0 (off, default) .. 100 (nvn_vk_draw.c sharpen_present) */
 int gfx_screenshot_key(void);             /* screenshot_key = F1..F24 (a virtual key code) | off 0; default F12 (nvn_vk_draw.c) */
 const char *gfx_screenshot_dir(void);     /* screenshot_dir = a folder (UTF-8) | "" = <exe>\..\screenshots (nvn_vk_draw.c) */

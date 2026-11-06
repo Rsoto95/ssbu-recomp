@@ -72,6 +72,7 @@ const char *ssbu_version(void);                                      /* boot.c *
 int osk_active(void);                                               /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
+extern "C" void display_refresh_switched(int *from, int *to);       /* display.c: refresh_switch (0, 0 = not switched) */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 }
@@ -587,6 +588,11 @@ static void sec_display(int cw, int ch) {
     {   /* a screen that is not k x 60 Hz (75, 144, 165 Hz ...): the game is 60 frames per second, so frames cannot all stay
          * on screen equally long and motion stutters (testers, 2026-10-20: "frame pacing is terrible, 144 Hz screen") */
         double hz; int k; display_refresh_info(&hz, &k);
+        int rs_from, rs_to; display_refresh_switched(&rs_from, &rs_to);
+        if (rs_to) {       /* (2026-11-06) refresh_switch = auto set the screen to a k x 60 Hz mode while the game runs */
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Screen set from %d Hz to %d Hz while the game runs: every frame is shown equally long.", rs_from, rs_to);
+            help("Windows puts the old rate back when the game closes. graphics.ini refresh_switch = off: the screen is never changed.");
+        }
         if (hz > 30 && k == 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Your screen runs at %.0f Hz: not a multiple of 60, so motion is uneven.", hz);
 #ifdef _WIN32
