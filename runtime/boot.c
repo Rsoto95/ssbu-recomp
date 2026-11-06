@@ -582,6 +582,14 @@ int main(int argc, char **argv) {
      * the display and the PC stay awake until it closes. SSBU_KEEP_AWAKE=0: Windows decides as before. */
     {   const char *e = getenv("SSBU_KEEP_AWAKE");
         if (!(e && e[0] == '0') && SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)) printf("display: the screen and the PC are kept awake while the game runs (SSBU_KEEP_AWAKE=0: off)\n"); }
+    /* (2026-11-05, owner: a friend's slower PC had hitches of 390-700 ms that nothing in the game explains: Windows gave the
+     * processor to other programs) the game asks for ABOVE NORMAL priority (not HIGH: that can starve the mouse, the sound
+     * driver or Discord). SSBU_PRIORITY=normal: Windows' default. */
+#ifdef _WIN32
+    {   const char *e = getenv("SSBU_PRIORITY");
+        if (!(e && !_stricmp(e, "normal")) && SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS))
+            printf("display: the game runs at above-normal priority (SSBU_PRIORITY=normal: off)\n"); }
+#endif
     int seconds = argc > 2 ? atoi(argv[2]) : 0;      /* no number = no time limit (a player's launch); tests pass theirs */
     /* the lifted code uses the host stack for every guest call: give it plenty */
     HANDLE t = CreateThread(NULL, (SIZE_T)1 << 30, guest_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);

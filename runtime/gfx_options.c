@@ -55,6 +55,16 @@ void gfx_online_menu_env(void) {
 static volatile int g_gfx_fight_sound = 1;            /* fight_sound = on | off (on when the key is missing, 2026-11-05) (snapshot_ring.c); the F1 menu changes it while running */
 int gfx_fight_sound(void) { gfx_options(); return g_gfx_fight_sound; }
 void gfx_set_fight_sound(int on) { gfx_options(); g_gfx_fight_sound = on; }
+/* (2026-11-05) the game turned the sound off by itself for this session (a PC at its limit, rollback_controller.c); a player's
+ * own choice in F1 (gfx_fight_sound_chosen) is never overridden */
+static volatile int g_gfx_fight_sound_chosen, g_gfx_fight_sound_auto_off;
+void gfx_fight_sound_chosen(void) { g_gfx_fight_sound_chosen = 1; g_gfx_fight_sound_auto_off = 0; }
+int gfx_fight_sound_auto_off(void) {
+    gfx_options();
+    if (g_gfx_fight_sound_chosen || !g_gfx_fight_sound) return 0;
+    g_gfx_fight_sound = 0; g_gfx_fight_sound_auto_off = 1; return 1;
+}
+int gfx_fight_sound_was_auto_off(void) { return g_gfx_fight_sound_auto_off; }
 static int g_gfx_sharpening;                         /* sharpening = 0 .. 100 */
 int gfx_sharpening(void) { gfx_options(); return g_gfx_sharpening; }
 static char g_gfx_shot_dir[400];                     /* screenshot_dir = a folder (UTF-8) | empty: <install>\screenshots */
