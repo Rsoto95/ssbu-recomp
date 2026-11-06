@@ -31,6 +31,8 @@ int menu_input_blocked(void) { return 0; }
 void menu_request_toggle(void) {}
 void menu_notice(const char *text) { (void)text; }      /* (the message is in the log only) */
 void menu_toast(const char *text, int ms) { (void)text; (void)ms; }      /* (the message is in the log only) */
+int menu_online_blocked(void) { return 0; }      /* (2026-11-05) the version check needs the menu (WinHTTP) */
+void menu_online_entered(void) {}
 void menu_popup(const char *title, const char *text) { printf("menu: popup (no menu in this build): %s: %s\n", title ? title : "", text ? text : ""); fflush(stdout); }
 int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l) {
     (void)hwnd; (void)l;
