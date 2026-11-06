@@ -67,6 +67,8 @@ int gfx_fight_sound_auto_off(void) {
 int gfx_fight_sound_was_auto_off(void) { return g_gfx_fight_sound_auto_off; }
 static int g_gfx_sharpening;                         /* sharpening = 0 .. 100 */
 int gfx_sharpening(void) { gfx_options(); return g_gfx_sharpening; }
+static int g_gfx_refresh_switch = 1;                  /* refresh_switch = auto (1) | off (0): display.c refresh_switch */
+int gfx_refresh_switch(void) { gfx_options(); return g_gfx_refresh_switch; }
 static char g_gfx_shot_dir[400];                     /* screenshot_dir = a folder (UTF-8) | empty: <install>\screenshots */
 const char *gfx_screenshot_dir(void) { gfx_options(); return g_gfx_shot_dir; }
 static int g_gfx_shot_key = 0x7b;                    /* screenshot_key = F12 (VK_F12) by default; F1..F24, off = 0 */
@@ -227,6 +229,12 @@ GFX_FIGHT_SOUND_MARK
 ";   online_menu_server = <IPv4 address> changes the server (default " GFX_ONLINE_MENU_SERVER_DEFAULT ").\r\n"
 GFX_ONLINE_DEFAULTS_MARK
 "online_menu = on\r\n"
+"\r\n"
+"; refresh_switch = auto | off\r\n"
+";   auto: on a screen that is not a multiple of 60 Hz (75, 144, 165, 175 Hz ...) the game sets it to 120 Hz (or 60 /\r\n"
+";   180 / 240) while it runs, so every frame stays on screen equally long; Windows puts the old rate back when the game\r\n"
+";   closes. Not with vsync = vrr (G-Sync / FreeSync). off: the screen is never changed. Read at start.\r\n"
+"refresh_switch = auto\r\n"
 "\r\n"
 "; sharpening = 0 .. 100      (Vulkan)\r\n"
 ";   0 = off. Sharpens the picture on its way to the window, without halos (kept inside each pixel's neighbours).\r\n"
@@ -458,6 +466,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
         else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
         else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }
+        else if (!_stricmp(key, "refresh_switch")) g_gfx_refresh_switch = !(!_stricmp(val, "off") || !strcmp(val, "0"));      /* display.c */
         else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
         else if (!_stricmp(key, "screenshot_dir")) snprintf(g_gfx_shot_dir, sizeof g_gfx_shot_dir, "%s", val);      /* nvn_vk_draw.c */
         else if (!_stricmp(key, "screenshot_key")) { int n = (val[0] == 'F' || val[0] == 'f') ? atoi(val + 1) : 0; g_gfx_shot_key = n >= 1 && n <= 24 ? 0x70 + n - 1 : 0; }      /* VK_F1 = 0x70 */

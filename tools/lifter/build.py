@@ -34,6 +34,9 @@ PLAT_FLAGS += MACOS_MIN
 # Linux x86-64: 16-byte atomics (the lifted LDXP/STXP, CASP) inline as cmpxchg16b, as clang does by default for Windows x64;
 # without it -O1 code calls __atomic_compare_exchange_16 (libatomic), which the libraries are not linked with
 PLAT_FLAGS += ['-mcx16'] if TARGET_LINUX else []
+# The Windows build's tentative definitions (g_rgs_on, g_t_poll, ...) live in more than one rollback file and merge as
+# COFF common symbols there; Linux compilers default to -fno-common, so ask for the same merge.
+PLAT_FLAGS += ['-fcommon'] if TARGET_LINUX else []
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN] + PLAT_FLAGS
 HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c', 'nnpad_gca.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
                 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'unlock_all.c', 'rollback/model/game_state.c', 'rollback/model/page_tracker_learned.c', 'rollback/model/memory_map.c', 'rollback/model/threads.c', 'rollback/model/full_save.c', 'rollback/model/tracking_experiments/fast_save.c', 'rollback/model/tracking_experiments/write_marks.c', 'rollback/model/tracking_experiments/write_protection.c', 'rollback/model/runahead.c', 'rollback/model/guest_heap.c', 'rollback/model/snapshot_ring.c', 'rollback/model/os_objects_state.c', 'rollback/debug/ring_simulation.c', 'rollback/debug/ring_audit.c', 'rollback/debug/call_trace.c', 'rollback/debug/state_measure.c', 'rollback/controller/rollback_controller.c', 'rollback/controller/fault_recovery.c',
@@ -195,9 +198,26 @@ if TARGET_POSIX:
         return subprocess.run(['pkg-config'] + list(args) + ['sdl3', 'freetype2', 'openssl', 'libavformat', 'libavcodec', 'libswscale', 'libswresample', 'libavutil'], capture_output=True, text=True, check=True).stdout.split()
     _sdl_inc = HOST_FLAGS.index('-I', HOST_FLAGS.index('-Ddyn_sym_count=(*game_dyn_sym_count_p)'))      # the SDL3 VC package: the system's SDL3 instead
     HOST_FLAGS = HOST_FLAGS[:_sdl_inc] + HOST_FLAGS[_sdl_inc + 2:] + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat')] + pkg('--cflags')
-    # plat_mf.c: the Media Foundation subset nnmovie_mf.c uses, on FFmpeg. Not in the Linux build yet: online play
-    # (net_relay.c: Winsock extensions, COM UPnP; net_off.c answers "off", as with SSBU_ONLINE unset)
-    HOST_SOURCES = [n for n in HOST_SOURCES if n not in ('net_relay.c', 'rollback/model/page_tracker_learned.c', 'rollback/controller/rollback_controller.c', 'rollback/controller/fault_recovery.c') and not n.startswith(('rollback/model/', 'rollback/debug/')) or n in ('rollback/model/game_state.c', 'rollback/model/input_history.c')] + ['plat_posix.c', 'plat_mf.c', 'net_off.c']      # rb_learned.c: Windows only, like the state save it belongs to (r1_state.c is stubs here)
+    # plat_mf.c: the Media Foundation subset nnmovie_mf.c uses, on FFmpeg. Linux keeps the real online transport
+    # (net_relay.c + net_minilobby.c) and uses net_upnp_posix.c for the absent UPnP mapper.
+    if TARGET_LINUX:
+        # The real rollback state on Linux: rb_park.c + the POSIX page tracker, model and controller. The Windows-only
+        # pieces (marked-DLL page tracker, SEH write marks, fault recovery) stay out; fault_recovery_posix.c answers "none".
+        HOST_SOURCES = [n for n in HOST_SOURCES if n not in (
+            'rollback/model/page_tracker_learned.c',
+            'rollback/model/tracking_experiments/fast_save.c', 'rollback/model/tracking_experiments/write_marks.c',
+            'rollback/model/tracking_experiments/write_protection.c',
+            'rollback/debug/call_trace.c', 'rollback/debug/ring_audit.c', 'rollback/debug/state_measure.c',
+            'rollback/controller/fault_recovery.c')] + [
+            'plat_posix.c', 'plat_mf.c',
+            'rollback/rb_park.c',
+            'rollback/model/page_tracker_posix.c',
+            'rollback/debug/ring_simulation.c',
+            'rollback/controller/rollback_controller.c',
+            'rollback/controller/fault_recovery_posix.c']
+        HOST_SOURCES = list(dict.fromkeys(HOST_SOURCES))
+    else:
+        HOST_SOURCES = [n for n in HOST_SOURCES if n not in ('net_relay.c', 'rollback/model/page_tracker_learned.c', 'rollback/controller/rollback_controller.c', 'rollback/controller/fault_recovery.c') and not n.startswith(('rollback/model/', 'rollback/debug/')) or n in ('rollback/model/game_state.c', 'rollback/model/input_history.c')] + ['plat_posix.c', 'plat_mf.c', 'net_off.c']
     LIBS = pkg('--libs') + ['-lGL', '-lm', '-ldl', '-lpthread']      # libGL: the OpenGL front end is linked (not used)
     if TARGET_MACOS:                                     # OpenGL is a system framework; dl / pthread are in libSystem
         LIBS = pkg('--libs') + ['-framework', 'OpenGL', '-lm']

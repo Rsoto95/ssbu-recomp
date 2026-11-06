@@ -1,0 +1,29 @@
+# Boot -> battle (Mario vs CPU) on Linux, for SSBU_SEQ (see nnhid.c).
+# Use a save that has already seen the first-boot "Milestones"/"Unlocked!" banners (press A through them once); a brand
+# new save shows them between the title and the menu and this sequence stops there. The Linux movie path does not raise
+# input_mark("movie"), so the title is found by its draw count and A is pressed until it is there.
+@until:36-44/30:Z/200
+# title -> main menu (746-759 draws); "Mischia" (Smash) is the item under the cursor
+30:Z
+@draws:700-800/40 30:Z
+# Smash menu (same draw count): "Incontro normale" is the default item -> rules screen (384 draws)
+150:Z
+# rules -> stage select (274-289 draws): A picks the stage under the hand, the first one (Battlefield)
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+# loading (45 draws), then character select (185-199 draws): P1 hand starts on its panel
+@draws:175-205/60
+# hand up to the first portrait row, left onto Mario, A = pick. Player 2 is already a level 3 CPU with a random fighter.
+30:u/30 20:l/18 30:Z
+# "Ready to fight" banner (200-205 draws): move the hand onto it and press A = start the battle
+60:r/50 20:d/8 30:Z
+# loading splash (38-45 draws), then the battle itself (more than 205 draws per frame); the countdown takes about 250 polls
+@draws:30-60/20
+@draws:206-450/60
+280
+# player 1 acts (the @fight anchor counts from the first fighters' frame line)
+@fight
+60:r/50 10:Z 25:Z 25:Z 40:l/50 10:C 40:X 30:l/30 10:Z 40:r/20 5:Z 60:C/4 20:Z 40:d/20 10:X
+60:r/50 10:Z 25:Z 25:Z 40:l/50 10:C 40:X 30:l/30 10:Z 40:r/20 5:Z 60:C/4 20:Z 40:u/6 10:X
+60:r/50 10:Z 25:Z 25:Z 40:l/50 10:C 40:X 30:l/30 10:Z 40:r/20 5:Z 60:C/4 20:Z 40:d/20 10:X
+60:r/50 10:Z 25:Z 25:Z 40:l/50 10:C 40:X 30:l/30 10:Z 40:r/20 5:Z 60:C/4 20:Z 40:u/6 10:X

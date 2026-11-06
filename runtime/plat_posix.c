@@ -552,7 +552,62 @@ typedef struct { FiberRegs uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *sta
 #else
 typedef struct { ucontext_t uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *stack; size_t stack_size; int is_thread; } Fiber;
 #endif
+/* Rollback: a switched-away fiber's host side (the ucontext/FiberRegs and the fixed fields, plus where its host stack is).
+ * Fib is in game_state_internal.h; this snapshot keeps the private Fiber layout here (the type is in plat/windows.h). */
 static __thread Fiber *t_fiber;
+int plat_fiber_snapshot(void *fiber, PlatFiberSnapshot *s) {
+    Fiber *f = fiber;
+    if (!f || !s) return 0;
+    if (sizeof (Fiber) > sizeof s->blk) return 0;
+    memset(s, 0, sizeof *s);
+    s->lo = (uintptr_t)f->stack;
+    s->hi = (uintptr_t)f->stack + f->stack_size;
+#if defined(__APPLE__) && defined(__aarch64__)
+    s->sp = (uintptr_t)f->uc.r[12];
+#else
+    s->sp = (uintptr_t)f->uc.uc_mcontext.gregs[REG_RSP];
+#endif
+    memcpy(s->blk, f, sizeof (Fiber));
+    return 1;
+}
+/* Puts the host fiber back. The saved host stack starts 64 bytes below the saved SP (the caller copied [sp - 64, hi)). */
+int plat_fiber_restore(void *fiber, const PlatFiberSnapshot *s, const void *stack, size_t n) {
+    Fiber *f = fiber;
+    if (!f || !s || sizeof (Fiber) > sizeof s->blk) return 0;
+    memcpy(f, s->blk, sizeof (Fiber));
+    if (stack && n) {
+        uintptr_t dst = s->sp >= 64 ? s->sp - 64 : s->sp;
+        if (dst < s->lo || dst >= s->hi) return 0;
+        if (n > s->hi - dst) n = s->hi - dst;
+        memcpy((void *)dst, stack, n);
+    }
+    return 1;
+}
+int plat_fiber_bounds(void *fiber, uintptr_t *lo, uintptr_t *hi) {
+    Fiber *f = fiber;
+    if (!f || !f->stack) return 0;
+    *lo = (uintptr_t)f->stack; *hi = (uintptr_t)f->stack + f->stack_size;
+    return 1;
+}
+/* The host stack of a guest thread (rollback: a host stack inside a saved window is not simulation state). */
+int plat_thread_stack_bounds(HANDLE h, uintptr_t *lo, uintptr_t *hi) {
+    pthread_t t = h == PSEUDO_THREAD ? pthread_self() : is_obj(h) ? ((PlatObj *)h)->th : 0;
+    if (!t) return 0;
+#ifdef __APPLE__
+    *hi = (uintptr_t)pthread_get_stackaddr_np(t);
+    *lo = *hi - (uintptr_t)pthread_get_stacksize_np(t);
+    return 1;
+#else
+    pthread_attr_t a;
+    if (pthread_getattr_np(t, &a)) return 0;
+    void *addr = NULL; size_t sz = 0;
+    int ok = pthread_attr_getstack(&a, &addr, &sz) == 0;
+    pthread_attr_destroy(&a);
+    if (!ok || !addr) return 0;
+    *lo = (uintptr_t)addr; *hi = *lo + sz;
+    return 1;
+#endif
+}
 LPVOID ConvertThreadToFiber(LPVOID param) {
     if (t_fiber) return t_fiber;
     Fiber *f = calloc(1, sizeof *f);
@@ -903,6 +958,18 @@ UINT ResetWriteWatch(LPVOID base, SIZE_T size) {
     return i < 0;
 }
 #endif
+/* Rollback: start watching a range that was not allocated with MEM_WRITE_WATCH (the extras). 1 = the range is watched
+ * now (GetWriteWatch/ResetWriteWatch answer for it), 0 = it is not (the caller compares it every time). */
+int plat_writewatch_add(void *addr, size_t size) {
+    if (!addr || !size) return 0;
+    uintptr_t lo = (uintptr_t)addr & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)addr + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    pthread_mutex_lock(&g_vm_lock);
+    ww_add(lo, hi - lo);
+    vm_sync(lo, hi);
+    pthread_mutex_unlock(&g_vm_lock);
+    ULONG_PTR n = 1; PVOID p[1]; ULONG gran = 0;
+    return GetWriteWatch(0, (void *)lo, hi - lo, p, &n, &gran) == 0;
+}
 /* MEM_RESERVE maps the range PROT_NONE (address space only) and MEM_COMMIT is an mprotect; reservations start on 64 KB, the
  * Windows allocation granularity. Decommit (VirtualFree MEM_DECOMMIT) drops the pages, so a new commit reads zeros as on Windows. */
 LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {

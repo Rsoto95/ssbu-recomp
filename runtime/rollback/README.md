@@ -26,7 +26,9 @@ Where each file used to be: `rb.h` -> `rollback.h`, `rb_input.c` -> `model/input
 | `model/threads.c` | The other guest threads parked while memory is copied; nn::os objects; the job system's fibers |
 | `model/full_save.c` | The full save / restore (the base the ring starts from) |
 | `model/snapshot_ring.c` | The ring of the last 8 states (capture, load, rebase) |
-| `model/page_tracker_learned.c` | Which pages the game writes (the learned set) and the presentation pool |
+| `model/page_tracker_learned.c` | Which pages the game writes (the learned set) and the presentation pool (Windows only) |
+| `model/page_tracker_posix.c` | The same job on Linux: window 1 write watch, window 2 page compare, extras write watch, parallel page jobs |
+| `rb_park.c` | The Linux cooperative park gate: guest threads stop at SDK import boundaries while memory is copied |
 | `model/runahead.c` | Run-ahead of one frame (SSBU_RUNAHEAD) on the same save / restore |
 | `model/guest_heap.c` | The guest C heap inside the snapshot (SSBU_R1) |
 | `model/tracking_experiments/` | Older experiments kept because `tests/r1_*.py` use them: fast save, store marks, write protection |

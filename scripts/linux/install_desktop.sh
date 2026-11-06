@@ -24,7 +24,7 @@ mkdir -p "$APPS" "$DATA"
 # a small launcher script, so that the desktop entry holds no quoting of paths with spaces
 cat > "$DATA/launch.sh" <<EOF
 #!/bin/sh
-exec "$REPO/deps/venv/bin/python" "$REPO/scripts/run.py" --linux --log "$DATA/last_run.log" "\$@"
+exec "$REPO/deps/venv/bin/python" "$REPO/scripts/run.py" --linux --play --log "$DATA/last_run.log" "\$@"
 EOF
 chmod +x "$DATA/launch.sh"
 cat > "$ENTRY" <<EOF
@@ -32,8 +32,9 @@ cat > "$ENTRY" <<EOF
 Type=Application
 Name=Super Smash Bros. Ultimate (recomp)
 Comment=Native Linux build of ssbu-recomp
+Keywords=ssbu;switch;
 Exec="$DATA/launch.sh"
-Icon=applications-games
+Icon=$REPO/media/opensmash_icon_512.png
 Terminal=false
 Categories=Game;
 EOF

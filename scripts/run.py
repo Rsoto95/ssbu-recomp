@@ -443,6 +443,38 @@ def ensure_firewall(exe, build, gini):
     return 'blocked' if st and st[1] else 'missing'      # (2026-11-05, owner) the game says it on screen (menu.cpp firewall_notice)
 
 
+def uffd_warn():
+    """Linux: the rollback ring's write watch runs on userfaultfd (plat_posix.c ww_init). Warn only when the kernel
+    would actually refuse it: try the syscall and the UFFDIO_API handshake exactly as ww_init does. (Reading
+    vm.unprivileged_userfaultfd is NOT this check: it is 0 on Fedora, but user-mode-only faults are allowed and the
+    ring works.)"""
+    if os.uname().machine != 'x86_64':
+        return
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        fd = libc.syscall(323, os.O_CLOEXEC | os.O_NONBLOCK | 1)        # userfaultfd(UFFD_USER_MODE_ONLY)
+        if fd >= 0:
+            api = (ctypes.c_uint64 * 3)(0xAA, (1 << 13) | (1 << 15), 0)  # UFFD_API; WP_UNPOPULATED | WP_ASYNC
+            ok = libc.ioctl(fd, 0xC018AA3F, api) == 0                   # UFFDIO_API, same answer ww_init needs
+            os.close(fd)
+            if ok:
+                return
+    except (OSError, AttributeError):
+        pass
+    print('WARNING: the kernel refused userfaultfd write protection (what the rollback ring\'s write watch needs):\n'
+          'the rollback ring cannot start (online play falls back to delay-based). Until the next boot:\n'
+          '  sudo sysctl vm.unprivileged_userfaultfd=1\n'
+          'for good:\n'
+          '  echo vm.unprivileged_userfaultfd=1 | sudo tee /etc/sysctl.d/90-ssbu-uffd.conf\n'
+          '(or give only the game exe the capability: sudo setcap cap_sys_ptrace=ep <build>/work/ssbu_native)\n'
+          'These workarounds weaken the machine: the sysctl lets every local process use userfaultfd, and\n'
+          'cap_sys_ptrace lets this executable inspect other processes. Use them only on a machine you trust,\n'
+          'and undo them when done (sudo rm /etc/sysctl.d/90-ssbu-uffd.conf; sudo sysctl vm.unprivileged_userfaultfd=0;\n'
+          'sudo setcap -r <exe>).')
+    sys.stdout.flush()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--userdata', help='the save folder (required, except with --play)')
@@ -543,11 +575,13 @@ def main():
             rb_moved = b'Battle Arenas and rollback netcode are on by default' in f.read()
     except OSError:
         rb_moved = True
-    if a.play and a.exe == main_exe and not (a.linux or a.mac) and (not rb_moved or ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false')):   # (fork: on unless graphics.ini says off)
+    if a.play and a.exe == main_exe and not a.mac and (not rb_moved or ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false')):   # (fork: on unless graphics.ini says off; Windows and Linux)
         # F1 > Experimental > Rollback netcode: the normal exe and game DLL with SSBU_RB_NET (since R4 the ring saves the fight on
         # the normal build: runtime/rb_learned.c); the old pair ssbu_native_rb.exe + ssbu_game_r1.dll of an older install is not used
         rollback = True
         print('Rollback netcode on (the normal build; no second compile needed)')
+        if a.linux:
+            print('Linux rollback is experimental: the two-instance stress test is still pending and a long match can still fail; fallback: SSBU_RB_NET_NOROLLBACK=1 or Rollback off in F1.')
     exe = os.path.join(work, a.exe)
     native = os.path.join(work, main_exe)
     if not os.path.exists(exe):
@@ -652,6 +686,18 @@ def main():
     for kv in a.env:
         k, _, v = kv.partition('=')
         env[k] = v
+    if a.linux and (rollback or env.get('SSBU_RB_NET') or env.get('SSBU_RB_SIM')):
+        # (2026-11-03) the audio threads' host side is not part of the snapshot: a load rewinds their guest memory while the
+        # device keeps its own state, which crashed after ~200 rollbacks (docs/ROLLBACK_LINUX_FINDINGS.md). Windows'
+        # Play SSBU.bat sets SSBU_RB_AUDIO_OFF=1 too; here it is the default for every Linux rollback run. --env ...=0
+        # keeps the old behavior for a diagnosis (it will crash).
+        if 'SSBU_RB_AUDIO_OFF' not in env:
+            env['SSBU_RB_AUDIO_OFF'] = '1'
+            print('Rollback on Linux: audio threads held for the fight (SSBU_RB_AUDIO_OFF=1; sound in rollback fights is not supported yet).')
+        elif env.get('SSBU_RB_AUDIO_OFF', '')[:1] == '0':
+            print('WARNING: rollback on Linux with SSBU_RB_AUDIO_OFF=0: a load can crash the audio threads (known limit).')
+    if a.linux and (rollback or env.get('SSBU_RB_NET') or env.get('SSBU_RB_SIM')) and not env.get('SSBU_NO_WRITEWATCH'):
+        uffd_warn()
     if a.play and os.name == 'nt' and not (a.linux or a.mac) and env.get('SSBU_ONLINE', '') not in ('off', '0', 'no', 'false'):
         fw = ensure_firewall(os.path.abspath(exe), a.build, gini)
         if fw:

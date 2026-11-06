@@ -19,6 +19,14 @@
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 #endif
+static void ml_set_rcvtimeo(SOCKET s, DWORD ms) {
+#ifdef _WIN32
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof ms);
+#else
+    struct timeval tv = { (time_t)(ms / 1000), (suseconds_t)((ms % 1000) * 1000) };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
+}
 
 enum { ML_PROTO = 1, ML_JOIN = 1, ML_WELCOME, ML_REJECT, ML_PING, ML_PONG, ML_DATA, ML_LEAVE, ML_LIST, ML_LISTING,
        ML_LIST_END, ML_PEERS, ML_PUNCH, ML_DIRECT, ML_BCAST };
@@ -342,9 +350,10 @@ static void ml_on_join(const uint8_t *p, int len, const struct sockaddr_in *at, 
         c->used = 1; c->at = *at; c->ip = ip; c->cookie = ml_random64();
         memcpy(c->nonce, nonce, 8);
         snprintf(c->name, sizeof c->name, "%s", name); snprintf(c->build, sizeof c->build, "%s", build); snprintf(c->code, sizeof c->code, "%s", code);
-        ml_log("%s joined (code '%s', build %s) as %s from %u.%u.%u.%u:%d, LAN %u.%u.%u.%u:%u, direct %s", name, code, build, ml_vip(ip),
-               at->sin_addr.S_un.S_un_b.s_b1, at->sin_addr.S_un.S_un_b.s_b2, at->sin_addr.S_un.S_un_b.s_b3, at->sin_addr.S_un.S_un_b.s_b4, ntohs(at->sin_port), lan_ip >> 24, lan_ip >> 16 & 255, lan_ip >> 8 & 255, lan_ip & 255,
-               lan_port, direct ? "yes" : "no");
+        { char ips[INET_ADDRSTRLEN] = "?"; inet_ntop(AF_INET, &at->sin_addr, ips, sizeof ips);
+          ml_log("%s joined (code '%s', build %s) as %s from %s:%d, LAN %u.%u.%u.%u:%u, direct %s", name, code, build, ml_vip(ip),
+               ips, ntohs(at->sin_port), lan_ip >> 24, lan_ip >> 16 & 255, lan_ip >> 8 & 255, lan_ip & 255,
+               lan_port, direct ? "yes" : "no"); }
     }
     c->seen = now; c->lan_ip = lan_ip; c->lan_port = lan_port; c->direct = direct;
     if (len > ML_JOIN_LEN + 2 && p[ML_JOIN_LEN] == 'M' && p[ML_JOIN_LEN + 1] == 'S') {      /* O1: the game's mods */
@@ -1022,7 +1031,7 @@ static DWORD WINAPI ml_thread_main(LPVOID arg) {
             for (int i = 0; i < ML_OPEN_MAX; i++) if (ml_open[i].used) ml_send("SUo", 4, &ml_open[i].at);
         }
         LeaveCriticalSection(&ml_lock);
-        if (n < 0 && WSAGetLastError() != WSAETIMEDOUT && WSAGetLastError() != WSAECONNRESET && ml_running) Sleep(10);
+        if (n < 0 && WSAGetLastError() != WSAETIMEDOUT && WSAGetLastError() != WSAEWOULDBLOCK && WSAGetLastError() != WSAECONNRESET && ml_running) Sleep(10);
     }
     return 0;
 }
@@ -1041,7 +1050,7 @@ static uint16_t minilobby_start(uint32_t bind_ip_host_order, uint16_t port, int 
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) return 0;
     WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);   /* (no ICMP errors on receive) */
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+    ml_set_rcvtimeo(s, timeout);
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(bind_ip_host_order);

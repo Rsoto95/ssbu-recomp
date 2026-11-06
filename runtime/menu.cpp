@@ -72,6 +72,7 @@ const char *ssbu_version(void);                                      /* boot.c *
 int osk_active(void);                                               /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
+extern "C" void display_refresh_switched(int *from, int *to);       /* display.c: refresh_switch (0, 0 = not switched) */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 }
@@ -587,6 +588,11 @@ static void sec_display(int cw, int ch) {
     {   /* a screen that is not k x 60 Hz (75, 144, 165 Hz ...): the game is 60 frames per second, so frames cannot all stay
          * on screen equally long and motion stutters (testers, 2026-10-20: "frame pacing is terrible, 144 Hz screen") */
         double hz; int k; display_refresh_info(&hz, &k);
+        int rs_from, rs_to; display_refresh_switched(&rs_from, &rs_to);
+        if (rs_to) {       /* (2026-11-06) refresh_switch = auto set the screen to a k x 60 Hz mode while the game runs */
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Screen set from %d Hz to %d Hz while the game runs: every frame is shown equally long.", rs_from, rs_to);
+            help("Windows puts the old rate back when the game closes. graphics.ini refresh_switch = off: the screen is never changed.");
+        }
         if (hz > 30 && k == 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Your screen runs at %.0f Hz: not a multiple of 60, so motion is uneven.", hz);
 #ifdef _WIN32
@@ -1111,8 +1117,8 @@ static void sec_experimental(void) {
     ImGui::SameLine(); ImGui::Text("Online play");
     tag(1, (O.mode != 0) != (O0.mode != 0));
     ImGui::SameLine(); ImGui::TextDisabled("play with others through the game's Local Wireless menu");
-#ifndef _WIN32
-    if (O.mode) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Online play is not in the Linux / macOS build yet: these settings are kept for when it is.");
+#ifdef __APPLE__
+    if (O.mode) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Online play is not in the macOS build yet: these settings are kept for when it is.");
 #endif
     if (O.mode) {
         /* (4) rollback netcode over the online connection: Play SSBU.bat (scripts/run.py) starts the normal exe with
@@ -1120,7 +1126,7 @@ static void sec_experimental(void) {
         static int rb_have = -1, rb_on = -1, rb_on0;
         if (rb_have < 0) {
             char v[16];
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
             rb_have = 1;
 #else
             rb_have = 0;
@@ -1132,7 +1138,7 @@ static void sec_experimental(void) {
         tag(1, rb_on != rb_on0);
         ImGui::SameLine();
         if (rb_have) ImGui::TextDisabled("smooth online fights at high ping (experimental); both players need it on");
-        else ImGui::TextDisabled("not in the Linux / macOS build yet");
+        else ImGui::TextDisabled("not in this build yet");
         if (getenv("SSBU_RB_NET")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Rollback is active in this run (SSBU_RB_NET=%s).", getenv("SSBU_RB_NET"));
         sec_online();
     }
@@ -1769,6 +1775,30 @@ static void exit_game(void) {                              /* F1 -> Exit game: t
     CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(4000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
 }
+
+/* (2026-11-04, owner) online fights read every controller as a Pro Controller (nnhid.c npad_style), a GameCube one too, so
+ * a GameCube player's buttons must be set up on the game's PRO CONTROLLER controls. Said once per run, 20 s after the start
+ * or when a GameCube controller first shows up later: the short note at the bottom (menu_toast: no input, gone after 10 s;
+ * the owner: "it must not get in the way"). SSBU_GC_PRO_NOTE=0: never. */
+static const char k_gc_pro_note[] = "GameCube controller: set up your buttons on the PRO CONTROLLER (Options > Controls).\n"
+                                    "Online every controller is read as a Pro Controller.\n"
+                                    "Control de GameCube: configura tus botones en el PRO CONTROLLER.";
+static void gc_pro_notice(void) {
+    static int done = -1; static ULONGLONG t0, next;
+    if (done < 0) { const char *e = getenv("SSBU_GC_PRO_NOTE"); done = e && e[0] == '0'; }
+    if (done) return;
+    ULONGLONG t = GetTickCount64();
+    if (!t0) t0 = t;
+    if (t - t0 < 20000 || t < next) return;
+    next = t + 1000;
+    if (g_open || popup_on() || toast_on()) return;
+    for (int p = 0; p < 8; p++) if (nnpad_is_gc(p)) {
+        menu_toast(k_gc_pro_note, 10000); done = 1;
+        printf("menu: note: a GameCube controller (player %d): its buttons are set up on the Pro Controller (online every controller is one)\n", p + 1); fflush(stdout);
+        break;
+    }
+}
+
 #ifdef _WIN32
 /* (fork, 2026-11-01) a newer version found while playing: "Play SSBU.bat" (run.py update_watch) asks GitHub every 10 minutes
  * and writes SSBU_UPDATE_FLAG (the new commit's first 7 characters). Here: a message (again every 20 minutes) and, at the top
@@ -1796,28 +1826,6 @@ static void update_check(void) {                           /* render thread, eve
         next_say = t + 20 * 60000;
         menu_popup("New version", "A new version of the game is ready.\nPress F1 (or Home on the controller) and choose \"Update and restart\".\n"
                    "The game closes, installs it (about a minute) and opens again by itself.");
-    }
-}
-/* (2026-11-04, owner) online fights read every controller as a Pro Controller (nnhid.c npad_style), a GameCube one too, so
- * a GameCube player's buttons must be set up on the game's PRO CONTROLLER controls. Said once per run, 20 s after the start
- * or when a GameCube controller first shows up later: the short note at the bottom (menu_toast: no input, gone after 10 s;
- * the owner: "it must not get in the way"). SSBU_GC_PRO_NOTE=0: never. */
-static const char k_gc_pro_note[] = "GameCube controller: set up your buttons on the PRO CONTROLLER (Options > Controls).\n"
-                                    "Online every controller is read as a Pro Controller.\n"
-                                    "Control de GameCube: configura tus botones en el PRO CONTROLLER.";
-static void gc_pro_notice(void) {
-    static int done = -1; static ULONGLONG t0, next;
-    if (done < 0) { const char *e = getenv("SSBU_GC_PRO_NOTE"); done = e && e[0] == '0'; }
-    if (done) return;
-    ULONGLONG t = GetTickCount64();
-    if (!t0) t0 = t;
-    if (t - t0 < 20000 || t < next) return;
-    next = t + 1000;
-    if (g_open || popup_on() || toast_on()) return;
-    for (int p = 0; p < 8; p++) if (nnpad_is_gc(p)) {
-        menu_toast(k_gc_pro_note, 10000); done = 1;
-        printf("menu: note: a GameCube controller (player %d): its buttons are set up on the Pro Controller (online every controller is one)\n", p + 1); fflush(stdout);
-        break;
     }
 }
 /* (2026-11-05, owner: "si alguien dice que no también tiene que tener un mensaje en el juego") run.py could not allow the game
@@ -2145,6 +2153,7 @@ extern "C" int menu_online_blocked(void) { return 0; }
 extern "C" void menu_online_entered(void) {}
 static void update_check(void) {}
 static void update_banner(void) {}
+static void firewall_notice(void) {}      /* run.py asks the Windows Firewall only (SSBU_FIREWALL) */
 #endif
 static void draw_menu(int cw, int ch) {
     if (ImGui::BeginMainMenuBar()) {

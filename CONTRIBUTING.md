@@ -82,8 +82,10 @@ You do not need to be a reverse engineer for most of these.
   hitches in a fight.
 - **Renderer.** The NVN-to-Vulkan layer, the shader translator, graphics options, low-end profiles.
 - **Fighter tooling.** The script decompilers, the fighter SDK, the test host, documentation for modders.
-- **Portability.** Linux is not started. Isolating the Windows-specific calls of the runtime behind one
-  layer is a well-defined first step.
+- **Portability.** Linux has a native build ([BUILDING_LINUX.md](BUILDING_LINUX.md)); online play works there (tested
+  against Windows; Linux against Linux is not yet tested), but rollback is still experimental and keeps the limits in
+  that document. Other distributions, GPUs, X11 and the Steam Deck still need testers. Isolating the remaining
+  Windows-specific calls of the runtime behind one layer is a well-defined next step.
 - **Documentation.** If a step in `BUILDING.md` did not work for you, fix the document.
 
 If you plan something large, open an issue first and describe it. It saves you from building on a part that

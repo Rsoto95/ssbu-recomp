@@ -10,6 +10,16 @@
 #include <windows.h>
 #include "runtime.h"
 #include "hostrt.h"
+#ifdef __linux__
+#include "rollback/rb_park.h"                     /* rollback: cooperative parking at SDK import boundaries */
+#endif
+#ifdef __linux__
+int os_thread_network_excluded(void);             /* rollback/model/threads.c */
+#endif
+void os_mutex_ctx_bind(Ctx *c, int *held, void **stack);
+void os_mutex_ctx_unbind(Ctx *c);
+int *os_mutex_held_slot(void);
+void *os_mutex_stack_slot(void);
 /* L1 round 3, TEST ONLY: guest sync calls during the SSBU_L1_TRACE window (display.c) */
 #ifdef _WIN32
 int display_l1_trace(void); double display_l1_ms(void); const char *guest_thread_name_of(unsigned long tid);
@@ -270,6 +280,33 @@ void os_wait_report(FILE *out) {
  * run's context with the NEW run's thread handle, a context that never changes again (guest code, no import) paired with a
  * live thread. The older slots of the object are stale from then on: no handle is given out for them. */
 static void thread_slots_stale(Obj *o, LONG slot) { for (LONG j = 0; j < slot && j < 256; j++) if (g_threads[j].o == o) g_threads[j].stale = 1; }
+#ifdef __linux__
+/* A long session starts more threads than the 256 slots (Pia/NetSystem are started again for every room). Reuse a
+ * slot whose run is over instead of appending past the table: a live thread that started after the 256th start would
+ * otherwise never be held or marked (the Pia ReceiveThreadStream of the second room in the two-instance run). */
+static SRWLOCK g_threads_lock = SRWLOCK_INIT;
+static LONG thread_slot_new(Obj *o) {
+    LONG n = __atomic_load_n(&g_threads_n, __ATOMIC_ACQUIRE);
+    LONG same = -1, over = -1;
+    for (LONG j = 0; j < n && j < 256; j++) {
+        Obj *p = g_threads[j].o;
+        if (!p) { if (over < 0) over = j; continue; }
+        if (p == o) { if ((g_threads[j].stale || p->finished) && same < 0) same = j; }
+        else if (p->finished && over < 0) over = j;
+    }
+    if (same >= 0) return same;
+    if (over >= 0) return over;
+    return InterlockedIncrement(&g_threads_n) - 1;
+}
+static LONG thread_slot_claim(Obj *o, Ctx *c) {
+    AcquireSRWLockExclusive(&g_threads_lock);
+    LONG slot = thread_slot_new(o);
+    if (slot >= 0 && slot < 256) { g_threads[slot].o = o; g_threads[slot].c = c; g_threads[slot].stale = 0; }
+    thread_slots_stale(o, slot);
+    ReleaseSRWLockExclusive(&g_threads_lock);
+    return slot;
+}
+#endif
 /* hitch.c (SSBU_HITCH): guest thread i -> context, name, host handle; 0 past the end. */
 int guest_thread_info(int i, Ctx **c, const char **name, HANDLE *h) {
     if (i < 0 || i >= g_threads_n || i >= 256 || !g_threads[i].o || !g_threads[i].c) return 0;
@@ -285,23 +322,57 @@ const char *guest_thread_name_of(DWORD tid) {
     }
     return NULL;
 }
+#ifdef __linux__
+/* The online network's own threads (Pia / nn::ldn): their state is an external side channel, not simulation state. The ring
+ * holds them at a wait, but must not rewind their guest stack/registers or absorb their faults (rollback/model/threads.c and
+ * rollback/controller/fault_recovery_posix.c). */
+int os_thread_is_network_name(const char *name) {
+    return name && (strstr(name, "Pia") || strstr(name, "NetSystem"));
+}
+int os_thread_guest_stack(HANDLE h, uint64_t *lo, uint64_t *hi) {
+    for (int i = 0; i < g_threads_n && i < 256; i++) {
+        Obj *o = g_threads[i].o;
+        if (o && o->thread == h && o->stack && o->stack_size) { *lo = o->stack; *hi = o->stack + o->stack_size; return 1; }
+    }
+    return 0;
+}
+#endif
 
 static DWORD WINAPI thread_main(LPVOID arg) {
     Obj *o = arg;
     t_thread = o->key;
     { void display_perf_thread(void); display_perf_thread(); }      /* track V session 14: the game's threads on the performance cores of a hybrid CPU (display.c; SSBU_PCORES=0 off) */
     Ctx *c = new_ctx(o->stack + o->stack_size);
+#ifdef __linux__
+    rb_park_bind(c);
+#endif
+    os_mutex_ctx_bind(c, os_mutex_held_slot(), os_mutex_stack_slot());
     wr64(c->tpidr + 0x1f8, o->key);                   /* Horizon thread-local region: the ThreadType pointer lives at +0x1f8 */
+#ifdef __linux__
+    LONG slot = thread_slot_claim(o, c);
+    if (os_thread_is_network_name(o->name ? (const char *)(uintptr_t)o->name : NULL)) {
+        printf("r1: NETWORK: %s starts as guest thread %ld (start %ld)\n", (const char *)(uintptr_t)o->name, slot, (long)g_threads_n);
+        fflush(stdout);
+    }
+#else
     LONG slot = InterlockedIncrement(&g_threads_n) - 1;
     if (slot < 256) { g_threads[slot].o = o; g_threads[slot].c = c; }
     thread_slots_stale(o, slot);
+#endif
     c->x[0] = o->arg;
     trace_printf("--- thread %llx started (entry %llx, name %s)\n", (unsigned long long)o->key, (unsigned long long)o->fn,
                  o->name ? (const char *)(uintptr_t)o->name : "?");
     call_guest(c, o->fn);
     pkey_run_destructors(c);                          /* pthread keys a plugin's Rust std made on this game thread */
     tls_run_destructors(c);
+    os_mutex_ctx_unbind(c);
+#ifdef __linux__
+    rb_park_unbind(c);
+#endif
     trace_printf("--- thread %llx finished\n", (unsigned long long)o->key);
+#ifdef __linux__
+    if (os_thread_network_excluded() && os_thread_is_network_name((const char *)(uintptr_t)o->name)) { void r1_sim_clear(uint64_t, uint64_t); r1_sim_clear(o->stack, o->stack_size); }
+#endif
     EnterCriticalSection(&o->cs);
     o->finished = 1;
     WakeAllConditionVariable(&o->cv);
@@ -615,6 +686,36 @@ static void mwait_leave(int i) { if (i >= 0) { g_mwait[i].key = 0; InterlockedEx
  * asks here and does not stop a thread that holds one. Counted at lock / try-lock, taken off at unlock; never below zero. */
 #define HELD_MAX 64
 static __declspec(thread) Obj *t_mtx_stack[HELD_MAX]; static __declspec(thread) int t_mtx_held;
+int *os_mutex_held_slot(void) { return &t_mtx_held; }
+void *os_mutex_stack_slot(void) { return t_mtx_stack; }
+/* Rollback: the gate cannot ask a thread that is already blocked inside a wait how many guest mutexes it holds.
+ * Its Ctx is registered here with the thread's counter and stack, so the controller can ask the OS who owns each one
+ * (a std::condition_variable::wait releases its mutex while it waits: the counter still says held, the owner does not). */
+DWORD os_mutex_owner(uint64_t key);
+static struct { Ctx *c; int *held; void **stack; DWORD tid; } g_mtx_ctx[256]; static volatile LONG g_mtx_ctx_n;
+void os_mutex_ctx_bind(Ctx *c, int *held, void **stack) {
+    for (int i = 0; i < 256; i++) {
+        Ctx *none = NULL;
+        if (__atomic_compare_exchange_n(&g_mtx_ctx[i].c, &none, c, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            g_mtx_ctx[i].held = held; g_mtx_ctx[i].stack = stack; g_mtx_ctx[i].tid = GetCurrentThreadId();
+            if (i >= g_mtx_ctx_n) g_mtx_ctx_n = i + 1;
+            return;
+        }
+    }
+}
+void os_mutex_ctx_unbind(Ctx *c) {
+    for (int i = 0; i < g_mtx_ctx_n && i < 256; i++) if (g_mtx_ctx[i].c == c) { __atomic_store_n(&g_mtx_ctx[i].c, NULL, __ATOMIC_RELEASE); return; }
+}
+int os_mutexes_held_by(Ctx *c) {
+    for (int i = 0; i < g_mtx_ctx_n && i < 256; i++) if (g_mtx_ctx[i].c == c) {
+        if (!g_mtx_ctx[i].held || !g_mtx_ctx[i].stack) return 0;
+        int n = *g_mtx_ctx[i].held; if (n > HELD_MAX) n = HELD_MAX;
+        int cnt = 0;
+        for (int k = 0; k < n; k++) { Obj *o = ((Obj **)g_mtx_ctx[i].stack)[k]; if (o && os_mutex_owner(o->key) == g_mtx_ctx[i].tid) cnt++; }
+        return cnt;
+    }
+    return 0;
+}
 int os_mutexes_held_here(void) { return t_mtx_held; }
 static void mtx_got(Obj *o) { if (t_mtx_held < HELD_MAX) t_mtx_stack[t_mtx_held] = o; t_mtx_held++; }
 static void mtx_released(Obj *o) {                      /* the most recent hold of this mutex (unlocks need not come in reverse order) */
@@ -622,9 +723,21 @@ static void mtx_released(Obj *o) {                      /* the most recent hold 
     for (int i = n - 1; i >= 0; i--) if (t_mtx_stack[i] == o) { for (int k = i; k + 1 < n; k++) t_mtx_stack[k] = t_mtx_stack[k + 1]; break; }
     if (t_mtx_held > 0) t_mtx_held--;
 }
+DWORD os_mutex_owner(uint64_t key);               /* below: Win32 / glibc owner, macOS 0 */
+/* The recovery paths must not go through obj(): it takes the object table's lock and creates a record on a miss,
+ * which can deadlock the thread that is unwinding (or leave the real mutex held). The Obj is already in the stack. */
+static int mtx_owned_here(Obj *o) {
+#ifdef _WIN32
+    return o && (DWORD)(uintptr_t)o->cs.OwningThread == GetCurrentThreadId();
+#elif defined(__APPLE__)
+    (void)o; return 0;                            /* a pthread mutex does not show its owner */
+#else
+    return o && (DWORD)o->cs.__data.__owner == GetCurrentThreadId();
+#endif
+}
 /* nnunwind.c absorb_by_host_stack: a handler's frame is entered without the clean-ups of the frames it skips; the mutexes they held (above `depth`) are let go here, once each. */
 void os_release_held_down_to(int depth) {
-    while (t_mtx_held > depth && t_mtx_held <= HELD_MAX) { Obj *o = t_mtx_stack[t_mtx_held - 1]; if (o && (DWORD)(uintptr_t)o->cs.OwningThread == GetCurrentThreadId()) LeaveCriticalSection(&o->cs); t_mtx_held--; }
+    while (t_mtx_held > depth && t_mtx_held <= HELD_MAX) { Obj *o = t_mtx_stack[t_mtx_held - 1]; if (mtx_owned_here(o)) LeaveCriticalSection(&o->cs); t_mtx_held--; }
     if (t_mtx_held > HELD_MAX) t_mtx_held = depth < 0 ? 0 : depth;
 }
 static void mtx_enter(Obj *o) {
@@ -1131,16 +1244,28 @@ static DWORD WINAPI pthread_main(LPVOID arg) {
     Obj *o = arg;
     t_thread = o->key;
     Ctx *c = new_ctx(o->stack + o->stack_size);
+#ifdef __linux__
+    rb_park_bind(c);
+#endif
+    os_mutex_ctx_bind(c, os_mutex_held_slot(), os_mutex_stack_slot());
     wr64(c->tpidr + 0x1f8, o->key);                   /* the ThreadType pointer, as for nn::os threads */
+#ifdef __linux__
+    LONG slot = thread_slot_claim(o, c);
+#else
     LONG slot = InterlockedIncrement(&g_threads_n) - 1;
     if (slot < 256) { g_threads[slot].o = o; g_threads[slot].c = c; }
     thread_slots_stale(o, slot);
+#endif
     c->x[0] = o->arg;
     trace_printf("--- pthread %llx started (entry %llx)\n", (unsigned long long)o->key, (unsigned long long)o->fn);
     call_guest(c, o->fn);
     uint64_t ret = c->x[0];
     pkey_run_destructors(c);
     tls_run_destructors(c);
+    os_mutex_ctx_unbind(c);
+#ifdef __linux__
+    rb_park_unbind(c);
+#endif
     trace_printf("--- pthread %llx finished\n", (unsigned long long)o->key);
     EnterCriticalSection(&o->cs);
     o->retval = ret;

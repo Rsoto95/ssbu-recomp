@@ -1,7 +1,14 @@
 /* THE MEMORY MAP: which ranges of the game's memory the save covers (window 1, window 2, the extras, thread stacks), found once per match.
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Split out of r1_state.c; what it shares with the other rollback files is declared in game_state_internal.h. */
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
 #include "game_state_internal.h"
+#ifndef _WIN32
+#include <link.h>
+#include <elf.h>
+#endif
 
 MemoryMap g_memory_map;                      /* the one memory map (see MemoryMap in game_state_internal.h) */
 
@@ -63,6 +70,25 @@ uint8_t *g_ar;
 static int cmp_rng(const void *x, const void *y) { const Rng *a = x, *b = y; return a->a < b->a ? -1 : a->a > b->a; }
 /* host DLLs that run fighter code (fighters_bin\*.dll, track S): their writable sections are simulation state too */
 
+#ifndef _WIN32
+static int phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size; (void)data;
+    const char *p = info->dlpi_name ? info->dlpi_name : "";
+    if (!strstr(p, "lua2cpp_") && !strstr(p, "nro_bin")) return 0;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_W)) continue;
+        uint8_t *a = (uint8_t *)(uintptr_t)(info->dlpi_addr + ph->p_vaddr);
+        add_span(a, a + ph->p_memsz);
+    }
+    return 0;
+}
+static void add_fighter_dlls(void) {
+    if (getenv("SSBU_R1_NO_DLLS")) return;
+    dl_iterate_phdr(phdr_cb, NULL);
+    if (g_session.cycle == 0 && g_session.phase == 0) LOG("r1: fighter modules: their writable segments are in the state\n");
+}
+#else
 static void add_fighter_dlls(void) {
     HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
     if (sn == INVALID_HANDLE_VALUE) return;
@@ -83,6 +109,7 @@ static void add_fighter_dlls(void) {
     CloseHandle(sn);
     if (g_session.cycle == 0 && g_session.phase == 0) LOG("r1: fighter DLLs: %d, writable sections %.1f KB\n", nmod, bytes / 1024.0);
 }
+#endif
 /* (R3 hs13, tw1j) the full save's copy of every range (r->s, ~1.9 GB in a match) is page memory of its own, not CRT heap: the
  * first save of the ring / run-ahead gives it back (decommits it) range by range while mark_setup moves it into the shadow,
  * so the peak commit is ~one copy of the game's memory instead of two (tw1j: a failed malloc there, not checked, crashed in

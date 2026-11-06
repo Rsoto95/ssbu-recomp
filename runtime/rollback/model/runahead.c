@@ -2,6 +2,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Split out of r1_state.c; what it shares with the other rollback files is declared in game_state_internal.h. */
 #include "game_state_internal.h"
+#ifndef _WIN32
+#include "../rb_park.h"
+#endif
 #include <stdlib.h>                       /* qsort (the hold cost line) */
 /* Functions and variables of other runtime files that only this file uses: */
 uint64_t hook_address(const char *name);
@@ -65,6 +68,9 @@ int ra_fight_on(void) {
  * instruction): one that is suspended while it runs our import code may hold the os object table lock or an object's
  * critical section (seen: nus3::audio update held inside obj() -> the game's thread blocked on that lock for good) */
 static uint64_t g_tb_rsp, g_tb_rip;                     /* (hs16) the context th_blocked read last */
+#ifndef _WIN32
+static int th_blocked(HANDLE h) { (void)h; return 1; }   /* the gate only stops a thread at a waiting import */
+#else
 static int th_blocked(HANDLE h) {
     CONTEXT x; memset(&x, 0, sizeof x); x.ContextFlags = CONTEXT_CONTROL;
     g_tb_rsp = g_tb_rip = 0;
@@ -81,6 +87,7 @@ static int th_blocked(HANDLE h) {
     }
     return r[-2] == 0x0f && r[-1] == 0x05;
 }
+#endif
 static int ra_audio(const char *n) { return strstr(n, "nus3::audio") || strstr(n, "sindou") || strstr(n, "AudioDevice"); }
 volatile int g_ra_base_save;              /* (2026-11-03) 1 while a fight's first save runs (snapshot_ring.c) */
 static int ra_free(const char *n) {      /* never in a waiting import; its pages (decoder state, output) are not simulation */
@@ -167,7 +174,38 @@ static int ra_hold_save(void) {
         if (!h || GetThreadId(h) == me) continue;
         Th *t = &g_guest_threads.table[g_guest_threads.count++]; memset(t, 0, sizeof *t); t->h = h; t->c = tc; t->name = nm ? nm : "?";
     }
+#ifdef __linux__
+    mark_network_threads();
+#endif
     g_guest_threads.info_count = 0; while (guest_thread_info(g_guest_threads.info_count, &tc, &nm, &h)) g_guest_threads.info_count++;
+#ifndef _WIN32
+    /* Every thread stops itself at its next waiting import (rb_park_gate). One that cannot be held in time refuses the hold. */
+    g_guest_threads.mismatch = 0;
+    double t0 = now_ms();
+    rb_park_request();
+    for (int i = 0; i < g_guest_threads.count; i++) {
+        Th *t = &g_guest_threads.table[i];
+        t->held = t->parked = t->same = 0; t->wait_ms = 0;
+        if (ra_free(t->name)) continue;
+        for (;;) {
+            int st = rb_park_parked(t->c);
+            /* MUTEX is not fatal: the thread is at the entry of a waiting import that it will enter and (if it is a
+             * condition variable) unlock its mutex there. A moment later it is blocked with no mutex owned, and the
+             * owner check below accepts it without parking it with the mutex held. */
+            if (st == RB_PARK_HELD || (waiting_import(t->c->in_import) && os_mutexes_held_by(t->c) == 0)) {
+                t->held = 1; t->parked = 1; t->cok = 1; t->wait_ms = now_ms() - t0; t->from = t->c->import_from; t->imp = t->c->in_import; t->regs = *t->c; break;
+            }
+            if (now_ms() - t0 > g_ra_park_ms) {
+                rb_park_release(); g_ra_busy = t->name; g_ra_busy_imp = t->c->in_import;
+                if (strstr(t->name, "TaskWorker")) g_ra_skip_why[0]++; else if (ra_audio(t->name)) g_ra_skip_why[1]++; else g_ra_skip_why[2]++;
+                return 0;
+            }
+            SwitchToThread();
+        }
+        if (g_hp_on) hp_add(t->name, t->wait_ms, 0);
+    }
+    return 1;
+#else
     static int all_first = -1; if (all_first < 0) { const char *e = getenv("SSBU_RB_HOLD_ALL"); all_first = rgs_wanted() && e && atoi(e) != 0; }      /* opt-in: saved ~0.07 ms only; rb2f1 crashed with it (cause not shown) */
     static uint8_t pre[256];                                /* (R2 round 3, ring only) every thread suspended first, then checked: the kernel delivers the suspends together */
     if (all_first) for (int i = 0; i < g_guest_threads.count; i++) pre[i] = !ra_free(g_guest_threads.table[i].name) && SuspendThread(g_guest_threads.table[i].h) != (DWORD)-1;
@@ -208,11 +246,78 @@ static int ra_hold_save(void) {
         t->from = t->c->import_from; t->imp = t->c->in_import; t->regs = *t->c;
     }
     return 1;
+#endif
 }
-static void ra_release_save(void) { for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held && !ra_audio(g_guest_threads.table[i].name)) { ResumeThread(g_guest_threads.table[i].h); g_guest_threads.table[i].held = 0; } }
-/* restore: each thread at the SAME wait as at the save (the audio threads were never let go) */
+static void ra_release_save(void) {
+    for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held && !ra_audio(g_guest_threads.table[i].name)) {
+#ifndef _WIN32
+        rb_park_let_go(g_guest_threads.table[i].c);
+#else
+        ResumeThread(g_guest_threads.table[i].h);
+#endif
+        g_guest_threads.table[i].held = 0;
+    }
+}
+/* restore: each thread at the SAME wait as at the save where it can get there; a thread whose wait moved is taken as it is (same = 0) */
 void ra_hold_restore(void) {
     g_guest_threads.mismatch = 0; g_guest_threads.running = 0;
+#ifndef _WIN32
+    double t0 = now_ms();
+#ifdef __linux__
+    static int nw = -1, ww = -1, aw = -1;
+    if (nw < 0) { const char *e = getenv("SSBU_RB_NET_THREAD_WAIT"); nw = !(e && e[0] == '0'); }
+    if (!os_thread_network_excluded()) nw = 0;           /* a fully rewound network thread must be at the saved wait */
+    if (ww < 0) { const char *e = getenv("SSBU_RB_WORKER_WAIT"); ww = !(e && e[0] == '0'); }
+    if (aw < 0) { const char *e = getenv("SSBU_RB_THREAD_WAIT"); aw = !(e && e[0] == '0'); }   /* any thread: 0 = the old 500 ms retry */
+#endif
+    rb_park_request();
+    for (int i = 0; i < g_guest_threads.count; i++) {
+        Th *t = &g_guest_threads.table[i];
+        t->same = 0;
+        if (t->held) { t->same = 1; continue; }
+        if (!t->parked || ra_free(t->name)) continue;
+        for (;;) {
+            int st = rb_park_parked(t->c);
+#ifdef __linux__
+            /* Network/worker/presentation state stays current: do not run a parked thread just to revisit an old wait.
+             * The first two are external side channels; every other thread whose wait moved is a service/presentation
+             * thread too (VSync count, render dispatch, module manager, file loaders ...). Take it as it is after 5 ms:
+             * it is stopped at the gate or blocked in a wait, and same stays 0 so its registers are not restored. */
+            int netw = nw && os_thread_is_network_name(t->name);
+            int workw = ww && t->name && strstr(t->name, "TaskWorker");
+            int otherw = aw && !netw && !workw;
+            if ((netw || workw || otherw) &&
+                (st == RB_PARK_HELD || (waiting_import(t->c->in_import) && os_mutexes_held_by(t->c) == 0)) &&
+                (t->c->import_from != t->from || t->c->in_import != t->imp)) {
+                if (now_ms() - t0 > 5) {
+                    t->held = 1; t->cok = 1;              /* deliberately not same, but not a refused load */
+                    if (otherw) { g_guest_threads.mismatch++; if (t->name && ra_audio(t->name)) g_guest_threads.audio_other++; }
+                    { static int said; if (said++ < 50) LOG("r1: hold for a load: thread %s taken at ANOTHER wait after %.1f ms%s: saved at %s @%llx, now %s @%llx\n",
+                        t->name ? t->name : "?", now_ms() - t0, otherw ? " (registers not restored)" : "",
+                        t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from); }
+                    break;
+                }
+                SwitchToThread();
+                continue;
+            }
+#endif
+            if (st == RB_PARK_HELD) {
+                if (t->c->import_from == t->from && t->c->in_import == t->imp) { t->held = 1; t->same = 1; t->cok = 1; break; }
+                rb_park_let_go(t->c);                    /* another wait: let it go round once more */
+            } else if (waiting_import(t->c->in_import) && os_mutexes_held_by(t->c) == 0) {
+                t->held = 1; t->cok = 1;
+                if (t->c->import_from == t->from && t->c->in_import == t->imp) t->same = 1; else g_guest_threads.mismatch++;
+                break;                                   /* already blocked in a wait: it cannot come to the gate */
+            }
+            if (now_ms() - t0 > (g_guest_threads.park_ms > 500 ? g_guest_threads.park_ms : 500)) {
+                t->held = 1; g_guest_threads.mismatch++;
+                if (!(waiting_import(t->c->in_import))) g_guest_threads.running++;
+                break;
+            }
+            SwitchToThread();
+        }
+    }
+#else
     for (int i = 0; i < g_guest_threads.count; i++) {
         Th *t = &g_guest_threads.table[i];
         t->same = 0;
@@ -250,6 +355,7 @@ void ra_hold_restore(void) {
             SwitchToThread();
         }
     }
+#endif
 }
 
 /* the job system at the kick is NOT quiet as at the frame end (the preparation jobs kicked at 0x71037494f8 may still run on
@@ -270,7 +376,14 @@ int ra_hold_quiet(double limit) {
         if (ra_hold_save()) {
             double tf = g_hp_on > 0 ? now_ms() : 0; int fq = ra_fibers_quiet(); if (g_hp_on > 0) { g_hp_fib_ms += now_ms() - tf; g_hp_fib_n++; }
             if (fq) { if (tries) { g_ra_fiber_waits++; g_ra_fiber_wait_ms += now_ms() - t0; } return 1; }
-            for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held) { ResumeThread(g_guest_threads.table[i].h); g_guest_threads.table[i].held = 0; }
+            for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held) {
+#ifndef _WIN32
+                rb_park_let_go(g_guest_threads.table[i].c);
+#else
+                ResumeThread(g_guest_threads.table[i].h);
+#endif
+                g_guest_threads.table[i].held = 0;
+            }
             g_ra_busy = "a job fiber (task worker)"; g_ra_skip_why[3]++;
         }
         tries++;
@@ -312,7 +425,14 @@ static void ra_restore(Ctx *c) {
     for (double tq = now_ms();;) {                       /* the same quiet moment as at the save (the speculative pass's jobs finished) */
         ra_hold_restore();
         if (ra_fibers_quiet() || now_ms() - tq > 200) { if (g_ra_busy_fibers) LOG("r1: RA restore: %d fibers still busy after 200 ms\n", g_ra_busy_fibers); break; }
-        for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held && !ra_audio(g_guest_threads.table[i].name)) { ResumeThread(g_guest_threads.table[i].h); g_guest_threads.table[i].held = 0; }
+        for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held && !ra_audio(g_guest_threads.table[i].name)) {
+#ifndef _WIN32
+            rb_park_let_go(g_guest_threads.table[i].c);
+#else
+            ResumeThread(g_guest_threads.table[i].h);
+#endif
+            g_guest_threads.table[i].held = 0;
+        }
         g_ra_fiber_waits++;
         SwitchToThread();
     }
@@ -366,6 +486,9 @@ static void ra_step(Ctx *c) {
     g_ra_kicks++;
     if (g_ra_fe_kind) { int k = g_ra_fe_kind - 1; g_rap[k][3] += t - g_ra_fe_end; g_rapn[k]++; g_ra_fe_kind = 0; }
     if (rgs_wanted()) { rgs_step(c); return; }            /* R2: the snapshot ring's rollback simulation instead of run-ahead */
+#ifndef _WIN32
+    return;                                                /* run-ahead itself is not ported: only the ring's safe point is driven here */
+#endif
     if (g_ra_phase == 1) {                               /* end of the speculative pass: its picture is presented; back to the save point */
         g_ra_spec_sum += t - g_ra_t_mark; g_ra_nspec++;
         ra_restore(c);
@@ -448,14 +571,20 @@ static void ra_kick2(Ctx *c, void *user) {           /* hook on FUN 0x7103549170
     (void)user;
     uint64_t lr = c->x[30];
     if (lr == GA(0x71037494fcull) && g_ra_site == GA(0x7103749b24ull) && !g_ra_off && (g_ra_phase || ra_fight_on())) {
+#ifdef _WIN32
         ra_workers_hold();      /* H1 */
+#endif
         {   /* (hs10, test only) SSBU_RB_NET_TEST_H1=<fight frame>,<ms>: a slow pass at the first H1 from that fight frame on (the hold watchdog's case) */
             static long long tf = -2; static int tms;
             if (tf == -2) { const char *e = getenv("SSBU_RB_NET_TEST_H1"); tf = -1; if (e && *e) sscanf(e, "%lld,%d", &tf, &tms); }
             if (tf > 0 && g_session.fight_frame >= tf && g_ra_phase == 0) { tf = -1; Sleep((DWORD)tms); LOG("r1: TEST: a slow pass of %d ms at fight frame %lld, after the workers' hold (watchdog releases so far %lld)\n", tms, g_session.fight_frame, g_ra_wd_fired); }
         }
     }
-    if (lr == g_ra_site) { ra_step(c); if (g_ra_wh_on) { ra_workers_release(); SetEvent(g_ra_wd_ev); } g_ra_wd_pause = g_ra_wd_base; }      /* H2 (R3: rb_rollback.c pauses the watchdog while it runs here, and keeps the long limit during the match) */
+    if (lr == g_ra_site) { ra_step(c);
+#ifdef _WIN32
+        if (g_ra_wh_on) { ra_workers_release(); SetEvent(g_ra_wd_ev); }
+#endif
+        g_ra_wd_pause = g_ra_wd_base; }      /* H2 (R3: rb_rollback.c pauses the watchdog while it runs here, and keeps the long limit during the match) */
     if ((g_ra_phase == 1 && g_ra_skip) || rgs_skip_now()) {      /* SSBU_RUNAHEAD_SKIP (experiment): job groups of the speculative pass whose result is thrown away (R2: SSBU_RB_SIM_SKIP, re-run passes but the last) */
         int prep = c->x[30] == GA(0x7103749b24ull) || c->x[30] == GA(0x710374b4f8ull) || c->x[30] == GA(0x710374b528ull) || c->x[30] == GA(0x710374b558ull), rend = c->x[30] == GA(0x710374c0d8ull);
         int logic = c->x[30] == GA(0x710374c398ull) || c->x[30] == GA(0x710374c5b8ull);
@@ -515,13 +644,28 @@ void ra_init(void) {
     if (getenv("SSBU_RUNAHEAD_SKIP")) g_ra_skip = atoi(getenv("SSBU_RUNAHEAD_SKIP"));
     { const char *m = getenv("SSBU_RUNAHEAD_MODE"); g_ra_submit_mode = m && !strcmp(m, "submit"); }
     if (g_ra_submit_mode) LOG("r1: RUN-AHEAD mode submit (no speculative pass; the submission step 71037f0590 is called at the save point): hook %s\n", hook_install(GA(0x71037f0590ull), ra_submit_hook, NULL, &g_orig_submit) ? "installed" : "FAILED");
+#ifdef _WIN32
     g_ra_wd_ev = CreateEventA(NULL, FALSE, FALSE, NULL); CloseHandle(CreateThread(NULL, 0, ra_watchdog, NULL, 0, NULL));
+#endif
+#ifdef _WIN32
     g_guest_threads.park_ms = 20;
+#else
+    g_guest_threads.park_ms = 500;                       /* the cooperative gate waits for a thread to reach its wait */
+#endif
     g_mark = mark_bind(); if (!g_mark) g_mark = ls_use_exe_maps();      /* R4: no marked DLL: the learned set (rb_learned.c) */
     int k = hook_install(GA(0x710354c720ull), ra_kick, NULL, &g_orig_kick) && hook_install(GA(0x7103549170ull), ra_kick2, NULL, &g_orig_kick2);
+#ifdef _WIN32
     int l = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", ra_line, NULL, &g_orig_line);
+#else
+    int l = 0;                                             /* the frame-line counter is run-ahead only */
+#endif
+#ifndef _WIN32
+    LOG("r1: RA: run-ahead itself is not ported on Linux; the ring's safe point (job-counter wait 710354c720): %s; park %.1f ms\n",
+        k ? "installed" : "FAILED", g_ra_park_ms);
+#else
     LOG("r1: RUN-AHEAD on (one frame): marks %s; save point: the return of the job-counter wait 710354c720 called at 710374c028 (preparation done, before the render kick): %s; frame line counter: %s; park %.1f ms\n",
         g_mark > 0 ? "yes" : "NO (run-ahead will stay off)", k ? "installed" : "FAILED", l ? "installed or waiting" : "FAILED", g_ra_park_ms);
+#endif
     if (rgs_wanted() && rbg_on()) {                       /* R3: re-run passes but the last skip the preparation kicks + lists (49) and the presentation callees (127), proven exact in R2 round 3 */
         g_rgs_skip = getenv("SSBU_RB_SIM_SKIP") ? atoi(getenv("SSBU_RB_SIM_SKIP")) : 49;
         if (!getenv("SSBU_RB_SIM_LITE")) _putenv("SSBU_RB_SIM_LITE=123");      /* (2026-11-05) not group 4, the lighting: it turned the fighters blue / black (tests/rb_lite_bisect.py) */
@@ -533,4 +677,3 @@ void ra_init(void) {
         rgs_lite_init(); }
     atexit(ra_report);
 }
-
