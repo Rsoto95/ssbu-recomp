@@ -507,6 +507,8 @@ void rgs_report(void) {
     LOG("r1: RING loads right after a capture with the threads kept held: %lld (threads kept at the same wait: %lld); fibers %d (last); stale fiber-block notes refused %lld\n", g_rg_kept_n, g_rg_kept_same, g_guest_fibers.count, g_r1_fls_stale);
     LOG("r1: RING capture: median %.3f mean %.3f p99 %.3f ms; parts (means): hold %.3f, sweep + undo log %.3f, page copy (parallel) %.3f, fibers + threads + command buffers + let go %.3f; pages %.0f + extras %.0f mean (%.1f MB)\n",
         rg_pct(g_rgc[0], n, 50), rg_mean(g_rgc[0], n), rg_pct(g_rgc[0], n, 99), rg_mean(g_rgc[1], n), rg_mean(g_rgc[2], n), rg_mean(g_rgc[3], n), rg_mean(g_rgc[4], n), n ? pg / n : 0, n ? xp / n : 0, n ? (pg + xp) / n * PG / 1048576.0 : 0);
+    LOG("r1: RING capture parts, slowest 1%% (p99) / slowest: hold %.3f / %.1f, sweep + undo log %.3f / %.1f, page copy %.3f / %.1f, fibers + threads + command buffers + let go %.3f / %.1f ms (2026-11-05: which part makes the spikes)\n",
+        rg_pct(g_rgc[1], n, 99), rg_pct(g_rgc[1], n, 100), rg_pct(g_rgc[2], n, 99), rg_pct(g_rgc[2], n, 100), rg_pct(g_rgc[3], n, 99), rg_pct(g_rgc[3], n, 100), rg_pct(g_rgc[4], n, 99), rg_pct(g_rgc[4], n, 100));
     {   long long w = 0; for (int q = 0; q < 9; q++) w += g_cp_wrote[q];
         LOG("r1: RING loads (net3, SSBU_RB_LOADCMP): pages to load %lld, of them written (they differed) %lld (%.1f%%)\n", g_rg_ldpg, w, g_rg_ldpg ? 100.0 * (double)w / (double)g_rg_ldpg : 0.0); }
     for (int k = 0; k < RG_MAXSLOT; k++) {
