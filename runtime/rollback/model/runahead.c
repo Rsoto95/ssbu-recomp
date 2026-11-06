@@ -195,6 +195,14 @@ static int ra_hold_save(void) {
                 return 0;
             }
             SwitchToThread();
+            /* (2026-11-05, owner: "make the state saving cheaper") a thread not at a wait (nus3::audio update in the middle of its
+             * update: ~215 suspend + context + resume rounds per capture, 0.5-0.65 ms of every hold offline, ~3 ms on a slow PC
+             * whose sound thread works 6.6 ms a frame) is WATCHED until its own import field says it entered a waiting import,
+             * without suspending it: every suspend interrupted its work and made it later. Then it is suspended and checked as
+             * before (same condition). SSBU_RB_HOLD_POLL=0: the old way. */
+            {   static int poll = -1; if (poll < 0) { const char *e = getenv("SSBU_RB_HOLD_POLL"); poll = !(e && e[0] == '0'); }
+                if (poll) while (!waiting_import(*(const char *volatile *)&t->c->in_import) && now_ms() - t0 <= g_ra_park_ms) YieldProcessor();
+            }
         }
         if (g_hp_on) hp_add(t->name, now_ms() - t0, spins);
         t->from = t->c->import_from; t->imp = t->c->in_import; t->regs = *t->c;
