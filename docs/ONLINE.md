@@ -160,8 +160,12 @@ the room's. Each player plays with his own name-tag controls (button layout and 
 off use the game's own online netcode as before (a short message says so once), so players with different settings can
 still play together in a room.
 
-Input delay is chosen from the best measured round trip: 1 frame below about 117 ms, 2 frames from about 117 ms, 3 from 150 ms,
-4 from about 184 ms (the rest of the trip is covered by rollback).
+**Input delay** (since 2026-11-05: always **automatic**, nobody chooses it; F1 -> Gameplay only shows it): the host
+measures the round trip at each match's start (the one 3 of 4 of the latest stay under) and both games play with that
+number: the whole one-way trip in frames, rounded up, 1..7 (1 under 33 ms, 2 up to 67 ms, 3 up to 100 ms, 4 up to 133 ms,
+5 up to 167 ms, 6 up to 200 ms, 7 above); rollback only covers the spikes. graphics.ini `input_delay` is no longer read;
+`SSBU_RB_NET_DELAY=<n>` still fixes it for tests. A game without the snapshot ring (not enough memory) plays with at
+least the delay that covers the whole trip (it waits for every pad). The match report in the log says the delay.
 
 **Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
 because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**
