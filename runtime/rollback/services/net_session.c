@@ -818,15 +818,16 @@ static long rtt_p75_us(int *n) {
     for (int a = 1; a < k; a++) { long x = v[a]; int b = a - 1; while (b >= 0 && v[b] > x) { v[b + 1] = v[b]; b--; } v[b + 1] = x; }
     return v[(k * 3) / 4 < k ? (k * 3) / 4 : k - 1];
 }
-/* (2026-11-03) the input delay for a round trip: the whole one-way trip in frames, rounded up (owner's choice: "cover the
- * whole trip"; rollback only covers the spikes): under 33 ms 1, 67 -> 2, 100 -> 3, 133 -> 4, 167 -> 5, 200 -> 6, above 7
- * (the ring's depth). Before: one-way - 2 rounded, at most 4 (120 ms -> 2): every change of the other player's input was a
- * rollback of 2-4 frames, and those of 3+ take longer than a frame (a hitch). */
+/* (2026-11-03) the input delay for a round trip: the whole one-way trip in frames, rounded up, (2026-11-05, owner: "more
+ * conservative") PLUS ONE FRAME of margin for the jitter, so the other pad is nearly always there in time and rollbacks
+ * are rare (owner's matches: 11 ms at delay 2 -> 0 rollbacks, 47 ms at delay 3 -> 1 in 10 000 frames; at delay 1 / 2
+ * the same pings gave 61 / 197). Round trip: under 33 ms -> 2, 67 -> 3, 100 -> 4, 133 -> 5, 167 -> 6, above -> 7 (the
+ * ring's depth). Before 2026-11-03: one-way - 2 rounded, at most 4 (120 ms -> 2: rollbacks of 2-4 frames, hitches). */
 static int delay_for_rtt(long rtt_us) {
     if (rtt_us <= 0) return 3;
     double one_way = rtt_us / 2000.0 / (1000.0 / 60.0);
-    int d = (int)ceil(one_way - 0.001);
-    return d < 1 ? 1 : d > 7 ? 7 : d;
+    int d = (int)ceil(one_way - 0.001) + 1;
+    return d < 2 ? 2 : d > 7 ? 7 : d;
 }
 static int hs_auto_delay(int dm, int dp, uint64_t waited_ms) {
     if (dm > 0 && dp > 0) return dm > dp ? dm : dp;

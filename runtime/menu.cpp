@@ -1262,8 +1262,8 @@ static void sec_gameplay(void) {
     ImGui::Text("Input delay of online fights: AUTOMATIC");
     { int d = rbn_delay(); if (d > 0) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "(this match: %d frame%s)", d, d == 1 ? "" : "s"); } }
     help("Chosen by itself at the start of every online match from the ping between the two players: the delay covers the "
-         "trip of the other player's buttons (about 1 frame up to 33 ms of ping, 2 up to 67 ms, 3 up to 100 ms, and so on), and "
-         "rollback covers the rest. Both players always play with the same number. Nothing to set.");
+         "trip of the other player's buttons plus one frame of margin (2 frames up to 33 ms of ping, 3 up to 67 ms, 4 up to 100 ms, "
+         "5 up to 133 ms, 6 up to 167 ms, 7 above), so rollbacks are rare. Both players always play with the same number. Nothing to set.");
     if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, a test): it wins over the automatic one. Start the game with \"Play SSBU.bat\" for the automatic delay.", getenv("SSBU_RB_NET_DELAY"));
     ImGui::Separator();
     static int fs = -1;

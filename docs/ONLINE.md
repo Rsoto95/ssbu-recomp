@@ -162,8 +162,8 @@ still play together in a room.
 
 **Input delay** (since 2026-11-05: always **automatic**, nobody chooses it; F1 -> Gameplay only shows it): the host
 measures the round trip at each match's start (the one 3 of 4 of the latest stay under) and both games play with that
-number: the whole one-way trip in frames, rounded up, 1..7 (1 under 33 ms, 2 up to 67 ms, 3 up to 100 ms, 4 up to 133 ms,
-5 up to 167 ms, 6 up to 200 ms, 7 above); rollback only covers the spikes. graphics.ini `input_delay` is no longer read;
+number: the whole one-way trip in frames, rounded up, plus one frame of margin, 2..7 (2 under 33 ms, 3 up to 67 ms,
+4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above); rollbacks are rare. graphics.ini `input_delay` is no longer read;
 `SSBU_RB_NET_DELAY=<n>` still fixes it for tests. A game without the snapshot ring (not enough memory) plays with at
 least the delay that covers the whole trip (it waits for every pad). The match report in the log says the delay.
 
