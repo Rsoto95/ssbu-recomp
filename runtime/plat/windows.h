@@ -287,6 +287,12 @@ void SwitchToFiber(LPVOID fiber);
 void DeleteFiber(LPVOID fiber);
 LPVOID GetCurrentFiber(void);
 LPVOID GetFiberData(void);
+/* Rollback: host-side snapshot of a fiber (the ucontext / FiberRegs and the fixed fields) and the bounds of its host stack. */
+typedef struct { uintptr_t sp, lo, hi; uint8_t blk[2048]; } PlatFiberSnapshot;
+int plat_fiber_snapshot(void *fiber, PlatFiberSnapshot *s);
+int plat_fiber_restore(void *fiber, const PlatFiberSnapshot *s, const void *stack, size_t n);
+int plat_fiber_bounds(void *fiber, uintptr_t *lo, uintptr_t *hi);
+int plat_thread_stack_bounds(HANDLE h, uintptr_t *lo, uintptr_t *hi);
 
 /* ---- virtual memory (mmap, with a page-state map for VirtualQuery) ---- */
 #define MEM_COMMIT 0x1000
@@ -322,6 +328,7 @@ BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old);
 SIZE_T VirtualQuery(LPCVOID addr, MEMORY_BASIC_INFORMATION *mi, SIZE_T len);
 UINT GetWriteWatch(DWORD flags, PVOID base, SIZE_T size, PVOID *addrs, ULONG_PTR *count, ULONG *gran);   /* not available: 1 (callers fall back) */
 UINT ResetWriteWatch(LPVOID base, SIZE_T size);
+int plat_writewatch_add(void *addr, size_t size);        /* rollback: watch a range not allocated with MEM_WRITE_WATCH */
 int plat_write_fault(void *addr);                        /* macOS write watch: 1 = a fault on a watched page, resolved (hostrt.c's crash handler asks first) */
 void plat_prepare_write(void *p, size_t n);              /* before the kernel writes into [p, p+n) (read, fread): marks watched pages written */
 BOOL FlushInstructionCache(HANDLE p, LPCVOID base, SIZE_T size);

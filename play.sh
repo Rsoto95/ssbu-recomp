@@ -19,5 +19,5 @@ PY="$REPO/deps/venv/bin/python"
     exit 1; }
 
 mkdir -p "$DATA"
-"$PY" "$REPO/scripts/run.py" --linux "$@" 2>&1 | tee "$DATA/last_run.log"
+"$PY" "$REPO/scripts/run.py" --linux --play "$@" 2>&1 | tee "$DATA/last_run.log"
 exit "${PIPESTATUS[0]}"

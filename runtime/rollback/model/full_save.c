@@ -2,6 +2,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Split out of r1_state.c; what it shares with the other rollback files is declared in game_state_internal.h. */
 #include "game_state_internal.h"
+#ifndef _WIN32
+#include "../rb_park.h"
+#endif
 
 /* ---------------------------------------------------------------- save / restore */
 
@@ -50,8 +53,12 @@ void save(Ctx *c) {
     /* (2026-11-02) DIRECT: the ring's / run-ahead's first save (g_rs_drop, marks on) copies the game's memory once, straight
      * into the shadow and the extras, on the parallel copy's threads (write_marks.c mark_fill); no copy of its own (r->s).
      * Before: two copies of 1.9 GB, the first on one thread: ~1.04 s with the game held at a fight's first frame. SSBU_R1_DIRECT=0: as before */
+#ifdef _WIN32
     static int direct_on = -1; if (direct_on < 0) { const char *e = getenv("SSBU_R1_DIRECT"); direct_on = !(e && e[0] == '0'); }
     int direct = direct_on && g_rs_drop && g_mark > 0 && g_session.cycle == 0;
+#else
+    int direct = 0;                                   /* write_marks.c (the direct first save) is Windows-only: page_tracker_posix.c has no mark_fill */
+#endif
     {   int bad = 0;
         for (int i = 0; i < g_memory_map.range_count && !bad; i++) {
             Rng *r = &g_memory_map.ranges[i];
@@ -65,17 +72,28 @@ void save(Ctx *c) {
         if (bad) { release(); g_save_failed = 2; return; }
     }
     double tprep = now_ms();
+    int lazy = 0;                                     /* (SSBU_LS_LAZY is Windows-only: page_tracker_posix.c has no lazy base) */
+#ifdef _WIN32
     if (direct && !mark_prepare()) { release(); g_save_failed = 2; return; }      /* (the shadow's reservation and the extras' buffers, before the hold) */
-    int lazy = direct && ls_lazy_prepare();               /* (2026-11-05, SSBU_LS_LAZY) the windows' pages are copied at their first write, not here */
+    lazy = direct && ls_lazy_prepare();               /* (2026-11-05, SSBU_LS_LAZY) the windows' pages are copied at their first write, not here */
+#endif
     tprep = now_ms() - tprep;
     if (g_fast > 0 && g_session.cycle < g_learn) async_learn();
     double tp0 = now_ms();
-    if (g_ra > 0) { if (!ra_hold_quiet(200)) { LOG("r1: RA: first save: no quiet moment within 200 ms: not now (busy: %s)\n", g_ra_busy_first_save()); if (direct) mark_abort(); g_save_failed = 1; return; } } else park_quiet(0);
+    if (g_ra > 0) { if (!ra_hold_quiet(200)) {
+        LOG("r1: RA: first save: no quiet moment within 200 ms: not now (busy: %s)\n", g_ra_busy_first_save());
+#ifdef _WIN32
+        if (direct) mark_abort();
+#endif
+        g_save_failed = 1; return; } } else park_quiet(0);
     fibers_save();
     double t1b = now_ms();
     int dfail = 0;
+#ifdef _WIN32
     if (direct) { g_saved_bytes = mark_fill(lazy, &dfail); if (!lazy && !g_saved_bytes) dfail = 1; }
-    else for (int i = 0; i < g_memory_map.range_count; i++) { memcpy(g_memory_map.ranges[i].s, g_memory_map.ranges[i].a, g_memory_map.ranges[i].n); g_saved_bytes += g_memory_map.ranges[i].n; }
+    else
+#endif
+    for (int i = 0; i < g_memory_map.range_count; i++) { memcpy(g_memory_map.ranges[i].s, g_memory_map.ranges[i].a, g_memory_map.ranges[i].n); g_saved_bytes += g_memory_map.ranges[i].n; }
     double t2 = now_ms();
     {   /* pages the OTHER threads write while main is held here (audio, vsync counter, loaders, render threads): they are
          * not the simulation's; they are left out of restore and verify. SSBU_R1_PAUSE=<ms> (default 50, 0 = none) */
@@ -102,9 +120,11 @@ void save(Ctx *c) {
         if (g_mark > 0 && g_session.cycle == 0) {
             g_ctx_save = *c;
             if (!direct) mfail = !mark_setup();
+#ifdef _WIN32
             else if (dfail) mfail = 1;
             else if (lazy) { mfail = !mark_finish_lazy(pause > 0 ? direct_note : NULL, &np, pause, &filled); shown = g_direct_shown; g_direct_shown = 0; }
             else { mfail = !mark_finish_direct(pause > 0 ? direct_note : NULL, &np); shown = g_direct_shown; g_direct_shown = 0; }
+#endif
         }     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
         tfin = now_ms() - tfin;
         if (lazy) LOG("r1: FULL SAVE (lazy, SSBU_LS_LAZY: the windows' pages are copied at their first write): buffers %.1f ms before the hold; extras %.1f MB copied in %.1f ms; marks set + windows protected + %zu unprotected window pages copied + pause %d ms (%zu pages written in it) %.1f ms%s\n",
@@ -167,12 +187,38 @@ const char *where(uint8_t *a) {
 
 void stop_born_threads(void) {      /* guest threads created in the window do not exist at the save point: held for good */
     Ctx *tc; const char *nm; HANDLE h; int o = 0; g_nborn = 0;
+#ifndef _WIN32
+    Ctx *born[256]; int nb = 0;
+    for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc, &nm, &h) && nb < 256; i++)
+        if (h && GetThreadId(h) != GetCurrentThreadId()) born[nb++] = tc;
+    if (!nb) { g_born[0] = 0; return; }
+    for (int i = 0; i < nb; i++) rb_park_hold_forever(born[i]);
+    rb_park_request();
+    double t0 = now_ms();
+    for (;;) {
+        int all = 1;
+        extern int waiting_import(const char *s); extern int os_mutexes_held_by(Ctx *c);
+        for (int i = 0; i < nb; i++) { int st = rb_park_parked(born[i]); if (st != RB_PARK_HELD && !(waiting_import(born[i]->in_import) && os_mutexes_held_by(born[i]) == 0)) all = 0; }
+        if (all || now_ms() - t0 > g_guest_threads.park_ms) break;
+        SwitchToThread();
+    }
+    /* g_park_on stays set: the caller's hold follows at once, and the born ones have hold_forever. */
+    for (int i = 0; i < nb; i++) {
+        int st = rb_park_parked(born[i]);
+        if (st == RB_PARK_HELD || (waiting_import(born[i]->in_import) && os_mutexes_held_by(born[i]) == 0)) g_nborn++;
+        else { g_guest_threads.running++; if (o < 1900) o += snprintf(g_born + o, sizeof g_born - o, " [NOT HELD %p]", (void *)born[i]); }
+    }
+    if (o == 0) for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc, &nm, &h); i++)
+        if (h && GetThreadId(h) != GetCurrentThreadId() && o < 1900) o += snprintf(g_born + o, sizeof g_born - o, " [%s]", nm ? nm : "?");
+    g_born[o] = 0;
+#else
     for (int i = g_guest_threads.info_count; guest_thread_info(i, &tc, &nm, &h); i++) {
         if (!h || GetThreadId(h) == GetCurrentThreadId()) continue;
         SuspendThread(h); g_nborn++;
         if (o < 1900) o += snprintf(g_born + o, sizeof g_born - o, " [%s %s]", nm ? nm : "?", tc->in_import ? tc->in_import : "guest code");
     }
     g_born[o] = 0;
+#endif
 }
 void restore(Ctx *c) {
     double tp0 = now_ms();
@@ -189,6 +235,9 @@ void restore(Ctx *c) {
         for (size_t p = 0; p < r->n / PG; p++) {
             uint8_t *a = r->a + p * PG, *s = r->s + p * PG;
             if (r->async && r->async[p]) continue;
+#ifdef __linux__
+            if (is_nosim(a)) continue;                     /* network stacks and other external state are not rewound */
+#endif
             if (memcmp(a, s, PG)) {
                 if (g_ne >= g_ecap) continue;          /* (65,536 pages = 256 MB: not reached) */
                 g_e[g_ne].a = a; memcpy(g_e[g_ne].d, a, PG); g_ne++;
@@ -239,15 +288,18 @@ void verify(void) {
         Rng *r = &g_memory_map.ranges[i];
         MEMORY_BASIC_INFORMATION m;
         if (!VirtualQuery(r->a, &m, sizeof m) || m.State != MEM_COMMIT || (uint8_t *)m.BaseAddress + m.RegionSize < r->a + r->n) continue;
-        for (size_t p = 0; p < r->n / PG; p++)
+        for (size_t p = 0; p < r->n / PG; p++) {
+#ifdef __linux__
+            if (is_nosim(r->a + p * PG)) continue;
+#endif
             if (!r->dirty[p] && !(r->async && r->async[p]) && memcmp(r->a + p * PG, r->s + p * PG, PG)) {
                 extra++;
                 if (shown++ < 36) LOG("r1:   re-run changed %s, the first pass did not\n", where(r->a + p * PG));
             }
+        }
     }
     LOG("r1: cycle %d VERIFY at fight frame %lld (end of the re-run): %zu of %zu changed pages differ from the first pass's end state, %zu pages changed only in the re-run (%.1f ms)\n",
         g_session.cycle, g_session.fight_frame, bad, g_ne, extra, now_ms() - t0);
     os_compare("at the end of the re-run");
 }
 void release(void) { for (int i = 0; i < g_memory_map.range_count; i++) { rs_free(g_memory_map.ranges[i].s); g_memory_map.ranges[i].s = NULL; free(g_memory_map.ranges[i].dirty); g_memory_map.ranges[i].dirty = NULL; free(g_memory_map.ranges[i].async); g_memory_map.ranges[i].async = NULL; } }
-

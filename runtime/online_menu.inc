@@ -441,25 +441,40 @@ static void om_ssl_GetVerifyCertError(Ctx *c) { if (!ssl_conn_enter(c, A0)) retu
 /* abort() and CRT invalid parameters end the process with 0xC0000409 and no message: with the Online menu on, both print
  * the host stack first (exe-relative addresses: resolve them with build\work\ssbu_native.map). */
 #include <signal.h>
+#ifndef _WIN32
+void plat_symbolize(uintptr_t pc, char *out, size_t n);   /* plat_posix.c: "symbol+0xoff (file)" */
+#endif
 static void om_host_stack(const char *why) {
-    void *frames[48];
-    USHORT n = CaptureStackBackTrace(1, 48, frames, NULL);
+    uintptr_t pcs[48];
+#ifdef _WIN32
+    USHORT n = CaptureStackBackTrace(1, 48, (PVOID *)pcs, NULL);
+#else
+    int n = plat_backtrace(pcs, 48);
+#endif
     printf("\n[online-menu] %s; host stack:\n", why);
-    for (USHORT i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
+#ifdef _WIN32
         HMODULE m = NULL;
         char name[MAX_PATH] = "?";
-        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)frames[i], &m))
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)pcs[i], &m))
             GetModuleFileNameA(m, name, sizeof name);
         const char *base = strrchr(name, '\\');
-        printf("  %2u  %s+0x%llx\n", i, base ? base + 1 : name, (unsigned long long)((uintptr_t)frames[i] - (uintptr_t)m));
+        printf("  %2d  %s+0x%llx\n", i, base ? base + 1 : name, (unsigned long long)(pcs[i] - (uintptr_t)m));
+#else
+        char sym[512];
+        plat_symbolize(pcs[i], sym, sizeof sym);
+        printf("  %2d  %s\n", i, sym);
+#endif
     }
     fflush(stdout);
 }
 static void om_on_abort(int sig) { (void)sig; om_host_stack("abort()"); }
+#ifdef _WIN32
 static void om_on_invalid_parameter(const wchar_t *e, const wchar_t *f, const wchar_t *file, unsigned line, uintptr_t r) {
     (void)e; (void)f; (void)file; (void)line; (void)r;
     om_host_stack("CRT invalid parameter");
 }
+#endif
 
 static ImportFn om_prev(const char *name) {
     ImportFn f = import_lookup(name);
@@ -533,6 +548,8 @@ static void online_menu_register(void) {
     };
     register_imports(defs, (int)(sizeof defs / sizeof defs[0]));
     signal(SIGABRT, om_on_abort);
+#ifdef _WIN32
     _set_invalid_parameter_handler(om_on_invalid_parameter);
+#endif
     om_log("ON (phase 0, discovery): network and network service account modelled as available; nintendo.net names -> %s", g_om_server);
 }

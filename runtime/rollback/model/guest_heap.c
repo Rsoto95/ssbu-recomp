@@ -121,7 +121,19 @@ int is_nosim(uint8_t *a) {
     if (g_win1 && a >= g_win1 && a < g_win1 + g_wn1) return g_ns1[(size_t)(a - g_win1) >> 12];
     if ((uintptr_t)a >= WIN2 && (uintptr_t)a < WIN2 + WN2) return g_ns2[(size_t)((uintptr_t)a - WIN2) >> 12];
     return 0;
-}     /* nnsdk.c: a decommit changes the pages too */
+}
+#ifdef __linux__
+/* A network thread ended: its guest stack is ordinary simulation memory again when the game reuses it. (Only the network
+ * stack pages are cleared here; host stacks / audio pages are never reused as simulation memory.) */
+void r1_sim_clear(uint64_t a, uint64_t n) {
+    if (!g_ns1 || !n) return;
+    for (uint64_t p = a & ~(uint64_t)(PG - 1); p < a + n; p += PG) {
+        uint64_t o = p - (uint64_t)(uintptr_t)g_win1;
+        if (o < g_wn1) g_ns1[o >> 12] = 0; else { o = p - WIN2; if (o < WN2) g_ns2[o >> 12] = 0; }
+    }
+}
+#endif
+/* nnsdk.c: a decommit changes the pages too */
 void r1_register_heap(void) {
     if (r1_on() && (getenv("SSBU_R1_MARK") || ra_wanted())) {
         static const ImportDef md[] = { {"memcpy", m_memcpy}, {"memmove", m_memmove}, {"memset", m_memset} };

@@ -5,7 +5,8 @@
  * presentation pool) is its own translation unit: this header is everything it shares with the others, in both directions.
  * Nothing else may be reached across the boundary. Keep the list short; when something here can go, remove it.
  *
- * Only Windows builds use these files (the Linux / macOS build of r1_state.c is a set of stubs and has no rb_learned.c). */
+ * Windows and Linux use these files (Linux has its own page tracker and parking gate); the macOS build of r1_state.c is a
+ * set of stubs and has no rb_learned.c. */
 #ifndef R1_INTERNAL_H
 #define R1_INTERNAL_H
 #include <stdint.h>
@@ -14,6 +15,12 @@
 #include "runtime.h"
 #include "hostrt.h"
 #include "../rollback.h"                  /* RbPad and the rest of the netcode contract */
+
+#ifdef _WIN32
+#define R1_EXPORT __declspec(dllexport)
+#else
+#define R1_EXPORT __attribute__((visibility("default")))
+#endif
 
 /* ---- what r1_state.c provides ------------------------------------------------------------------------------------------ */
 #define PG 4096                              /* the page size every table here is counted in */
@@ -44,8 +51,8 @@ extern int g_audio_free;                     /* SSBU_R1_AUDIO_FREE: asynchronous
 /* The write-mark maps. A game DLL built with store marks writes a 1 in m1 / m2 for each page it writes; pm1 pm2 plo1 pn1 pn2 point at
  * wherever that DLL keeps them. ls_use_exe_maps points them at the exe's own r1_m1 r1_m2 r1_lo1 r1_n1 r1_n2 instead, which nothing marks. */
 extern uint8_t **pm1, **pm2; extern uint64_t *plo1, *pn1, *pn2;
-__declspec(dllexport) extern uint8_t *r1_m1, *r1_m2;
-__declspec(dllexport) extern uint64_t r1_lo1, r1_n1, r1_n2;
+R1_EXPORT extern uint8_t *r1_m1, *r1_m2;
+R1_EXPORT extern uint64_t r1_lo1, r1_n1, r1_n2;
 
 extern size_t g_ncj;                         /* page jobs queued for the parallel copy / compare */
 extern uint8_t *g_cp_cmp;                    /* when set, the queued jobs are COMPARED (g_cp_cmp[i] = 1 if the pages differ) instead of copied */
@@ -56,6 +63,7 @@ double now_ms(void);                         /* milliseconds on the high-resolut
 
 int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);      /* hostrt.c: a hook on a game function */
 int guest_thread_info(int i, Ctx **c, const char **name, HANDLE *h);                           /* the i-th guest thread, 0 when there is none */
+int os_mutexes_held_by(Ctx *c);                                                                /* os_threads.c: guest mutexes that thread holds */
 
 /* ---- what r1_ring.c provides ------------------------------------------------------------------------------------------- */
 int rgs_wanted(void);                        /* 1 when the ring is wanted (online rollback, or the SSBU_RB_SIM test) */
@@ -146,14 +154,18 @@ typedef struct { uint64_t key; int sig, cnt; uint64_t len; } OsRec;
 
 typedef struct { HANDLE h; Ctx *c; const char *name; uint64_t from; const char *imp; Ctx regs; int held, parked, same; double wait_ms; uint64_t rsp, rip; int cok; } Th;
 
-typedef struct { uint64_t key; uint64_t obj[6]; void *fls; uint8_t flsb[392]; Ctx *c; void *fiber; Ctx regs; const char *imp; uint64_t from, sp; int susp; uint8_t blk[FIB_BLOCK]; uint8_t *stk; size_t n; uint64_t rsp; int rok; } Fib;      /* rok: put back by the last fibers_restore_all */
+typedef struct { uint64_t key; uint64_t obj[6]; void *fls; uint8_t flsb[392]; Ctx *c; void *fiber; Ctx regs; const char *imp; uint64_t from, sp; int susp; uint8_t blk[FIB_BLOCK];
+#ifndef _WIN32
+    PlatFiberSnapshot pst;
+#endif
+    uint8_t *stk; size_t n; uint64_t rsp; int rok; } Fib;      /* rok: put back by the last fibers_restore_all */
 
 /* The other guest threads while memory is copied (threads.c). The ring holds each at a wait (parks it), copies, and lets it go. */
 typedef struct {
     Th table[256];                           /* one entry per other guest thread: its handle, context, the wait it is held at */
     int count;                               /* entries of table[] in use */
     int info_count;                          /* guest threads the host reports (guest_thread_info) at the last count */
-    int mismatch;                            /* threads found not parked when checked (counted for the log) */
+    int mismatch;                            /* threads taken at another wait (counted; registers not restored; the ring refuses only `running`) */
     int running;                             /* (ra_hold_restore) threads still RUNNING, not blocked at a wait, after park_ms */
     int park_ms;                             /* how long to wait for the other threads to stop at a wait (default 500) */
     long long audio_other;                   /* ring loads that took an audio thread at another wait (ra_hold_restore) */
@@ -397,6 +409,9 @@ void slow_report(const char *when);    /* model/threads.c */
 void unpark(void);    /* model/threads.c */
 void restore_thread_regs(void);    /* model/threads.c */
 void park_report(const char *when);    /* model/threads.c */
+#ifdef __linux__
+void mark_network_threads(void);       /* model/threads.c: Pia / NetSystem stacks are not simulation state */
+#endif
 uint64_t map_sym(const char *want);    /* model/threads.c */
 void fls_index_find(void);    /* model/threads.c */
 int rest_stack(uint64_t a);    /* model/threads.c */
@@ -459,6 +474,13 @@ int ra_hold_quiet(double limit);    /* model/runahead.c */
 void ra_frame_end(double te);    /* model/runahead.c */
 void ra_init(void);    /* model/runahead.c */
 int is_nosim(uint8_t *a);    /* model/guest_heap.c */
+void r1_nosim(uint64_t a, uint64_t n);    /* model/guest_heap.c: pages not rolled back (audio, host stacks, network threads) */
+#ifdef __linux__
+void r1_sim_clear(uint64_t a, uint64_t n);    /* ... and back to simulation when a network thread ends */
+int os_thread_is_network_name(const char *name);    /* os_threads.c: Pia / NetSystem */
+int os_thread_guest_stack(HANDLE h, uint64_t *lo, uint64_t *hi);
+int os_thread_network_excluded(void);    /* model/threads.c: SSBU_RB_NET_THREAD_EXCLUDE=0 rewinds network threads */
+#endif
 int rbg_noring_now(void);    /* controller/rollback_controller.c */
 int rbg_on(void);    /* controller/rollback_controller.c */
 void rbg_step(Ctx *c);    /* controller/rollback_controller.c */
