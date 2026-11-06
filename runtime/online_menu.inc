@@ -94,7 +94,11 @@ static int om_ours(const char *name) {                     /* a name answered wi
 }
 
 /* ---------------------------------------------------------------- nn::nifm: connected */
-static void om_nifm_true(Ctx *c) { RET(1); }
+/* (2026-11-05, owner: "with an old version the Online button must not let you in") menu.cpp asks GitHub at the start (and
+ * again at every login): a game program that is not the newest of its branch answers "no internet" here, the game's own
+ * offline path (as with the Online menu off), and a message says how to update. SSBU_VERSION_CHECK=0: off (tests). */
+int menu_online_blocked(void); void menu_online_entered(void);
+static void om_nifm_true(Ctx *c) { RET(menu_online_blocked() ? 0 : 1); }
 static void om_nifm_false(Ctx *c) { RET(0); }
 static void om_nifm_keep(Ctx *c) { (void)c; }
 static uint64_t om_nsa_id(void);
@@ -155,6 +159,7 @@ static void om_acc_EnsureIdTokenCacheAsync(Ctx *c) {
     if (rd64(ctx + 0x18) && !om_ctx_ours(ctx)) guest_trap("nn::account::AsyncContext: a request pointer this model did not make", ctx);
     wr64(ctx + 0x18, P(&g_om_token_request));
     om_log("nn::account::EnsureNetworkServiceAccountIdTokenCacheAsync: finished at once");
+    menu_online_entered();                                 /* (2026-11-05) the version asked again (a release out during the session) */
     RET(0);
 }
 static void om_acc_Async_HasDone(Ctx *c) { wr8(A1, om_ctx_ours(A0) ? 1 : 0); RET(0); }

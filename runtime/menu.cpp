@@ -112,12 +112,14 @@ static SRWLOCK g_popup_lock = SRWLOCK_INIT;
 static char g_popup_title[96], g_popup_text[512];
 static volatile LONG64 g_popup_until;
 static volatile LONG g_popup_drawn;
-extern "C" void menu_popup(const char *title, const char *text) {
+static void popup_for(const char *title, const char *text, int ms);
+extern "C" void menu_popup(const char *title, const char *text) { popup_for(title, text, 7000); }
+static void popup_for(const char *title, const char *text, int ms) {
     AcquireSRWLockExclusive(&g_popup_lock);
     snprintf(g_popup_title, sizeof g_popup_title, "%s", title ? title : "");
     snprintf(g_popup_text, sizeof g_popup_text, "%s", text ? text : "");
     InterlockedExchange(&g_popup_drawn, 0);
-    InterlockedExchange64(&g_popup_until, (LONG64)GetTickCount64() + 7000);
+    InterlockedExchange64(&g_popup_until, (LONG64)GetTickCount64() + ms);
     ReleaseSRWLockExclusive(&g_popup_lock);
 }
 static int popup_on(void) { return (ULONGLONG)g_popup_until > GetTickCount64(); }
@@ -1256,27 +1258,33 @@ static int online_differs(void) {
 
 /* Gameplay: the input delay of online fights (graphics.ini input_delay; net_session.c reads it at each match's handshake, both
  * games take the larger of the two players' values) and every fighter and stage unlocked (unlock_all, unlock_all.c; read at start) */
+extern "C" int rbn_delay(void);
 static void sec_gameplay(void) {
+    /* (2026-11-05, owner) Auto at every start (graphics.ini is not read or written for it); a player may pick a number for
+     * this session only: the match uses the larger of the two players' numbers, an Auto side counts as the delay the host
+     * measures from the ping (net_session.c hs_auto_delay) */
     static int dl = -1;
     if (dl < 0) dl = gfx_input_delay();
     ImGui::Text("Input delay of online fights (frames)");
+    { int d = rbn_delay(); if (d > 0) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "(this match: %d frame%s)", d, d == 1 ? "" : "s"); } }
     ImGui::SetWindowFontScale(1.2f);
-    for (int d = 1; d <= 7; d++) {
-        int v = d == 7 ? 0 : d;                     /* (the last one: auto) */
+    for (int d = 0; d <= 7; d++) {
         char l[16];
-        if (v) snprintf(l, sizeof l, "%d##dl%d", d, d); else snprintf(l, sizeof l, "Auto##dl%d", d);
-        if (d > 1) ImGui::SameLine();
-        if (ImGui::RadioButton(l, dl == v)) {
-            char t[8]; dl = v; gfx_set_input_delay(v); snprintf(t, sizeof t, "%d", v); ini("input_delay", v ? t : "auto");
-            printf("menu: input delay of online fights: %s\n", v ? t : "auto"); fflush(stdout);
+        if (d) snprintf(l, sizeof l, "%d##dl%d", d, d); else snprintf(l, sizeof l, "Auto##dl0");
+        if (d) ImGui::SameLine();
+        if (ImGui::RadioButton(l, dl == d)) {
+            dl = d; gfx_set_input_delay(d);
+            if (d) printf("menu: input delay of online fights: %d (this session only)\n", d); else printf("menu: input delay of online fights: auto (this session only)\n");
+            fflush(stdout);
         }
     }
     ImGui::SetWindowFontScale(1.0f);
-    tag(0, 0);
-    help("The time between pressing a button and your fighter moving, in online fights. 3 is the usual. Lower: quicker to respond, "
-         "but with a slow connection fighters jump around more. Higher: smoother, but slower to respond. "
-         "You and the other player do not need the same number: each match uses the larger of the two. Used from your next match.");
-    if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, e.g. \"Play SSBU (delay 4).bat\"): it wins over this setting. Start the game with \"Play SSBU.bat\" to use it.", getenv("SSBU_RB_NET_DELAY"));
+    help("Auto (recommended, and what the game starts with every time): chosen from the ping at the start of every match, with "
+         "one frame of margin (2 frames up to 33 ms of ping, 3 up to 67 ms, 4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above), "
+         "so rollbacks are rare. A number: lower responds quicker but fighters jump more with a slow connection; higher is smoother "
+         "but slower to respond. The match uses the larger of the two players' choices (Auto counts as the measured one). "
+         "Kept only until you close the game; used from your next match.");
+    if (getenv("SSBU_RB_NET_DELAY")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "This run was started with input delay %s (SSBU_RB_NET_DELAY, a test): it wins over this setting. Start the game with \"Play SSBU.bat\" to use it.", getenv("SSBU_RB_NET_DELAY"));
     ImGui::Separator();
     static int fs = -1;
     if (fs < 0) fs = gfx_fight_sound();
@@ -1968,6 +1976,9 @@ static DWORD WINAPI update_ask_thread(LPVOID unused) {
             if (hex) snprintf(g_chk_rt, sizeof g_chk_rt, "%.7s", m);
         }
         if (g_chk_rt[0] && g_chk_rt_have[0] && _strnicmp(g_chk_rt, g_chk_rt_have, 7)) InterlockedExchange(&g_chk_exe_old, 1);
+        if (g_chk_rt[0]) {                                  /* (2026-11-05) the Online button's gate: only from an answer GitHub gave */
+            void ver_result(int old); ver_result(g_chk_exe_old != 0);
+        }
     }
     int ok = n >= 40; for (int i = 0; i < 40 && ok; i++) ok = isxdigit((unsigned char)got[i]);
     if (!ok) { printf("menu: check for updates: GitHub could not be asked\n"); fflush(stdout); InterlockedExchange(&g_chk_state, 4); return 0; }
@@ -1979,6 +1990,40 @@ static DWORD WINAPI update_ask_thread(LPVOID unused) {
     if (newer && getenv("SSBU_UPDATE_FLAG")) { FILE *f = fopen(getenv("SSBU_UPDATE_FLAG"), "w"); if (f) { fputs(g_chk_latest, f); fclose(f); } snprintf(g_upd, sizeof g_upd, "%s", g_chk_latest); }
     InterlockedExchange(&g_chk_state, newer ? 3 : 2);
     return 0;
+}
+/* (2026-11-05, owner) the Online button only with the newest game program of the branch this copy follows (the check above,
+ * at the start and again at every online login). GitHub not reachable: never blocked. SSBU_VERSION_CHECK=0: no gate. */
+static volatile LONG g_ver_old, g_ver_asked, g_ver_again, g_ver_block, g_ver_logins;   /* block: the gate in use, changed only at a login (never in the middle of an arena) */
+static ULONGLONG g_ver_told;
+void ver_result(int old) {
+    if (!g_ver_logins) InterlockedExchange(&g_ver_block, old);     /* (before the first login: the start's answer is the gate) */
+    if (InterlockedExchange(&g_ver_old, old) != old || old) { printf("menu: version check: this game program is %s (%s here, %s published on %s)\n", old ? "OLD: the Online button is blocked until it is updated" : "the newest", g_chk_rt_have, g_chk_rt, g_chk_branch); fflush(stdout); }
+}
+static int ver_gate_off(void) { static int off = -1; if (off < 0) { const char *e = getenv("SSBU_VERSION_CHECK"); off = e && e[0] == '0'; } return off; }
+extern "C" int menu_online_blocked(void) {
+    if (ver_gate_off() || !g_ver_block) return 0;
+    ULONGLONG t = GetTickCount64();
+    if (t - g_ver_told > 15000) {
+        g_ver_told = t;
+        popup_for("UPDATE THE GAME TO PLAY ONLINE", getenv("SSBU_UPDATE_CMD")
+            ? "Your version of the game is old: Online is closed until you update it.\n"
+              "Press F1 (or Home on the controller) > About > \"Update and restart\".\n"
+              "The game closes, installs the new version (about a minute) and opens again by itself."
+            : "Your version of the game is old: Online is closed until you update it.\n"
+              "Close the game and open it again with \"Play SSBU.bat\": it updates by itself at the start.\n"
+              "(Linux / macOS: run the installer of the guide again.)", 15000);
+        printf("menu: Online button: blocked, this game program is old (%s here, %s published)\n", g_chk_rt_have, g_chk_rt); fflush(stdout);
+    }
+    return 1;
+}
+extern "C" void menu_online_entered(void) {           /* an online login: the newest answer becomes the gate, and GitHub is asked again */
+    InterlockedIncrement(&g_ver_logins); InterlockedExchange(&g_ver_block, g_ver_old); InterlockedExchange(&g_ver_again, 1);
+}
+static void upd_start_check(const char *branch);
+static void ver_tick(void) {                             /* render thread, every frame */
+    if (ver_gate_off()) return;
+    if (!g_ver_asked) { g_ver_asked = 1; upd_start_check(upd_branch()); return; }
+    if (g_ver_again && g_chk_state != 1) { InterlockedExchange(&g_ver_again, 0); upd_start_check(upd_branch()); }
 }
 static void upd_start_check(const char *branch) {
     snprintf(g_chk_branch, sizeof g_chk_branch, "%s", branch);
@@ -2096,6 +2141,9 @@ static void update_banner(void) {                          /* the top of every F
     ImGui::Separator();
 }
 #else
+static void ver_tick(void) {}
+extern "C" int menu_online_blocked(void) { return 0; }
+extern "C" void menu_online_entered(void) {}
 static void update_check(void) {}
 static void update_banner(void) {}
 static void firewall_notice(void) {}      /* run.py asks the Windows Firewall only (SSBU_FIREWALL) */
@@ -2327,6 +2375,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
     update_check();
+    ver_tick();
     gc_pro_notice();
     firewall_notice();
 #ifndef _WIN32
