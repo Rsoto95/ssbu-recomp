@@ -5,7 +5,8 @@
 #   ./play.sh --userdata <folder>      another save folder
 #   ./play.sh --help                   every option (they are scripts/run.py's)
 #
-# The game's output is shown here and also kept in ~/.local/share/ssbu-recomp/last_run.log (attach it to a bug report).
+# The launcher's output is shown here and kept in ~/.local/share/ssbu-recomp/last_run.log; the game's own log goes to
+# build-linux/logs/game_*.log (the last 10), and is sent to the group's server after each online match (share_logs = off: not).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"

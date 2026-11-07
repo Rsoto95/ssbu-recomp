@@ -607,6 +607,43 @@ void rbg_after_stop(void) {
  * or the match's pad): nnhid.c then makes a GameCube port's analog triggers from the synced L / R (the pad carries none) */
 static int g_rbg_synced[2];
 int rbg_pad_synced(int id) { return (id == 0 || id == 1) && g_rbg_synced[id]; }
+
+/* (2026-11-06, owner: "no pude hacer fast fall" / "caminaba pero no podia correr a la izquierda", twice in many matches,
+ * 0 desyncs: both games ran the same pads, so the pads this PC read were the question) this game's own pad of every
+ * real pass of an agreed match, kept in memory and written to the log when the match ends: the frames where the pad
+ * changed or the pass came 20 ms or more after the one before (frame:buttons/lx/ly, +gap ms). A dash or a fast fall
+ * needs the stick from the centre to the edge within a few frames; this shows what the game got. SSBU_RB_PADLOG=0: off. */
+typedef struct { int f; uint16_t b; int16_t lx, ly; uint16_t gap10; } PadRec;
+enum { PADLOG_CAP = 1 << 17 };                    /* 36 min of frames, 12 bytes each */
+static PadRec *g_padlog; static int g_padlog_n; static double g_padlog_t;
+static int padlog_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("SSBU_RB_PADLOG"); on = !(e && e[0] == '0'); } return on; }
+static void padlog_add(long long f, RbPad p) {
+    if (!padlog_on()) return;
+    if (!g_padlog) g_padlog = malloc(PADLOG_CAP * sizeof *g_padlog);
+    double t = now_ms(), gap = g_padlog_n ? t - g_padlog_t : 0; g_padlog_t = t;
+    if (!g_padlog || g_padlog_n >= PADLOG_CAP) return;
+    PadRec *r = &g_padlog[g_padlog_n++];
+    r->f = (int)f; r->b = (uint16_t)p.buttons; r->lx = p.lx; r->ly = p.ly;
+    r->gap10 = gap * 10 > 65535 ? 65535 : (uint16_t)(gap * 10);
+}
+static void padlog_dump(int match) {
+    if (!padlog_on() || !g_padlog || !g_padlog_n) { g_padlog_n = 0; return; }
+    char line[1200]; int o = 0, shown = 0, slow = 0;
+    for (int i = 0; i < g_padlog_n; i++) {
+        const PadRec *r = &g_padlog[i], *q = i ? &g_padlog[i - 1] : NULL;
+        int changed = !q || r->b != q->b || r->lx != q->lx || r->ly != q->ly, late = r->gap10 >= 200;
+        if (late) slow++;
+        if (!changed && !late) continue;
+        if (!o) o = snprintf(line, sizeof line, "[rbnet] my pads (match %d, frame:buttons/lx/ly +ms since the pass before):", match);
+        o += late ? snprintf(line + o, sizeof line - (size_t)o, " %d:%x/%d/%d+%.0f", r->f, r->b, r->lx, r->ly, r->gap10 / 10.0)
+                  : snprintf(line + o, sizeof line - (size_t)o, " %d:%x/%d/%d", r->f, r->b, r->lx, r->ly);
+        shown++;
+        if (o > (int)sizeof line - 80) { LOG("%s\n", line); o = 0; }
+    }
+    if (o) LOG("%s\n", line);
+    LOG("[rbnet] my pads (match %d): %d frames read, %d lines of change, %d passes 20 ms or more after the one before\n", match, g_padlog_n, shown, slow);
+    g_padlog_n = 0;
+}
 void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
     if (id == 0 || id == 1) g_rbg_synced[id] = 0;
     if (g_session.fight_frame != g_rbg_seen_ff) { g_rbg_seen_ff = g_session.fight_frame; g_rbg_seen_t = now_ms(); }     /* (2026-11-04) the counter moving now: a fight runs */
@@ -655,6 +692,7 @@ void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
     if (id == 0 && g_ra_phase != 2 && f > g_rbg_lastlocal) {          /* a real pass: this game's own pad (port 1's devices / input sequence) */
         RbPad now; now.buttons = *b & 0xffffull; now.lx = (int16_t)*lx; now.ly = (int16_t)*ly; now.rx = (int16_t)*rx; now.ry = (int16_t)*ry;
         rbn_local_pad(f, now); g_rbg_lastlocal = f;
+        if (g_rbg_in_match == 1) padlog_add(f, rb_pad_rest(now));
     }
     RbPad p = rbn_pad(id, f);
     g_rbg_synced[id] = 1;
@@ -743,6 +781,8 @@ void rbg_fight_off(void) {
             }
         } else if (n >= 1800) LOG("r1: RB NET: this PC's work per frame: %d of %d frames over 16.7 ms (%.1f%%)\n", over, n, 100.0 * over / n);
     }
+    if (g_rbg_in_match == 1) padlog_dump(rbn_match_number());
+    else g_padlog_n = 0;
     if (g_rbg_in_match == 1) { rbg_report(); r1_ring_let_go(); if (g_rg_ready) r1_ring_release(); g_rbg_rebase = 1; rbg_after_begin(); }
     else if (g_rbg_in_match == 3) LOG("r1: RB NET: the Local Wireless room fight is over\n");
     else LOG("r1: RB NET: the match that was not agreed is over after %.1f s (player 1 walked off)\n", (now_ms() - g_rbg_quit_t0) / 1000.0);

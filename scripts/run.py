@@ -535,6 +535,17 @@ def main():
         if not os.path.exists(os.path.join(a.build, 'state.json')):
             print('no build in %s: run scripts/setup.py --target linux first (BUILDING_LINUX.md)' % a.build)
             return 1
+        if a.play and not a.log:                      # (2026-11-06) the game's log to a file, the last 10 kept, as on macOS:
+            logs = os.path.join(a.build, 'logs')      # what is sent to the group's server after each online match
+            os.makedirs(logs, exist_ok=True)
+            a.log = os.path.join(logs, time.strftime('game_%Y%m%d_%H%M%S.log'))
+            old = sorted(n for n in os.listdir(logs) if n.startswith('game_') and n.endswith('.log'))
+            for n in old[:-9]:
+                try:
+                    os.remove(os.path.join(logs, n))
+                except OSError:
+                    pass
+            print('Playing. The game log goes to %s (F1 > Log shows it). Close the game window to quit.' % a.log)
     else:
         a.build = os.path.abspath(a.build or build_location.get())   # the game runs in build\work: a relative --build would point elsewhere there
         if a.play:
@@ -706,67 +717,110 @@ def main():
     os.makedirs(os.path.join(a.build, 'cache'), exist_ok=True)      # the runtime creates ..\cache\vk below it but not the folder itself (found 2026-10-13: with SSBU_VK_PREP=0 on a clean build nothing was saved)
     cmd = [exe, os.path.join(a.build, 'binaries', state.get('game_version', '13.0.4'), 'main.elf'), str(a.seconds)]
     t0 = time.time()
-    if a.play and os.name == 'nt' and not os.path.exists(os.path.join(REPO, '.git')):     # (what an earlier session left unsent)
-        import threading
+    # (2026-11-06) logs are shared from the players' copies: the Windows ZIP install (no .git: a developer's checkout keeps
+    # its logs) and every Linux / macOS copy (installed with git, so .git says nothing there)
+    share = a.play and bool(a.log) and (a.linux or a.mac or (os.name == 'nt' and not os.path.exists(os.path.join(REPO, '.git'))))
+    import threading
+    stop = threading.Event()
+    if share:                                         # (what an earlier session left unsent)
         threading.Thread(target=share_logs_pending, args=(gini, a.build), daemon=True).start()
     out = open(a.log, 'wb') if a.log else None
+    if share:                                         # (after each online match, while the game runs)
+        threading.Thread(target=share_log_watch, args=(a.log, gini, a.build, stop), daemon=True).start()
     p = subprocess.run(cmd, cwd=work, env=env, stdout=out, stderr=subprocess.STDOUT if out else None)
+    stop.set()
     print('game exited with code %d after %.0f s' % (p.returncode, time.time() - t0))
     if out:
         out.close()
-    if a.play and os.name == 'nt' and a.log and not os.path.exists(os.path.join(REPO, '.git')):
+    if share:
         share_logs_pending(gini, a.build)
     return p.returncode
 
 
-def share_logs_pending(gini, build):
+def share_logs_pending(gini, build, only=None):
     """(2026-11-03) Every game log not sent yet, or that GREW after it was sent: F1 > restart (or an update) opens a new game
     that keeps writing to the same log after this launcher sent it and closed (a friend's whole Battle Arena session was
-    never sent). build/config/shared_logs.json keeps each sent log's size. Run when the game closes, and at the start (in
-    the background) for what an earlier session left."""
+    never sent). build/config/shared_logs.json keeps how much of each log was sent. Run when the game closes, at the start
+    (in the background) for what an earlier session left, and (2026-11-06) after each online match while the game runs
+    (only = that log): only the part not sent yet goes, and the server adds it to the same file (one file per session)."""
     if ini_get(gini, 'share_logs') in ('off', '0', 'no', 'false'):
         return
-    logs, rec_path = os.path.join(build, 'logs'), os.path.join(build, 'config', 'shared_logs.json')
-    try:
-        rec = json.load(open(rec_path, encoding='utf-8'))
-    except (OSError, ValueError):
-        rec = {}
-    try:
-        names = sorted(n for n in os.listdir(logs) if n.startswith('game_') and n.endswith('.log'))[-10:]
-    except OSError:
-        return
-    for n in names:
+    with _SHARE_LOCK:
+        logs, rec_path = os.path.join(build, 'logs'), os.path.join(build, 'config', 'shared_logs.json')
         try:
-            size = os.path.getsize(os.path.join(logs, n))
+            rec = json.load(open(rec_path, encoding='utf-8'))
+        except (OSError, ValueError):
+            rec = {}
+        try:
+            names = sorted(n for n in os.listdir(logs) if n.startswith('game_') and n.endswith('.log'))[-10:]
+        except OSError:
+            return
+        for n in names:
+            if only and n != os.path.basename(only):
+                continue
+            try:
+                size = os.path.getsize(os.path.join(logs, n))
+            except OSError:
+                continue
+            sent = rec.get(n, 0)
+            if size < 2000 or sent >= size:
+                continue
+            got = share_log(os.path.join(logs, n), gini, build, sent if sent < size else 0, quiet=bool(only))
+            if got:
+                rec[n] = got
+        rec = {k: v for k, v in rec.items() if k in names}
+        try:
+            with open(rec_path, 'w', encoding='utf-8') as f:
+                json.dump(rec, f)
+        except OSError:
+            pass
+
+
+_SHARE_LOCK = __import__('threading').Lock()
+
+
+def share_log_watch(path, gini, build, stop):
+    """(2026-11-06) While the game runs: when its log tells that an online match ended, the new part of the log is sent
+    (so a friend's log is there right after the match, without closing the game). Checked every 15 s."""
+    seen = 0
+    while not stop.wait(15):
+        try:
+            size = os.path.getsize(path)
+            if size <= seen:
+                continue
+            with open(path, 'rb') as f:
+                f.seek(seen)
+                new = f.read(size - seen)
         except OSError:
             continue
-        if size < 2000 or rec.get(n) == size:
+        cut = new.rfind(b'\n') + 1
+        if not cut:
             continue
-        if share_log(os.path.join(logs, n), gini, build):
-            rec[n] = size
-    rec = {k: v for k, v in rec.items() if k in names}
-    try:
-        with open(rec_path, 'w', encoding='utf-8') as f:
-            json.dump(rec, f)
-    except OSError:
-        pass
+        hit = re.search(rb'RB NET: match \d+ over: ring emptied|\[online\] ladder: result of match', new[:cut])
+        seen += cut
+        if hit:
+            share_logs_pending(gini, build, only=path)
 
 
-def share_log(path, gini, build):
+def share_log(path, gini, build, offset=0, quiet=False):
     """(2026-11-03) The game's log of this session to the group's server (the arena server, our nex_server.py POST /ssbu-logs),
     so whoever looks after the group can see what went wrong without asking for it. graphics.ini share_logs = off: never.
-    Compressed (a 10 MB log is ~1 MB); 30 s at most; any failure is only a line here."""
+    Compressed (a 10 MB log is ~1 MB); 30 s at most; any failure is only a line here. (2026-11-06) From `offset` on (what
+    was sent before is on the server already); the server answers 409 when it does not have the part before: then the whole
+    log goes again. Returns how much of the log the server has now (0: nothing sent)."""
     if ini_get(gini, 'share_logs') in ('off', '0', 'no', 'false'):
-        return
+        return 0
     import gzip
     import secrets
+    import urllib.error
     import urllib.request
     try:
         size = os.path.getsize(path)
         if size < 2000:
-            return
+            return 0
         with open(path, 'rb') as f:
             data = f.read()
+        data = data[:data.rfind(b'\n') + 1] or data         # (a line the game is still writing waits for the next piece)
         name, version = 'Player', ''
         m = re.search(rb'^version: (\S+)', data[:400], re.M)
         if m:
@@ -785,18 +839,30 @@ def share_log(path, gini, build):
             except OSError:
                 pass
         server = ini_get(gini, 'online_menu_server') or '160.34.219.118'
-        body = gzip.compress(data, 6)
-        print('Sending the game log %s (%.1f MB) to the group\'s server so problems can be looked at '
-              '(graphics.ini share_logs = off turns this off)...' % (os.path.basename(path), len(body) / 1e6), flush=True)
-        req = urllib.request.Request('http://%s:443/ssbu-logs' % server, data=body, method='POST', headers={
-            'Content-Type': 'application/gzip', 'X-SSBU-Key': 'ssbu-logs-1', 'X-SSBU-Name': name.encode('ascii', 'replace').decode(),
-            'X-SSBU-Version': version, 'X-SSBU-Id': sid})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            print('Log sent.' if r.status == 200 else 'The log was not taken (%d).' % r.status)
-            return r.status == 200
+        sess = os.path.splitext(os.path.basename(path))[0]
+        for start in ((offset, 0) if offset else (0,)):
+            if start >= len(data):
+                return len(data)
+            body = gzip.compress(data[start:], 6)
+            if not quiet:
+                print('Sending the game log %s (%.1f MB) to the group\'s server so problems can be looked at '
+                      '(graphics.ini share_logs = off turns this off)...' % (os.path.basename(path), len(body) / 1e6), flush=True)
+            req = urllib.request.Request('http://%s:443/ssbu-logs' % server, data=body, method='POST', headers={
+                'Content-Type': 'application/gzip', 'X-SSBU-Key': 'ssbu-logs-1', 'X-SSBU-Name': name.encode('ascii', 'replace').decode(),
+                'X-SSBU-Version': version, 'X-SSBU-Id': sid, 'X-SSBU-Session': sess, 'X-SSBU-Offset': str(start),
+                'X-SSBU-End': str(len(data))})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    if not quiet:
+                        print('Log sent.' if r.status == 200 else 'The log was not taken (%d).' % r.status)
+                    return len(data) if r.status == 200 else 0
+            except urllib.error.HTTPError as e:
+                if e.code != 409:
+                    raise
     except Exception as e:                            # (no internet, the server down: nothing else happens)
-        print('The log could not be sent (%s).' % e)
-    return False
+        if not quiet:
+            print('The log could not be sent (%s).' % e)
+    return 0
 
 
 if __name__ == '__main__':

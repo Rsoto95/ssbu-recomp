@@ -1155,6 +1155,8 @@ def log_upload(client, hdr, body):
     if body[:2] != b"\x1f\x8b":
         client.s.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
         return
+    if hdr.get("x-ssbu-session"):
+        return log_upload_part(client, hdr, body[:length], clean)
     now = time.gmtime()
     day = os.path.join(LOG_DIR[0], time.strftime("%Y%m%d", now))
     os.makedirs(day, exist_ok=True)
@@ -1175,6 +1177,64 @@ def log_upload(client, hdr, body):
         return
     client.s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
     client.log("%s log upload: %s (%d bytes, from %s)" % (client.who, name, length, client.who))
+    log_prune()
+
+
+LOG_SESSIONS = {}              # (id, session) -> [path, raw bytes received so far]
+LOG_KEEP_DAYS = 14             # day folders older than this are deleted
+
+
+def log_upload_part(client, hdr, body, clean):
+    """(2026-11-06) a piece of a game log sent while the game runs (scripts/run.py, after each online match and at the
+    end): X-SSBU-Session (the log's name), X-SSBU-Offset (where the piece starts in the log), X-SSBU-End (where it ends).
+    Every piece of a session goes into ONE file, <HHMMSS>_<name>_<id>_<version>_<session>.log.gz: offset 0 (re)writes
+    it, a piece that starts where the last one ended is appended (gzip members one after the other: zcat reads them as
+    one log). Any other offset (the server restarted, a piece lost) gets 409: the game then sends the whole log again."""
+    import glob as _glob
+    sid, sess = clean(hdr.get("x-ssbu-id"), 12), clean(hdr.get("x-ssbu-session"), 40)
+    try:
+        off, end = int(hdr.get("x-ssbu-offset", "0")), int(hdr.get("x-ssbu-end", "0"))
+    except ValueError:
+        off, end = -1, 0
+    key = (sid, sess)
+    cur = LOG_SESSIONS.get(key)
+    if cur and not os.path.exists(cur[0]):
+        cur = None
+    if off == 0:
+        if cur:
+            path = cur[0]
+        else:
+            now = time.gmtime()
+            day = os.path.join(LOG_DIR[0], time.strftime("%Y%m%d", now))
+            old = sorted(_glob.glob(os.path.join(LOG_DIR[0], "*", "*_%s_*_%s.log.gz" % (sid, sess))))
+            if old:
+                path = old[-1]
+            else:
+                os.makedirs(day, exist_ok=True)
+                path = os.path.join(day, "%s_%s_%s_%s_%s.log.gz" % (time.strftime("%H%M%S", now), clean(hdr.get("x-ssbu-name"), 32), sid,
+                                                                    clean(hdr.get("x-ssbu-version"), 32), sess))
+        mode = "wb"
+    elif cur and cur[1] == off > 0:
+        path, mode = cur[0], "ab"
+    else:
+        client.s.sendall(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n")
+        return
+    with open(path, mode) as f:
+        f.write(body)
+    LOG_SESSIONS[key] = [path, end]
+    client.s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+    client.log("%s log piece: %s (%s, bytes %d..%d of the log, %d sent)" % (client.who, os.path.basename(path),
+                                                                          "new" if mode == "wb" else "added", off, end, len(body)))
+    log_prune()
+
+
+def log_prune():
+    """The oldest logs go when all of them pass LOG_KEEP_BYTES; day folders older than LOG_KEEP_DAYS go anyway."""
+    import shutil
+    cut = time.strftime("%Y%m%d", time.gmtime(time.time() - LOG_KEEP_DAYS * 86400))
+    for d in os.listdir(LOG_DIR[0]):
+        if len(d) == 8 and d.isdigit() and d < cut:
+            shutil.rmtree(os.path.join(LOG_DIR[0], d), ignore_errors=True)
     files = sorted((os.path.join(dp, f) for dp, _, fs in os.walk(LOG_DIR[0]) for f in fs), key=os.path.getmtime)
     total = sum(os.path.getsize(f) for f in files)
     while files and total > LOG_KEEP_BYTES:
