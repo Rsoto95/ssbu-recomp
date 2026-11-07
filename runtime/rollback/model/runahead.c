@@ -611,7 +611,12 @@ void ra_frame_end(double te) {
     double fe = now_ms();
     if (g_ra_ready && g_t_poll > g_ra_t_mark && te > g_t_poll) { int k = g_ra_phase; g_rap[k][0] += g_t_poll - g_ra_t_mark; g_rap[k][1] += te - g_t_poll; g_rap[k][2] += fe - te; g_ra_fe_end = fe; g_ra_fe_kind = k + 1; }
     g_ra_fe++;
-    { static long long n; if (++n % 1200 == 0 && (g_ra_ready || rbg_noring_now())) ra_report(); }      /* (hs14: a match without the ring too) */
+    /* (hs14: a match without the ring too) (2026-11-07) not during an online match: the report took ~60-80 ms of the
+     * main thread every 20 s (a friend's log: a pass 78 ms late two frames after each report), the other game got this
+     * one's pads 4 frames late and rolled back for ~50 frames each time; the match's own report at its end
+     * (rbg_fight_off) has the same numbers */
+    { static long long n; int rbg_in_online_match(void);
+      if (++n % 1200 == 0 && (g_ra_ready || rbg_noring_now()) && !rbg_in_online_match()) ra_report(); }
     if (InterlockedExchange(&g_ra_lines, 0) > 0) {      /* this iteration ran a fight frame: real or speculative (for tests\r1_ra_cmp.py) */
         if (g_ra_nkind >= g_ra_kcap) { g_ra_kcap = g_ra_kcap ? g_ra_kcap * 2 : 65536; g_ra_kind = realloc(g_ra_kind, (size_t)g_ra_kcap); }
         g_ra_kind[g_ra_nkind++] = g_ra_phase == 1 || (g_ra_phase == 2 && rgs_wanted()) ? 'S' : 'R';      /* (R2 simulation: a re-run pass = 'S') */
