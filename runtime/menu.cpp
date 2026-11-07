@@ -624,7 +624,7 @@ static void sec_display(int cw, int ch) {
         } else if (hz > 30) ImGui::TextDisabled("Screen %.0f Hz: locked, %d refresh%s per game frame.", hz, k, k > 1 ? "es" : "");
     }
 #ifdef _WIN32
-    help("F11 also switches between the window and borderless at any time. Fullscreen = borderless and always on top (no display mode change).");
+    help("F11 also switches between the window and borderless at any time, Alt+Enter between the window and fullscreen. Fullscreen = borderless and always on top (no display mode change).");
 #else
     help("Borderless = a window without a frame over the whole screen; fullscreen = the desktop's fullscreen (no display mode change).");
 #endif

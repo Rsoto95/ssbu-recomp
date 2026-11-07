@@ -339,6 +339,17 @@ static int g_full;                                    /* F11 state: 1 = borderle
 static volatile LONG g_topmost;                       /* U1: window = fullscreen (borderless and topmost) */
 static WINDOWPLACEMENT g_windowed;
 static int g_have_windowed;
+/* (2026-11-07, owner: the window adapts to the user's display) the windowed size from the monitor: 80 % of its work area (the
+ * screen without the taskbar), 16:9, so the title bar and frame are always on screen whatever the monitor's resolution.
+ * The outer size (frame included) in *w / *h. */
+static void window_fit_monitor(const MONITORINFO *mi, int *w, int *h) {
+    int aw = mi->rcWork.right - mi->rcWork.left, ah = mi->rcWork.bottom - mi->rcWork.top;
+    int cw = aw * 8 / 10, ch = cw * ASPECT_H / ASPECT_W;
+    if (ch > ah * 8 / 10) { ch = ah * 8 / 10; cw = ch * ASPECT_W / ASPECT_H; }
+    RECT f = {0, 0, cw, ch};
+    AdjustWindowRect(&f, WS_OVERLAPPEDWINDOW, FALSE);
+    *w = f.right - f.left; *h = f.bottom - f.top;
+}
 static void toggle_fullscreen(HWND h) {
     if (!g_full) {
         MONITORINFO mi;
@@ -353,14 +364,11 @@ static void toggle_fullscreen(HWND h) {
         SetWindowLongPtrA(h, GWL_STYLE, (LONG_PTR)(WS_OVERLAPPEDWINDOW | WS_VISIBLE));
         SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER);      /* window = fullscreen in graphics.ini made it topmost */
         if (g_have_windowed) SetWindowPlacement(h, &g_windowed);
-        else {                                        /* started borderless / fullscreen: the configured client size, centred */
-            const GfxOptions *go = gfx_options();
-            RECT r = {0, 0, go->width, go->width * ASPECT_H / ASPECT_W};
+        else {                                        /* started borderless / fullscreen: a window sized from the monitor it is on, centred */
             MONITORINFO mi;
             memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
             GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
-            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-            int w = r.right - r.left, wh = r.bottom - r.top;
+            int w, wh; window_fit_monitor(&mi, &w, &wh);
             SetWindowPos(h, NULL, mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2, mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - wh) / 2, w, wh,
                          SWP_NOZORDER | SWP_NOOWNERZORDER);
         }
@@ -418,6 +426,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     if (m == WM_SIZING && !g_full) { sizing_keep_aspect(h, w, (RECT *)l); return TRUE; }
     if (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30))) { toggle_fullscreen(h); return 0; }      /* bit 30: auto-repeat of a held key */
+    if (m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29))) { if (!(l & (1 << 30))) window_mode_set(h, g_full ? 0 : 2); return 0; }      /* (2026-11-07) Alt+Enter: fullscreen <-> window (F11 stays window <-> borderless); bit 29: Alt held */
+    if (m == WM_SYSCHAR && w == '\r') return 0;      /* (no "ding" for Alt+Enter) */
+    if (m == WM_ACTIVATE && g_topmost) {             /* (2026-11-07) window = fullscreen is topmost: Alt+Tab and the Windows key showed the other app BEHIND it; not on top while another app is in front */
+        SetWindowPos(h, LOWORD(w) == WA_INACTIVE ? HWND_NOTOPMOST : HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
     if (m == WM_APP + 0x51) { window_mode_set(h, (int)w); return 0; }                                 /* U1: the settings menu (menu.cpp) */
     if (m == WM_APP + 0x52) { window_size_set(h, (int)w, (int)l); return 0; }
     {   int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l);      /* U1 (menu.cpp): F1 opens / closes; the menu takes the mouse and keys while open */
@@ -471,6 +484,19 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     }
     RECT r = {0, 0, cw, ch};
     AdjustWindowRect(&r, style, FALSE);
+    if (!go->window_mode) {                           /* (2026-11-07) a windowed size that does not fit the main monitor: sized from it, centred */
+        MONITORINFO mi;
+        POINT origin = {0, 0};
+        memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+        if (GetMonitorInfoA(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi) &&
+            (r.right - r.left > mi.rcWork.right - mi.rcWork.left || r.bottom - r.top > mi.rcWork.bottom - mi.rcWork.top)) {
+            int w, wh; window_fit_monitor(&mi, &w, &wh);
+            RECT c = {0, 0, 0, 0}; AdjustWindowRect(&c, style, FALSE);
+            cw = w - (c.right - c.left); ch = wh - (c.bottom - c.top);
+            r.left = 0; r.top = 0; r.right = w; r.bottom = wh;
+            px = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2; py = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - wh) / 2;
+        }
+    }
     printf("display: window %s, client %dx%d (graphics.ini)\n", go->window_mode == 2 ? "fullscreen (borderless, topmost)" : go->window_mode ? "borderless" : "windowed", cw, ch);
     /* Only the copies a person plays (ssbu_native.exe, ssbu_user.exe, or SSBU_SHOW=1) get a window on screen;
      * test copies started under any other name keep theirs off-screen and out of the taskbar, so automated
