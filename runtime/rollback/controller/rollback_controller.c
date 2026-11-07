@@ -481,11 +481,22 @@ static void rbg_step_body(Ctx *c) {
             /* (2026-11-07, owner: "a little stuttering", no rollbacks) the pass starts at the display lock's tick nearest to
              * the schedule, as in the menus (display.c display_lock_tick_near): on a 120 Hz screen every frame is then on it
              * for 2 refreshes. Before, this schedule ran on a 60.000 Hz clock of its own beside the display's 60.018 and the
-             * frames reached the window 11-21 ms apart (1 % low 48 fps in the fights, 53 in the menus). The time sync's extra
-             * wait adds up here and becomes one whole tick held once it reaches half a tick (the two games' screens differ by
-             * ~0.03 %: one tick in ~1 min); a game behind its schedule (after a hitch) still runs its passes back to back */
-            if (extra > 0) g_rbg_disp_debt += extra;
-            if (g_rbg_disp_debt >= tper * 0.5) { tick += tper; g_rbg_disp_debt -= tper; g_rbg_disp_held++; }
+             * frames reached the window 11-21 ms apart (1 % low 48 fps in the fights, 53 in the menus). A game behind its
+             * schedule (after a hitch) still runs its passes back to back.
+             * (2026-11-07, second form) the time sync: one whole tick held when a correction is decided on a lead of 3/4 of a
+             * tick or more; a smaller lead is let be (the delay's margin covers it). The first form added the extra waits up
+             * and held a tick at half a tick: 16.7 ms given back for a lead of ~4-8 ms, the other game then ahead by the rest,
+             * and both kept correcting each other: 6-28 ticks held per match on both sides (a frame shown twice each), the
+             * corrections from ~4 per match to 17-149 (the owner's and Falsewolf's logs). A spectator keeps the first form
+             * (its extra paces its buffer of the fighters' pads, not a lead) */
+            if (rbn_spectating()) {
+                if (extra > 0) g_rbg_disp_debt += extra;
+                if (g_rbg_disp_debt >= tper * 0.5) { tick += tper; g_rbg_disp_debt -= tper; g_rbg_disp_held++; }
+            } else {
+                static long long seen = -1; double lead; long long rbn_ts_decision(double *lead_ms); long long nd = rbn_ts_decision(&lead);
+                if (seen < 0 || g_rbg_disp_n == 0 || nd < seen) seen = nd;       /* (a new match: its own count from 0) */
+                if (nd != seen) { seen = nd; if (lead >= tper * 0.75) { tick += tper; g_rbg_disp_held++; } }
+            }
             if (tick < now) g_rbg_disp_free++;
             rbg_wait_until(tick);
             g_rbg_next = tick + tper; g_rbg_disp_n++; if (dk == 2) g_rbg_disp_lock++;

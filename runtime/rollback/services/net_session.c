@@ -909,6 +909,10 @@ static int g_delay, g_remote = 1;
 static long long g_peer_ack, g_sent_newest;
 static long long g_stat_pred, g_stat_padget, g_stat_mis;
 static long long g_ts_n; static double g_ts_extra;     /* time sync: extra ms per frame for the next frames */
+static double g_ts_lead;                                /* (2026-11-07) the lead (ms) the last correction was decided on */
+/* (2026-11-07) rollback_controller.c, pacing on the display's ticks: the number of corrections decided so far in this match
+ * and the lead of the last one; it holds one whole tick for a lead of 3/4 of a tick or more and lets smaller ones be */
+long long rbn_ts_decision(double *lead_ms) { *lead_ms = g_ts_lead; return g_ts_n; }
 static int g_ts_left;
 static uint64_t g_hacc = 0xcbf29ce484222325ull; static int g_hlines;
 #define HR 512
@@ -1280,7 +1284,7 @@ double rbn_pace_extra(long long f) {
          * correction starts, so the next decision measures the new lead and not the same old one again */
         static double ts_min = -1;
         if (ts_min < 0) { const char *e = getenv("SSBU_RB_NET_TSMIN"); ts_min = e ? atof(e) : 4.0; }
-        if (est_ms >= ts_min) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; rb_ts_forget(); }
+        if (est_ms >= ts_min) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; g_ts_lead = est_ms; rb_ts_forget(); }
         else g_ts_left = 0;
     }
     if (g_ts_left > 0) { g_ts_left--; return g_ts_extra; }
