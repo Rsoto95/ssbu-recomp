@@ -284,10 +284,13 @@ static void rbg_step_body(Ctx *c) {
         /* (2026-11-02) a Battle Arena's spectator: no ring and no full save (it never runs a frame on a guess: every pass waits
          * for both fighters' final pads, the g_rbg_noring path below) */
         int spect = rbn_spectating();
-        if (spect) { /* nothing to capture: the base is this frame */ }
+        /* (2026-11-07, owner) F1 > Online > "Rollback: delay only" (graphics.ini rollback_delay_only, read at the start): no
+         * full save and no ring, as a spectator: this game plays delay-based (the other keeps its rollback) with ~3 GB less */
+        int gfx_rb_delay_only(void); int donly = !spect && gfx_rb_delay_only();
+        if (spect || donly) { /* nothing to capture: the base is this frame */ }
         else if (g_rbg_rebase) { if (!g_rbg_basefix) g_rgs_next = i = 0; if (!r1_ring_rebase(i, c) && !g_rg_nomem) return; }
         else { r1_ring_capture(i, c); if (g_rbg_wdfix) g_ra_wd_pause = 1; if (!g_rg_ready && !g_rg_nomem) return; }   /* (the full save sets the pause back to 0) */
-        g_rbg_noring = g_rg_nomem != 0 || spect;
+        g_rbg_noring = g_rg_nomem != 0 || spect || donly;
         rbn_set_lockstep(g_rbg_noring);
         rbg_fallback_reset();                           /* the failure counters of the fallback start at zero for this match */
         if (g_rbg_noring && spect) {
@@ -296,8 +299,8 @@ static void rbg_step_body(Ctx *c) {
         } else if (g_rbg_noring) {
             g_rbg_noring_matches++;
             LOG("r1: RB NET: ROLLBACK OFF FOR THIS MATCH: %s; the match goes on delay-based: every frame waits for the other player's pad\n",
-                rb_norollback_asked() ? "asked for by SSBU_RB_NET_NOROLLBACK" : g_rg_nomem == 1 ? "not enough memory for the snapshot ring (the base state needs about one copy of the game's memory in free commit)" : "the ring broke on the way: off for the rest of this session");
-            printf("[rbnet] rollback OFF for this match (%s): delay-based, the game waits for the other player's input every frame\n", rb_norollback_asked() ? "SSBU_RB_NET_NOROLLBACK" : "not enough memory"); fflush(stdout);
+                donly ? "F1 > Online > Rollback: delay only (graphics.ini rollback_delay_only = on)" : rb_norollback_asked() ? "asked for by SSBU_RB_NET_NOROLLBACK" : g_rg_nomem == 1 ? "not enough memory for the snapshot ring (the base state needs about one copy of the game's memory in free commit)" : "the ring broke on the way: off for the rest of this session");
+            printf("[rbnet] rollback OFF for this match (%s): delay-based, the game waits for the other player's input every frame\n", donly ? "F1: delay only" : rb_norollback_asked() ? "SSBU_RB_NET_NOROLLBACK" : "not enough memory"); fflush(stdout);
         }
         if (g_rbg_wdfix) g_ra_wd_pause = 1;
         g_rbg_in_match = 1;
@@ -839,6 +842,7 @@ static void rbg_dist(const char *what, const float *v, int n, const unsigned cha
 void rbg_report(void) {
     if (g_rbg <= 0 || (!g_rg_ready && !g_rbg_noring) || !g_rbg_real) return;
     if (g_rbg_noring && rbn_spectating()) LOG("r1: RB NET report: a Battle Arena spectator: this match was shown from both fighters' final pads, without the ring\n");
+    else if (g_rbg_noring && !g_rg_nomem) { int gfx_rb_delay_only(void); LOG("r1: RB NET report: this match ran WITHOUT rollback (%s); matches without the ring so far %lld\n", gfx_rb_delay_only() ? "F1: delay only" : "no ring", g_rbg_noring_matches); }
     else if (g_rbg_noring) LOG("r1: RB NET report: this match ran WITHOUT rollback (not enough memory for the ring: %s); matches without the ring so far %lld\n", g_rg_nomem == 2 ? "broken for the session" : "base not made", g_rbg_noring_matches);
     LOG("r1: RB NET report: %lld real frames, %lld rollbacks, %lld frames run again (k: 1 %lld, 2 %lld, 3 %lld, 4 %lld, 5 %lld, 6 %lld, 7 %lld, more %lld); rollbacks impossible (state not in the ring) %lld\n",
         g_rbg_real, g_rbg_rb, g_rbg_rerun, g_rbg_k[1], g_rbg_k[2], g_rbg_k[3], g_rbg_k[4], g_rbg_k[5], g_rbg_k[6], g_rbg_k[7], g_rbg_k[RG_MAXSLOT + 1] + g_rbg_k[8], g_rbg_miss);

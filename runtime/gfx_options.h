@@ -34,6 +34,7 @@ void gfx_set_input_delay(int d);          /* (the F1 menu: used from the next ma
 #define GFX_ONLINE_MENU_SERVER_DEFAULT "160.34.219.118"   /* (2026-11-02) the project's Battle Arenas server (Oracle Cloud, Mexico Central): tools/net/deploy_arenas.sh */
 int gfx_online_menu(void);               /* online_menu = off 0 | on 1: the game's own Online menu on our server (F1 > Experimental; from the next start) */
 void gfx_online_menu_env(void);          /* (boot.c, first thing) online_menu = on: SSBU_ONLINE_MENU / _SERVER / SSBU_ONLINE set unless given */
+int gfx_rb_delay_only(void);              /* rollback_delay_only = on 1: no rollback ring in online matches, delay-based on this side (~3 GB less) */
 int gfx_fight_sound(void);                /* fight_sound = off 0 | on 1: music and effects in online rollback fights (snapshot_ring.c) */
 void gfx_set_fight_sound(int on);         /* (the F1 menu: used from the next match) */
 int gfx_refresh_switch(void);             /* refresh_switch = auto (1, default) | off (0): display.c sets a k x 60 Hz mode while the game runs */

@@ -1140,6 +1140,21 @@ static void sec_experimental(void) {
         if (rb_have) ImGui::TextDisabled("smooth online fights at high ping (experimental); both players need it on");
         else ImGui::TextDisabled("not in this build yet");
         if (getenv("SSBU_RB_NET")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Rollback is active in this run (SSBU_RB_NET=%s).", getenv("SSBU_RB_NET"));
+        /* (2026-11-07, owner: "a button: rollback delay only", friends with 16 GB PCs; short text for quick readers)
+         * graphics.ini rollback_delay_only, read at the start (gfx_options.c; rollback_controller.c makes no ring) */
+        if (rb_on) {
+            static int donly = -1, donly0;
+            if (donly < 0) { donly = gfx_rb_delay_only(); donly0 = donly; }
+            if (onoff("rbdelay", donly != 0, true)) {
+                donly = !donly; ini("rollback_delay_only", donly ? "on" : "off");
+                printf("menu: rollback delay only: %s (at the next start)\n", donly ? "on" : "off"); fflush(stdout);
+            }
+            ImGui::SameLine(); ImGui::Text("Rollback: delay only (saves ~3 GB)");
+            tag(1, donly != donly0);
+            help("Lots of rollbacks or stutter, or 16 GB of RAM? Turn it ON.\n"
+                 "Your side stops rolling back and uses ~3 GB less memory. Input delay goes automatic (from the ping). "
+                 "The other player keeps rollback.");
+        }
         sec_online();
     }
     /* (2026-11-02) the game's own Online menu (Battle Arenas) on the project's server: graphics.ini online_menu, read at
@@ -1287,7 +1302,7 @@ static void sec_gameplay(void) {
     }
     ImGui::SetWindowFontScale(1.0f);
     help("Auto (recommended, and what the game starts with every time): chosen from the ping at the start of every match, with "
-         "one frame of margin (1 frame under 20 ms of ping, 2 up to 33 ms, 3 up to 67 ms, 4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above), "
+         "one frame of margin (2 frames up to 33 ms of ping, 3 up to 67 ms, 4 up to 100 ms, 5 up to 133 ms, 6 up to 167 ms, 7 above), "
          "so rollbacks are rare. A number: lower responds quicker but fighters jump more with a slow connection; higher is smoother "
          "but slower to respond. The match uses the larger of the two players' choices (Auto counts as the measured one). "
          "Kept only until you close the game; used from your next match.");

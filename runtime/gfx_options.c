@@ -55,6 +55,12 @@ void gfx_online_menu_env(void) {
 static volatile int g_gfx_fight_sound = 1;            /* fight_sound = on | off (on when the key is missing, 2026-11-05) (snapshot_ring.c); the F1 menu changes it while running */
 int gfx_fight_sound(void) { gfx_options(); return g_gfx_fight_sound; }
 void gfx_set_fight_sound(int on) { gfx_options(); g_gfx_fight_sound = on; }
+/* (2026-11-07, owner: friends with 16 GB PCs) rollback_delay_only = on: this game never makes the rollback ring in an online
+ * match (rollback_controller.c): it plays our delay-based way (it waits for the other player's pad, the input delay chosen
+ * from the ping for both games) and saves the ring's ~3 GB; the other game keeps its rollback. Read at the start only (a
+ * ring made earlier in the session is not undone): F1 > Online writes it for the next start. */
+static int g_gfx_rb_delay_only;
+int gfx_rb_delay_only(void) { gfx_options(); return g_gfx_rb_delay_only; }
 /* (2026-11-05) the game turned the sound off by itself for this session (a PC at its limit, rollback_controller.c); a player's
  * own choice in F1 (gfx_fight_sound_chosen) is never overridden */
 static volatile int g_gfx_fight_sound_chosen, g_gfx_fight_sound_auto_off;
@@ -513,6 +519,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
         else if (!_stricmp(key, "input_delay")) { }    /* (2026-11-05, owner) not read: every start is Auto (F1 > Gameplay changes it for the session) */
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
+        else if (!_stricmp(key, "rollback_delay_only")) g_gfx_rb_delay_only = !_stricmp(val, "on") || !strcmp(val, "1");      /* rollback_controller.c */
         else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
         else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }
         else if (!_stricmp(key, "refresh_switch")) g_gfx_refresh_switch = !(!_stricmp(val, "off") || !strcmp(val, "0"));      /* display.c */
