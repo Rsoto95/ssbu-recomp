@@ -750,9 +750,32 @@ static void ladder_ack(const uint8_t *p, int n) {       /* (client thread) a RES
     ReleaseSRWLockExclusive(&g_ld_lock);
     if (was != o) say("ladder: match %016llx: %s; set %d-%d", (unsigned long long)g64(p), out[o], p[19], p[20]);
 }
+/* (2026-11-07, lobby 1.8) the score over online fights: the lobby counts each player's wins and losses of the session (per
+ * ladder id or name: the port and the lobby name of a match do not matter) and tells both fighters at the start of their
+ * match and after each counted result.
+ *   28 SCORE      lobby:  the other fighter's address u32, wins u16, losses u16 (this player), wins u16, losses u16 (the other),
+ *                         name[32] (this player), name[32] (the other)
+ * An older lobby never sends it: no score is shown. */
+#define T_SCORE 28
+static uint32_t g_score_peer;                           /* (g_ld_lock) the fighter the last SCORE was about */
+static int g_score_w[2], g_score_l[2];
+static char g_score_name[2][33];
+static void score_rx(const uint8_t *p, int n) {         /* (client thread) a SCORE body */
+    if (n < 12) return;
+    uint32_t peer = g32(p);
+    int w0 = p[4] << 8 | p[5], l0 = p[6] << 8 | p[7], w1 = p[8] << 8 | p[9], l1 = p[10] << 8 | p[11];
+    AcquireSRWLockExclusive(&g_ld_lock);
+    int same = peer == g_score_peer && w0 == g_score_w[0] && l0 == g_score_l[0] && w1 == g_score_w[1] && l1 == g_score_l[1];
+    g_score_peer = peer; g_score_w[0] = w0; g_score_l[0] = l0; g_score_w[1] = w1; g_score_l[1] = l1;
+    for (int k = 0; k < 2; k++) { g_score_name[k][0] = 0; if (n >= 12 + 64) { memcpy(g_score_name[k], p + 12 + 32 * k, 32); g_score_name[k][32] = 0; } }
+    ReleaseSRWLockExclusive(&g_ld_lock);
+    if (!same) { char a[16]; say("score: %s %d won / %d lost, %s (%s) %d won / %d lost (in this room)", g_score_name[0][0] ? g_score_name[0] : "this player", w0, l0, g_score_name[1][0] ? g_score_name[1] : "the other", ip_text(peer, a), w1, l1); }
+}
 void net_ladder_get(NetLadder *o) {
     AcquireSRWLockShared(&g_ld_lock);
     *o = g_ld;
+    o->score_on = g_score_peer && g_score_peer == g_rb_match_peer;
+    for (int k = 0; k < 2; k++) { o->score_w[k] = g_score_w[k]; o->score_l[k] = g_score_l[k]; memcpy(o->score_name[k], g_score_name[k], sizeof o->score_name[k]); }
     ReleaseSRWLockShared(&g_ld_lock);
     if (g_cfg <= 0) o->state = NET_LADDER_OFF;
 }
@@ -1985,6 +2008,9 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             break;
         case T_RESULT_ACK:
             if (g_joined) ladder_ack(buf + 4, n - 4);
+            break;
+        case T_SCORE:                                    /* (lobby 1.8) the score of this match's two fighters */
+            if (g_joined) score_rx(buf + 4, n - 4);
             break;
         case T_REJECT:
             if (n >= 12 && g64(buf + 4) == g_nonce) {

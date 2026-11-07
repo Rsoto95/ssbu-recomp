@@ -682,6 +682,22 @@ NOTIFY_PARTICIPANT_DISCONNECTED = 3007   # ParticipationEvent 7: a member's conn
 NOTIFY_END_PARTICIPATION = 3008          # ParticipationEvent 8: a member left with EndParticipation (param1 gid, param2 pid)
 
 
+LOBBY_NOTIFY = [None]          # (2026-11-07) --lobby-notify: the lobby (ssbu_lobby.py 1.8) told when a player leaves an arena
+_notify_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+def notify_room_left(gid, client):
+    """(2026-11-07, the score) tell the lobby on this host that the player at client's public address left arena gid:
+    its score (wins / losses of that room) starts again. 'S' 'U' 1 29 + gid u32 + address u32 (lobby ROOM_LEFT)."""
+    if not LOBBY_NOTIFY[0] or client is None:
+        return
+    try:
+        ip = client.who.rsplit(":", 1)[0]
+        _notify_sock.sendto(b"SU" + bytes((1, 29)) + struct.pack(">I", gid & 0xFFFFFFFF) + socket.inet_aton(ip), LOBBY_NOTIFY[0])
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def leave_arenas(pid, only_gid=None, how=NOTIFY_PARTICIPANT_DISCONNECTED):
     """(2026-11-02) a member out of its arenas' member lists (a departed member kept there made the fighters wait for a
     spectator's HELLO that never came, and the F1 counts were wrong). The arena remembers how it left (`how`: 3007 or
@@ -692,7 +708,7 @@ def leave_arenas(pid, only_gid=None, how=NOTIFY_PARTICIPANT_DISCONNECTED):
         parts = a.get("players")
         if parts and pid in parts and pid != a["owner"]:
             parts.remove(pid)
-            a.get("clients", {}).pop(pid, None)
+            notify_room_left(gid, a.get("clients", {}).pop(pid, None))
             a.get("seats", {}).pop(pid, None)
             a.setdefault("left", {})[pid] = how
             set_session_count(a)
@@ -1132,6 +1148,8 @@ class Client:
         finally:
             with ARENAS_LOCK:
                 for gid in [g for g, a in ARENAS.items() if a["client"] is self]:
+                    for cl in set(ARENAS[gid].get("clients", {}).values()) | {self}:
+                        notify_room_left(gid, cl)              # (the score: everyone leaves a closed arena)
                     del ARENAS[gid]
                     self.log("%s arena %d closed (its host left)" % (self.who, gid))
                 if getattr(self, "cid", None) and CLIENTS_BY_CID.get(self.cid) is self:
@@ -1342,6 +1360,8 @@ def main():
                     help="the address(es) of the NAT check (nncs1[,nncs2]) as the players reach this PC: one address for a "
                          "server the players reach over a network (Radmin, a VPS: the game is told nncs2 = nncs1); two "
                          "loopback ones for copies on this PC (default)")
+    ap.add_argument("--lobby-notify", default="127.0.0.1:39500", help="the lobby (ssbu_lobby.py) told when a player leaves an arena "
+                    "(its score starts again); empty: nobody told")
     ap.add_argument("--log-dir", default="", help="keep the game logs players send (POST /ssbu-logs, scripts/run.py) here")
     ap.add_argument("--fake-ip", default="", help="the address games on this PC are told they have (two copies on one PC; "
                     "the same as their SSBU_ONLINE_MENU_FAKEIP, default there 10.200.0.1)")
@@ -1351,6 +1371,9 @@ def main():
     NAT_HOSTS[:] = [h.strip() for h in a.nat_ip.split(",") if h.strip()][:2]
     PUBLIC_IP[0] = a.public_ip
     LOG_DIR[0] = a.log_dir
+    if a.lobby_notify:
+        h, _, pt = a.lobby_notify.rpartition(":")
+        LOBBY_NOTIFY[0] = (h or "127.0.0.1", int(pt))
     if a.public_ip:
         NAT_HOSTS[:] = ["0.0.0.0"]                           # (one server, every interface; the answers name --public-ip)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

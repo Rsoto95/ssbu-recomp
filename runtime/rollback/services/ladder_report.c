@@ -23,10 +23,11 @@ uint64_t rbn_match_seed(void);
 long long rbn_desyncs(void);
 int dm_ladder_match(int *rule_kind, int *stock, uint64_t chara[2], uint32_t *stage);      /* debug_mode.c */
 int dm_ladder_stocks(int entry);
+int dm_ladder_deaths(int entry);
 
 #define LR_RING 512                                     /* frames kept (more than any rollback window) */
 #define LR_TIME_LIMIT (7 * 60 * 60)                     /* the ladder's 7 minutes, in fight frames */
-typedef struct { long long frame; int stocks[2]; float dmg[2]; } LrSample;
+typedef struct { long long frame; int stocks[2], deaths[2]; float dmg[2]; } LrSample;
 static int g_lr_on = -1;
 static float g_lr_dmg[2];                               /* the damage noted by the pass running now */
 static LrSample g_lr_ring[LR_RING], g_lr_last;
@@ -44,7 +45,7 @@ void ladder_pass(long long f) {
     if (f <= 0 || !lr_on() || !rbn_started()) return;
     LrSample *s = &g_lr_ring[f % LR_RING];
     s->frame = f;
-    for (int k = 0; k < 2; k++) { s->stocks[k] = dm_ladder_stocks(k); s->dmg[k] = g_lr_dmg[k]; }
+    for (int k = 0; k < 2; k++) { s->stocks[k] = dm_ladder_stocks(k); s->deaths[k] = dm_ladder_deaths(k); s->dmg[k] = g_lr_dmg[k]; }
 }
 /* net_session.c rbn_finalize: frame f is final */
 void ladder_final(long long f) {
@@ -71,9 +72,20 @@ void ladder_fight_off(void) {
     r.seed = rbn_match_seed();
     r.slot = rbn_local_player();
     for (int k = 0; k < 2; k++) { r.stocks[k] = s.stocks[k]; r.dmg10[k] = dmg10(s.dmg[k]); }
+    /* (2026-11-07, the score) a stock match: the stocks left are the rule's stocks less the falls (dead_count), so a fighter
+     * KO'd on its last stock has 0 (its stock count stays 1); NET_LADDER_F_STOCKS_FALLS tells the lobby the stocks are these */
+    if (r.rule_kind == 1 && r.stock > 0 && s.deaths[0] >= 0 && s.deaths[1] >= 0) {
+        for (int k = 0; k < 2; k++) r.stocks[k] = s.deaths[k] >= r.stock ? 0 : r.stock - s.deaths[k];
+        r.flags |= NET_LADDER_F_STOCKS_FALLS;
+    }
+    {   int w = r.stocks[0] != r.stocks[1] ? (r.stocks[0] > r.stocks[1] ? 0 : 1) : r.dmg10[0] != r.dmg10[1] ? (r.dmg10[0] < r.dmg10[1] ? 0 : 1) : -1;
+        printf("[online] match result: %s (falls %d / %d, stock counts %d / %d, stocks left %d / %d of %d, damage %.1f / %.1f%%; this game is player %d)\n",
+               w < 0 ? "no winner" : w == 0 ? "player 1 won" : "player 2 won", s.deaths[0], s.deaths[1], s.stocks[0], s.stocks[1], r.stocks[0], r.stocks[1], r.stock,
+               r.dmg10[0] / 10.0, r.dmg10[1] / 10.0, r.slot + 1);
+        fflush(stdout); }
     r.frames = (uint32_t)s.frame;
     r.desyncs = (uint32_t)rbn_desyncs();
     if (gone) r.flags |= NET_LADDER_F_DISCONNECT;
-    if (s.stocks[0] > 0 && s.stocks[1] > 0 && s.frame < LR_TIME_LIMIT - 60) r.flags |= NET_LADDER_F_ABANDON;
+    if (r.stocks[0] > 0 && r.stocks[1] > 0 && s.frame < LR_TIME_LIMIT - 60) r.flags |= NET_LADDER_F_ABANDON;
     net_ladder_result(&r);
 }

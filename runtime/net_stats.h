@@ -70,9 +70,14 @@ typedef struct {
     int last_outcome;                       /* the last match's result: -1 none, 0 waiting for the other game, 1 counted, 2 draw,
                                                3 disputed, 4 not ranked */
     int set_mine, set_theirs;               /* the set's games won by each, after that result */
+    /* (2026-11-07, lobby 1.8) the score shown over an online fight: wins / losses of each fighter of this match, counted by
+     * the lobby per player (its ladder id or name) over the session; score_on = told for the opponent of this match */
+    int score_on;
+    int score_w[2], score_l[2];             /* [0] this player, [1] the opponent */
+    char score_name[2][33];                 /* their names: the ladder name, else the lobby name */
 } NetLadder;
 void net_ladder_get(NetLadder *out);        /* never blocks */
-enum { NET_LADDER_F_ABANDON = 1, NET_LADDER_F_DISCONNECT = 2 };
+enum { NET_LADDER_F_ABANDON = 1, NET_LADDER_F_DISCONNECT = 2, NET_LADDER_F_STOCKS_FALLS = 4 };   /* 4 (2026-11-07): stocks left = the rule's stocks less the falls */
 typedef struct {
     uint64_t seed;                          /* the match handshake's seed: the same on both games */
     int slot;                               /* this game's player: 0 = player 1 */

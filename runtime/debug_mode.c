@@ -909,3 +909,7 @@ int dm_ladder_match(int *rule_kind, int *stock, uint64_t chara[2], uint32_t *sta
 }
 /* the stocks left of the fighter of entry 0 / 1 (its information record + 0xd8), -1 = no record */
 int dm_ladder_stocks(int entry) { uint64_t r = fighter_info_record(entry); return r ? (int)rd32(r + 0xd8) : -1; }
+/* (2026-11-07, the score) the fighter's falls so far: the game's own FighterInformation::dead_count(-2) (lua_bind
+ * 0x71020c9e50: record + 0xcc + 0xd0 + 0xd4). It counts the fall at once, the last one too: the stock count (+ 0xd8) of a
+ * fighter KO'd on its last stock stays 1 (no rebirth comes), so "1 / 1" at the end told nobody who won. -1 = no record */
+int dm_ladder_deaths(int entry) { uint64_t r = fighter_info_record(entry); return r ? (int)(rd32(r + 0xcc) + rd32(r + 0xd0) + rd32(r + 0xd4)) : -1; }

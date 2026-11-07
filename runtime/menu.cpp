@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #ifdef _WIN32
 #include <shellapi.h>
 #include <psapi.h>
@@ -75,6 +76,7 @@ extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c
 extern "C" void display_refresh_switched(int *from, int *to);       /* display.c: refresh_switch (0, 0 = not switched) */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
+int rbg_score_slot(void);                                            /* rollback_controller.c: this game's player in an online fight, -1 = none */
 }
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_HOME, B_CAPTURE };
@@ -486,6 +488,7 @@ static void dlc_save(void) {
 static int g_im_ready, g_section, g_section_req = -1, g_capture = -1;
 static float g_base_h;
 static unsigned char *g_font_px;
+static ImFont *g_font_score;                          /* (the score) digits, big; NULL: the main font scaled */
 static int g_font_w, g_font_h;
 static ImVector<ImDrawVert> g_vtx;
 static ImVector<ImDrawIdx> g_idx;
@@ -552,6 +555,21 @@ static void im_init(int h) {
     ImGui::GetPlatformIO().Platform_GetClipboardTextFn = clip_get;
 #endif
     if (!f) { ImFontConfig c; c.SizePixels = px; io.Fonts->AddFontDefault(&c); }
+    {   /* (2026-11-07) the score over online fights: digits only, big and bold (a bold system font, else the font above) */
+        static const ImWchar digits[] = {0x20, 0x20, 0x30, 0x39, 0};
+#ifdef _WIN32
+        char bold[MAX_PATH]; UINT bn = GetWindowsDirectoryA(bold, MAX_PATH); snprintf(bold + bn, sizeof bold - bn, "\\Fonts\\segoeuib.ttf");
+        const char *const bolds[] = {bold};
+#else
+        const char *const bolds[] = {"/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf", font};
+#endif
+        for (size_t i = 0; i < sizeof bolds / sizeof bolds[0] && !g_font_score; i++) {
+            FILE *t = bolds[i][0] ? fopen(bolds[i], "rb") : NULL;
+            if (t) { fclose(t); g_font_score = io.Fonts->AddFontFromFileTTF(bolds[i], px * 2.6f, NULL, digits); }
+        }
+    }
     st.ScaleAllSizes(px / 15.0f);
     int bpp = 0;
     io.Fonts->GetTexDataAsRGBA32(&g_font_px, &g_font_w, &g_font_h, &bpp);
@@ -1515,6 +1533,55 @@ static void sec_log(void) {
     ImGui::EndChild();
 }
 
+/* ------------------------------------------------------------------ the score over an online fight (2026-11-07)
+ * The lobby (1.8) counts each player's wins of the session; during an online rollback fight the wins of the fighter on the
+ * left of the game's own HUD (player 1) show at the top left, where the game draws PAUSE, and the other fighter's at the
+ * top right: dark slanted bars like the game's PAUSE one. Nothing during a fight without the lobby's count. */
+static float g_score_h;                              /* (render thread) the bars' bottom edge this frame, 0 = none (the stats go below) */
+static int score_get(NetLadder *ld) {                /* 1 / 2: this game's player while the score is shown, 0 = no score now */
+    int slot = rbg_score_slot();
+    if (slot < 0 || slot > 1) return 0;
+    net_ladder_get(ld);
+    return ld->score_on ? slot + 1 : 0;
+}
+static void draw_score(void) {
+    NetLadder ld;
+    int me = score_get(&ld);
+    g_score_h = 0;
+    if (!me) return;
+    ImGuiIO &io = ImGui::GetIO();
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    float y0 = H * 0.035f, h = H * 0.072f, w = H * 0.19f, slant = h * 0.5f;
+    int li = me == 1 ? 0 : 1, ri = 1 - li;               /* [0] this player, [1] the opponent: player 1 is on the left */
+    ImFont *f = g_font_score ? g_font_score : ImGui::GetFont(), *nf = ImGui::GetFont();
+    float size = h * 0.9f, nsize = h * 0.36f, pad = h * 0.3f, gap = h * 0.28f;
+    const ImU32 bg = IM_COL32(34, 34, 34, 225), fg = IM_COL32(205, 205, 205, 255), nfg = IM_COL32(170, 170, 170, 255);
+    for (int side = 0; side < 2; side++) {               /* left: from the edge, its right side slanted (as PAUSE); right: the mirror image */
+        int k = side == 0 ? li : ri;
+        char t[16], nm[40];
+        snprintf(t, sizeof t, "%d", ld.score_w[k] < 0 ? 0 : ld.score_w[k]);
+        snprintf(nm, sizeof nm, "%.24s", ld.score_name[k]);
+        ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, 0.0f, t), ns = nm[0] ? nf->CalcTextSizeA(nsize, FLT_MAX, 0.0f, nm) : ImVec2(0, 0);
+        float bw = pad + ts.x + (nm[0] ? gap + ns.x : 0) + pad + slant;
+        if (bw < w) bw = w;
+        float x0 = side == 0 ? 0 : W - bw;
+        if (side == 0) dl->AddQuadFilled(ImVec2(0, y0), ImVec2(bw, y0), ImVec2(bw - slant, y0 + h), ImVec2(0, y0 + h), bg);
+        else dl->AddQuadFilled(ImVec2(W - bw, y0), ImVec2(W, y0), ImVec2(W, y0 + h), ImVec2(W - bw + slant, y0 + h), bg);
+        /* the number toward the screen's edge, the name next to it toward the middle */
+        float cx = side == 0 ? x0 + pad : x0 + bw - pad - ts.x;
+        dl->AddText(f, size, ImVec2(cx, y0 + (h - ts.y) * 0.5f), fg, t);
+        if (nm[0]) {
+            float nx = side == 0 ? cx + ts.x + gap : cx - gap - ns.x;
+            dl->AddText(nf, nsize, ImVec2(nx, y0 + (h - ns.y) * 0.5f), nfg, nm);
+        }
+    }
+    int left = ld.score_w[li], right = ld.score_w[ri];
+    g_score_h = y0 + h;
+    static int said;
+    if (!said) { said = 1; printf("menu: score drawn over the online fight: %d (left) - %d (right), this game is player %d\n", left, right, me); fflush(stdout); }
+}
+
 /* ------------------------------------------------------------------ the stats overlay (F2), top right */
 static void draw_stats(void) {
     float sum = 0;
@@ -1527,7 +1594,7 @@ static void draw_stats(void) {
     static int ra_cfg = -1;
     if (ra_cfg < 0) { const char *e = getenv("SSBU_RUNAHEAD"); ra_cfg = e ? (e[0] && e[0] != '0') : gfx_runahead(); }
     ImGuiIO &io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 8, g_open ? ImGui::GetFrameHeight() + 8 : 8), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 8, (g_open ? ImGui::GetFrameHeight() + 8 : 8) + (g_score_h > 0 ? g_score_h : 0.0f)), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.6f);
     ImGui::Begin("##stats", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
@@ -2403,7 +2470,8 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    NetLadder score_ld;
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld)) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -2445,6 +2513,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     io.MouseDrawCursor = false;
     ImGui::NewFrame();
     if (S.overlay) draw_overlay();
+    draw_score();
     if (S.stats) draw_stats();
     if (g_notice_on) {                                   /* R3: the online match's message, in the middle */
         char text[512];
