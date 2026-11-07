@@ -161,6 +161,7 @@ static int g_rbg = -1;
 int rbg_on(void) { if (g_rbg < 0) g_rbg = rbn_on() > 0; return g_rbg; }
 static long long g_rbg_rb, g_rbg_k[RG_MAXSLOT + 2], g_rbg_rerun, g_rbg_miss, g_rbg_stalls, g_rbg_capfail, g_rbg_capskip, g_rbg_lastlocal, g_rbg_real, g_rbg_gone;
 static double g_rbg_stall_ms, g_rbg_load_ms, g_rbg_tick0, g_rbg_next, g_rbg_last_go;
+static double g_rbg_disp_debt; static long long g_rbg_disp_n, g_rbg_disp_held, g_rbg_disp_free, g_rbg_disp_lock;      /* (2026-11-07) passes paced on the display's ticks (rbg_step) */
 static volatile LONG g_rbg_last_k, g_rbg_max_k;
 
 static float *g_rbg_work, *g_rbg_gap, *g_rbg_wcyc; static ULONG64 g_rbg_cyc_go; static unsigned char *g_rbg_wk; static int g_rbg_nw, g_rbg_ng, g_rbg_pace = -1, g_rbg_tick_k;
@@ -471,9 +472,25 @@ static void rbg_step_body(Ctx *c) {
         /* (2026-11-05) the time sync's extra wait is really waited: a game a little behind its own schedule (passes of 17+ ms)
          * waited nothing at all, the extra only shortened its catching up, and a game 40 ms ahead of the other stayed so for
          * ~20 s (a friend's log: 38 / 43 ms ahead at frames 600 / 1200) */
+        double tick, tper; int display_lock_tick_near(double t_ms, double *tick_ms, double *period_ms);
+        int dk = display_lock_tick_near(g_rbg_next, &tick, &tper);
+        if (dk) {
+            /* (2026-11-07, owner: "a little stuttering", no rollbacks) the pass starts at the display lock's tick nearest to
+             * the schedule, as in the menus (display.c display_lock_tick_near): on a 120 Hz screen every frame is then on it
+             * for 2 refreshes. Before, this schedule ran on a 60.000 Hz clock of its own beside the display's 60.018 and the
+             * frames reached the window 11-21 ms apart (1 % low 48 fps in the fights, 53 in the menus). The time sync's extra
+             * wait adds up here and becomes one whole tick held once it reaches half a tick (the two games' screens differ by
+             * ~0.03 %: one tick in ~1 min); a game behind its schedule (after a hitch) still runs its passes back to back */
+            if (extra > 0) g_rbg_disp_debt += extra;
+            if (g_rbg_disp_debt >= tper * 0.5) { tick += tper; g_rbg_disp_debt -= tper; g_rbg_disp_held++; }
+            if (tick < now) g_rbg_disp_free++;
+            rbg_wait_until(tick);
+            g_rbg_next = tick + tper; g_rbg_disp_n++; if (dk == 2) g_rbg_disp_lock++;
+        } else {
         if (extra > 0 && g_rbg_next < now + extra) g_rbg_next = now + extra;
         rbg_wait_until(g_rbg_next);
         g_rbg_next += period;
+        }
         /* (2026-11-05) the other player's messages that came during the wait are taken now, before the next pass reads its pad:
          * before, they waited for the next safe point (up to a frame), and a pad there in time was guessed and rolled back */
         if (!rbn_loop()) rbn_drain(i);
@@ -787,6 +804,7 @@ void rbg_fight_off(void) {
             }
         } else if (n >= 1800) LOG("r1: RB NET: this PC's work per frame: %d of %d frames over 16.7 ms (%.1f%%)\n", over, n, 100.0 * over / n);
     }
+    if (g_rbg_in_match == 1 && g_rbg_disp_n) LOG("r1: RB NET: pacing on the display's ticks: %lld passes (%lld on the display lock's vblanks, the rest on its own 60 Hz clock), %lld ticks held for the time sync, %lld passes already late at their tick (after a hitch or a slow pass)\n", g_rbg_disp_n, g_rbg_disp_lock, g_rbg_disp_held, g_rbg_disp_free);
     if (g_rbg_in_match == 1) padlog_dump(rbn_match_number());
     else g_padlog_n = 0;
     { void nnpad_stick_report(const char *when); char w[32]; snprintf(w, sizeof w, "up to the end of match %d", rbn_match_number()); nnpad_stick_report(w); }     /* (2026-11-07) the sticks as SDL gave them in the match (nnpad_sdl.c) */
@@ -803,6 +821,7 @@ void rbg_fight_off(void) {
     g_rbg_in_match = 0; g_rbg_ff_first = -1; g_rbg_ff_reset = g_session.fight_frame; g_rbg_prepad_told = 0;
     g_rbg_rb = 0; memset(g_rbg_k, 0, sizeof g_rbg_k); g_rbg_rerun = g_rbg_miss = g_rbg_stalls = g_rbg_capfail = g_rbg_capskip = g_rbg_lastlocal = g_rbg_real = g_rbg_gone = 0;
     g_rbg_stall_ms = g_rbg_load_ms = g_rbg_tick0 = g_rbg_next = g_rbg_last_go = 0;
+    g_rbg_disp_debt = 0; g_rbg_disp_n = g_rbg_disp_held = g_rbg_disp_free = g_rbg_disp_lock = 0;
     g_rbg_last_k = 0; g_rbg_max_k = 0; g_rbg_short_waits = 0; g_rg_short = 0; g_rg_need = -1; g_rbg_nw = g_rbg_ng = g_rbg_tick_k = 0; g_rbg_rb_unheld = 0; g_rbg_recap_first = 0;
     g_rbg_t_pre = g_rbg_t_load = g_rbg_t_rerun = g_rbg_t_recap = g_rbg_t_pass0 = 0; g_rbg_n_rerun = g_rbg_n_recap = 0;
     g_rbg_wd_before = g_ra_wd_fired;

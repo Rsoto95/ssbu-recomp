@@ -996,6 +996,32 @@ int display_present_defer(void) {
  * at g_defer_target AFTER it has published the tick, this looks at the tick AFTER the target is set: one of the two sees it.) */
 int display_present_due(void) { LONG64 t = g_defer_target; return t && g_vsync_n >= t; }
 void display_present_flushed(void) { InterlockedExchange64(&g_defer_target, 0); }
+/* (2026-11-07) rollback_controller.c rbg_step: an online rollback match paced itself on a 60.000 Hz clock of its own, beside
+ * the DISPLAY LOCK's ticks (the menus' clock): its frames came to the window at a drifting place in the refresh, 11-21 ms
+ * apart instead of 16.67 (the owner's log on a 165 -> 120 Hz screen: 1 % low 48 fps in the fights, 53 in the menus), a
+ * frame now and then shown twice and the next one skipped. Now its passes start at the display's ticks: the tick nearest
+ * to time t (now_ms's clock, the same QPC), and the tick period. Returns 2 = the display lock's tick (k vblanks), 1 = this
+ * file's own 60.000 Hz clock (a screen that is not k x 60 Hz, vsync = clock: the menus' clock all the same, so a variable-
+ * refresh screen gets the same cadence online as in the menus), 0 = none (then rbg_step's own schedule, as before).
+ * SSBU_RB_DISPLAY_TICK=0: as before. */
+int display_lock_tick_near(double t_ms, double *tick_ms, double *period_ms) {
+#ifdef _WIN32
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_RB_DISPLAY_TICK"); on = !(e && e[0] == '0'); }
+    if (!on || old_pacing() || g_lockstep || !g_freq.QuadPart) return 0;
+    LONG64 n = g_vsync_n, q = g_tick_at[n & 15];
+    if (!q) return 0;
+    LONG k = g_lock_k;
+    double fq = (double)g_freq.QuadPart / 1000.0, per = k ? (double)k * g_vb_period / fq : 1000.0 / 60.0, t = (double)q / fq;
+    if (per < 16.4 || per > 16.95) return 0;                      /* (the lock allows 1.1 % around 16.67 ms) */
+    t += floor((t_ms - t) / per + 0.5) * per;
+    *tick_ms = t; *period_ms = per;
+    return k ? 2 : 1;
+#else
+    (void)t_ms; (void)tick_ms; (void)period_ms;
+    return 0;
+#endif
+}
 /* Render thread, right after vkQueuePresentKHR returned: what the screen gets (see the comment at the top). */
 static void pace_stat_line(FILE *out, const char *what, int i, int since) {
     LONG64 n = g_ps[i].n - (since ? g_ps_last[i].n : 0), h[PS_HIST];

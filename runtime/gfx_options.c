@@ -77,6 +77,7 @@ int gfx_screenshot_key(void) { gfx_options(); return g_gfx_shot_key; }
 /* (2026-11-04) Battle Arenas and rollback on by default: this comment line in a graphics.ini marks that the file has been
  * moved to those defaults once (ini_migrate_online_defaults); a later OFF chosen by the player stays OFF. */
 #define GFX_FIGHT_SOUND_MARK ";   (2026-11-05: the sound of online fights is on by default; F1 > Gameplay turns it off.)\r\n"
+#define GFX_VSYNC_AUTO_MARK ";   (2026-11-07: vsync = on / clock / mailbox of an older file became auto once: online fights follow the monitor now.)\r\n"
 #define GFX_ONLINE_DEFAULTS_MARK ";   (2026-11-04: Battle Arenas and rollback netcode are on by default; F1 turns them off.)\r\n"
 static const char *const k_default_ini =
 "; graphics.ini: display and rendering options of the native build (read once at start by gfx_options.c).\r\n"
@@ -114,6 +115,7 @@ static const char *const k_default_ini =
 ";   on:      the swapchain's own vertical sync (FIFO) next to the program's clock: two clocks, not recommended.\r\n"
 ";   mailbox: as clock, mailbox or nothing.\r\n"
 "vsync = auto\r\n"
+GFX_VSYNC_AUTO_MARK
 "\r\n"
 "; latency = normal | low | lowest      (track L1, input latency; Vulkan)\r\n"
 ";   normal:  the game is let go at the tick. (The game's picture is shown one frame sooner than before 2026-10-14 in\r\n"
@@ -415,6 +417,52 @@ static void ini_migrate_fight_sound(const char *path) {
            ok ? "" : " - could NOT be written: the file is read as it is");
     free(old); free(out);
 }
+/* (2026-11-07, owner: "it must not happen on any user's monitor") two players had vsync = on (Lenzzz, 180 Hz: the swapchain's
+ * FIFO beside the game's clock) and vsync = clock (Porky, switched to 60 Hz but not locked to it): written by an older
+ * version or tried once, and both keep the game's frames off the monitor's refresh, in the menus and now in online fights
+ * (rollback_controller.c paces them on the display lock's ticks). Once per file: on / clock / mailbox becomes auto and the
+ * mark line goes after it (or at the end). With the mark there the file is left as written: F1 can choose clock again. */
+static void ini_migrate_vsync(const char *path) {
+    static const char mark[] = GFX_VSYNC_AUTO_MARK;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *old = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (old) { n = (long)fread(old, 1, (size_t)n, f); old[n] = 0; }
+    fclose(f);
+    if (!old || strstr(old, "of an older file became auto once")) { free(old); return; }
+    char *out = malloc((size_t)n + sizeof mark + 64);
+    if (!out) { free(old); return; }
+    size_t o2 = 0; int marked = 0; char was[16] = "";
+    for (char *p = old; *p; ) {
+        char *e = strchr(p, '\n');
+        size_t l = e ? (size_t)(e - p) + 1 : strlen(p);
+        char line[512]; size_t ll = l < sizeof line - 1 ? l : sizeof line - 1;
+        memcpy(line, p, ll); line[ll] = 0; trim(line);
+        int is_vs = line[0] != ';' && !_strnicmp(line, "vsync", 5) && (line[5] == ' ' || line[5] == '\t' || line[5] == '=');
+        const char *q = NULL;
+        if (is_vs) { q = strchr(line, '='); q = q ? q + 1 : ""; while (*q == ' ' || *q == '\t') q++; }
+        int change = q && (!_stricmp(q, "on") || !_stricmp(q, "clock") || !_stricmp(q, "mailbox"));
+        if (change) { snprintf(was, sizeof was, "%s", q); o2 += (size_t)sprintf(out + o2, "vsync = auto\r\n"); }
+        else { memcpy(out + o2, p, l); o2 += l; }
+        if (is_vs && !marked) { memcpy(out + o2, mark, sizeof mark - 1); o2 += sizeof mark - 1; marked = 1; }
+        p += l;
+    }
+    if (!marked) {
+        if (o2 && out[o2 - 1] != '\n') { out[o2++] = '\r'; out[o2++] = '\n'; }
+        memcpy(out + o2, mark, sizeof mark - 1); o2 += sizeof mark - 1;
+    }
+    char tmp[MAX_PATH + 8]; int ok = 0;
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if ((f = fopen(tmp, "wb")) != NULL) {
+        ok = fwrite(out, 1, o2, f) == o2;
+        ok = !fclose(f) && ok;
+        ok = ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    }
+    printf("graphics options: %s: vsync follows the monitor by default now (once)%s%s%s%s\n", path, was[0] ? "; vsync = " : "", was, was[0] ? " became auto" : "",
+           ok ? "" : " - could NOT be written: the file is read as it is");
+    free(old); free(out);
+}
 static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     (void)once; (void)arg; (void)ctx;
     GfxOptions *o = &g_opt;
@@ -426,6 +474,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     ini_migrate_shader_load(o->path);                                         /* (a file of an older version: once) */
     ini_migrate_online_defaults(o->path);                                     /* (2026-11-04: arenas and rollback on; once) */
     ini_migrate_fight_sound(o->path);                                         /* (2026-11-05: sound of online fights on; once) */
+    ini_migrate_vsync(o->path);                                               /* (2026-11-07: vsync on / clock / mailbox -> auto; once) */
     FILE *f = fopen(o->path, "rb");
     if (!f) {
         char b[MAX_PATH];
