@@ -789,6 +789,7 @@ void rbg_fight_off(void) {
     }
     if (g_rbg_in_match == 1) padlog_dump(rbn_match_number());
     else g_padlog_n = 0;
+    { void nnpad_stick_report(const char *when); char w[32]; snprintf(w, sizeof w, "up to the end of match %d", rbn_match_number()); nnpad_stick_report(w); }     /* (2026-11-07) the sticks as SDL gave them in the match (nnpad_sdl.c) */
     if (g_rbg_in_match == 1) { rbg_report(); r1_ring_let_go(); if (g_rg_ready) r1_ring_release(); g_rbg_rebase = 1; rbg_after_begin(); }
     else if (g_rbg_in_match == 3) LOG("r1: RB NET: the Local Wireless room fight is over\n");
     else LOG("r1: RB NET: the match that was not agreed is over after %.1f s (player 1 walked off)\n", (now_ms() - g_rbg_quit_t0) / 1000.0);

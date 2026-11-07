@@ -641,6 +641,56 @@ unsigned nnpad_menu_keys(void) {                      /* bit 0: a Home / Guide b
     unlock();
     return r;
 }
+/* (2026-11-07, owner: "my controller stopped dashing", "it comes at some point in the session") the left stick of the
+ * owner's GameCube adapter (SDL, 0079:1846) reached -32767 left in 22 matches, then only -27010 (82 %) in the 23rd
+ * (right / up / down full; joy.cpl full left; after a restart full again; on 2026-11-06 ~97 % from the 6th match on).
+ * Suspected: SDL's GameCube driver widens each axis' range at an odd reading and never narrows it. To confirm: per device,
+ * the left stick as SDL gives it (before the dead zone): the extremes, the mean at rest (a widened range moves it off
+ * 0), the one-report spikes (a -> b -> back near a, both steps > 0.5) and the largest single steps. Kept in memory
+ * (a few compares per read, under the lock already held), written by nnpad_stick_report at the end of each online
+ * match (rollback_controller.c, beside its report) and reset. SSBU_PAD_STICKLOG=0: off. */
+typedef struct { long long n, nrest, spikes, jumps; float mnx, mxx, mny, mxy, rsx, rsy, rmnx, rmxx, px, px2, py, py2, sp[4][3]; int nsp, chx, chy; } StickLog;
+static StickLog g_slog[MAXDEV];
+static int stick_log_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("SSBU_PAD_STICKLOG"); on = !(e && e[0] == '0'); } return on; }
+static void stick_log_axis(StickLog *s, float v, float *p, float *p2, int *ch, int axis) {
+    if (v == *p && *ch) return;                                 /* the same report read again */
+    if (*ch >= 2) {
+        float a = *p2, b = *p, d1 = b - a, d2 = v - b;
+        if (fabsf(d1) > 0.5f && fabsf(d2) > 0.5f && fabsf(v - a) < 0.25f) {
+            s->spikes++;
+            if (s->nsp < 4) { s->sp[s->nsp][0] = (float)axis; s->sp[s->nsp][1] = a; s->sp[s->nsp][2] = b; s->nsp++; }
+        }
+    }
+    if (*ch && fabsf(v - *p) > 0.7f) s->jumps++;
+    *p2 = *p; *p = v; if (*ch < 2) (*ch)++;
+}
+static void stick_log(const Dev *d, float x, float y) {      /* lock held; Npad orientation: right / up positive */
+    StickLog *s = &g_slog[d - g_dev];
+    if (!s->n) { s->mnx = s->mny = 2; s->mxx = s->mxy = -2; s->rmnx = 2; s->rmxx = -2; }
+    s->n++;
+    if (x < s->mnx) s->mnx = x; if (x > s->mxx) s->mxx = x; if (y < s->mny) s->mny = y; if (y > s->mxy) s->mxy = y;
+    if (fabsf(x) < 0.25f && fabsf(y) < 0.25f) { s->nrest++; s->rsx += x; s->rsy += y; if (x < s->rmnx) s->rmnx = x; if (x > s->rmxx) s->rmxx = x; }
+    stick_log_axis(s, x, &s->px, &s->px2, &s->chx, 0);
+    stick_log_axis(s, y, &s->py, &s->py2, &s->chy, 1);
+}
+void nnpad_stick_report(const char *when) {
+    if (!stick_log_on()) return;
+    lock();
+    for (int i = 0; i < MAXDEV; i++) {
+        StickLog *s = &g_slog[i]; const Dev *d = &g_dev[i];
+        if (!s->n) continue;
+        if (d->used) {
+            char sp[160] = ""; int o = 0;
+            for (int k = 0; k < s->nsp; k++) o += snprintf(sp + o, sizeof sp - (size_t)o, " %s %.2f->%.2f->back", s->sp[k][0] ? "y" : "x", s->sp[k][1], s->sp[k][2]);
+            printf("nn::pad: left stick (%s) \"%s\" player %d%s: x %.3f..%.3f, y %.3f..%.3f (as SDL gives it, before the dead zone; 1 = full); at rest %.1f %% of the reads, mean x %+.3f y %+.3f, x %+.3f..%+.3f; one-report spikes %lld%s; steps over 0.7 in one report %lld\n",
+                   when, d->name, d->slot + 1, d->gca ? " (adapter port)" : "", s->mnx, s->mxx, s->mny, s->mxy, s->n ? 100.0 * (double)s->nrest / (double)s->n : 0.0,
+                   s->nrest ? s->rsx / (float)s->nrest : 0.0f, s->nrest ? s->rsy / (float)s->nrest : 0.0f, s->nrest ? s->rmnx : 0.0f, s->nrest ? s->rmxx : 0.0f, s->spikes, sp, s->jumps);
+        }
+        memset(s, 0, sizeof *s);
+    }
+    unlock();
+    fflush(stdout);
+}
 static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
     float dz = EFF(d, dz), outer = EFF(d, outer), trig = EFF(d, trig);
     float v[4];
@@ -681,6 +731,7 @@ static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
             }
         }
     }
+    if (stick_log_on()) stick_log(d, v[0], v[1]);
     for (int st = 0; st < 2; st++) {
         float x = v[st * 2], y = v[st * 2 + 1], m = sqrtf(x * x + y * y), k = 0;
         int *px = st ? &o->rx : &o->lx, *py = st ? &o->ry : &o->ly;
