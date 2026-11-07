@@ -10,7 +10,7 @@
  *   SSBU_RB_NET=loop[,<f>] one game: the other player is a bot whose pads "arrive" <f> frames late (default 4):
  *                          rollback without a network, for the determinism proof (f = 0: never late = reference)
  *   SSBU_RB_NET_PLAYER=0|1 this game's player (default: 0, 1 in SSBU_ONLINE=join mode)
- *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default: graphics.ini input_delay; auto = from the round trip, 1..7)
+ *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default: graphics.ini input_delay; auto = from the round trip, 2..7)
  *   SSBU_RB_NET_BOT=<seed> the local player's pads come from a test bot instead of the controller / input sequence
  *   SSBU_RB_NET_LOG=<file> one line per finalized frame: "f <frame> h <checksum>" (compare two games' files)
  *   SSBU_RB_NET_AHEAD=<n>  most frames this game runs ahead of the newest remote pad (default 7 = the ring depth)
@@ -837,7 +837,10 @@ static long rtt_p75_us(int *n) {
  * ring's depth). Before 2026-11-03: one-way - 2 rounded, at most 4 (120 ms -> 2: rollbacks of 2-4 frames, hitches). */
 static int delay_for_rtt(long rtt_us) {
     if (rtt_us <= 0) return 3;
-    if (rtt_us < 20000) return 1;                       /* (2026-11-05, owner) a ping under 20 ms: delay 1 (the other pad comes within the frame) */
+    /* (2026-11-05, owner) a ping under 20 ms was delay 1; (2026-11-07, owner) never below 2: at ~20 ms delay 1 left ~5 ms of
+     * margin, any hitch of either PC was a rollback (owner vs a friend: 290 rollbacks up to 7 frames in a match at delay 1,
+     * 1 in 4 minutes at delay 2 with the same connection). A player may still pick 1 in F1 > Gameplay */
+    if (rtt_us < 20000) return 2;
     double one_way = rtt_us / 2000.0 / (1000.0 / 60.0);
     int d = (int)ceil(one_way - 0.001) + 1;
     return d < 2 ? 2 : d > 7 ? 7 : d;

@@ -462,7 +462,12 @@ static void rbg_step_body(Ctx *c) {
     rbn_finalize(g_rbg_pend > 0 && g_rbg_pend - 1 < i ? g_rbg_pend - 1 : i);      /* (R3 pub1) a refused load: its frames are not final yet */
     if (g_rbg_pace) {
         double extra = rbn_pace_extra(g_rgs_next), period = 1000.0 / 60.0 + extra, now = now_ms();
-        if (g_rbg_next <= 0 || now - g_rbg_next > 3 * period) g_rbg_next = now;      /* (far behind: no catching up in a burst) */
+        /* (far behind: no catching up in a burst) (2026-11-07) "far" is 150 ms now, not 3 frames (50 ms): a hitch of 78 ms threw
+         * away this game's place, it stayed ~5 frames behind and the other game, ahead, got every pad of it 2-4 frames late and
+         * rolled back for ~1 s until the time sync had slowed it down (the owner's log: ~50 frames of rollbacks after each of a
+         * friend's hitches). Now the passes after a hitch run back to back (~7 ms of work each) until the schedule is met again:
+         * ~8 frames for a 78 ms hitch. Not after waiting for the other player: behind the schedule is then the right place */
+        if (g_rbg_next <= 0 || stalled || now - g_rbg_next > 9 * period) g_rbg_next = now;
         /* (2026-11-05) the time sync's extra wait is really waited: a game a little behind its own schedule (passes of 17+ ms)
          * waited nothing at all, the extra only shortened its catching up, and a game 40 ms ahead of the other stayed so for
          * ~20 s (a friend's log: 38 / 43 ms ahead at frames 600 / 1200) */
