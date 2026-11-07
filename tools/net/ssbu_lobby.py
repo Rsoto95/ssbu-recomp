@@ -78,6 +78,17 @@ members of one arena (its gathering id = the key) form a group; a message to the
     27 RB_GROUP     client: cookie u64, key u64 (0 = leave the group), message      (a non-zero key also joins that group)
                     lobby:  source u32, message
 An older lobby drops type 27: nobody hears the spectators and every member's game plays the match with its own netcode.
+Score (lobby 1.8, 2026-11-07): the lobby counts the wins and losses of each player (its ladder id, else its name: not the
+port, not the seat) in rollback matches, from the first RESULT of each match that has F_STOCKS_FALLS (a newer game) and a
+winner (no disconnection, not abandoned). A player's count belongs to the room it plays in (the Battle Arena's key of its
+rollback search, 0 outside one): a match in another room starts it again at 0-0, as does SCORE_IDLE s without a match
+(a game that loses the lobby for a moment and comes back to the same room keeps it). Both fighters
+are told when their match starts and after each counted result; the game shows it over the fight (menu.cpp).
+    28 SCORE        lobby:  the other fighter's address u32, wins u16, losses u16 (the one told), wins u16, losses u16 (the other),
+                            name[32] (the one told), name[32] (the other): the ladder name, else the lobby name
+    40 ROOM_LEFT    nex_server.py on this host (from 127.0.0.1 only): arena gid u32, the player's public address u32: the
+                    players at that address whose count is of that arena start again at 0-0 (they left the room: by its
+                    menu, a dropped connection, or the arena closed)
 
 Python 3.8+, standard library only. No encryption: run it for people you know."""
 import argparse
@@ -113,7 +124,7 @@ except (ImportError, OSError):
     tournament_mod = None
 
 PROTO = 1
-LOBBY_VERSION = "1.7"
+LOBBY_VERSION = "1.8"
 (JOIN, WELCOME, REJECT, PING, PONG, DATA, LEAVE, LIST, LISTING, LIST_END,
  PEERS, PUNCH, DIRECT, BCAST) = range(1, 15)
 RB = 16          # online rollback messages between two games (recomp-study/net_relay.c T_RB, rb_net.c)
@@ -124,6 +135,10 @@ ARENA, ARENA_STATE = 24, 25                  # 1.6 arena: a queue of players tak
 RB_GROUP = 27                                # 1.7 (2026-11-02): a Battle Arena's group (fighters + spectators, key = the arena)
 RELAY_HB = 32                                # (2026-11-05) a relay near the players says it is up (ssbu_relay.py; 33 is its RELAY)
 RELAY_FOR = 30.0                             # s: a relay whose last RELAY_HB is older is not offered
+ROOM_LEFT = 40                               # 1.8 (29..33: the tournaments and the relay): from nex_server.py on this host (127.0.0.1 only): a player left a Battle Arena
+SCORE = 28                                   # 1.8 (2026-11-07): the session's wins / losses of the two fighters of a rollback match
+SCORE_IDLE = 3600.0                          # a player's score starts again at 0-0 after an hour without a match
+F_STOCKS_FALLS = 4                           # RESULT flag: stocks left = the rule's stocks less the falls (a newer game: its winner is right)
 AR_OUT, AR_WAITING, AR_TURN, AR_PLAYING = range(4)
 ARENA_TURN_FOR, ARENA_PLAY_FOR, ARENA_WATCH_FOR, ARENA_LIST = 120.0, 900.0, 3.0, 16
 TOURNEY, TOURNEY_STATE, TOURNEY_DOC = 29, 30, 31   # 1.7 tournaments (tournament.py; 26 is the games' own RB_DIRECT, net_relay.c)
@@ -1050,6 +1065,8 @@ class Lobby(TourneyMixin):
         self.relay = None         # its last RELAY_HB: {"ip", "port", "lan_ip", "lan_port", "seen"} (monotonic)
         self.by_at, self.by_ip, self.rooms = {}, {}, {}
         self.next_ip = SUBNET + 2
+        self.score = {}           # 1.8: player key -> [wins, losses, time of its last match, the room (arena key) it counts in]
+        self.score_seeds = {}     # 1.8: match seeds already counted (both games send their RESULT)
         self.stats = {"relayed game datagrams": 0, "ldn messages": 0, "dropped": 0}
 
     def say(self, *what):
@@ -1149,6 +1166,8 @@ class Lobby(TourneyMixin):
         if len(p) < 4 or p[:2] != b"SU" or p[2] != PROTO:
             return
         kind = p[3]
+        if kind == ROOM_LEFT and at[0] == "127.0.0.1" and len(p) >= 12:
+            return self.score_room_left(struct.unpack_from(">I", p, 4)[0], socket.inet_ntoa(p[8:12]), now)
         if kind == RELAY_HB:
             return self.on_relay_hb(p, at, now)
         c = self.by_at.get(at)
@@ -1194,6 +1213,7 @@ class Lobby(TourneyMixin):
                     h, g = m.host, m.guest
                     self.arena_playing(h, g, now)
                     self.t_playing(h, g, now)
+                    self.score_send(h, g, now, touch=True)
                     self.match_end(h, MS_TOGETHER, "playing a rollback match with %s" % g.name)
                     self.match_end(g, MS_TOGETHER, "playing a rollback match with %s" % h.name)
         elif kind == RB_GROUP and 20 <= len(p) <= 1500 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
@@ -1211,6 +1231,7 @@ class Lobby(TourneyMixin):
         elif kind == RESULT and len(p) >= RESULT_LEN and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             # (2026-11-03) ratings change only with a whole set of the ladder queue (or of a rated tournament: t_rate);
             # a casual rollback match (Smash, a Battle Arena) is never ranked. The ack ends the game's resending.
+            self.score_result(c, p, now)
             self.arena_result(c, p, now)
             self.t_result(c, p, now)
             self.ladder_ack(c, struct.unpack_from(">Q", p, 12)[0], OUT_UNRANKED)
@@ -1307,6 +1328,70 @@ class Lobby(TourneyMixin):
             if st is not None:
                 mine, theirs = (st[3], st[4]) if st[1] == c.ladder_id else (st[4], st[3])
         self.send(hdr(RESULT_ACK) + struct.pack(">QB", seed, outcome) + self.ladder_numbers(c) + bytes((mine, theirs)), c.at)
+
+    # ---- 1.8 score
+    @staticmethod
+    def score_key(c):
+        return ("ladder", c.ladder_id) if c.ladder_id is not None else ("name", c.name)
+
+    def score_row(self, c, now, room=None):
+        """c's count; room (its match's arena key): another room than the count's starts it again"""
+        r = self.score.get(self.score_key(c))
+        if r is None or now - r[2] > SCORE_IDLE or (room is not None and r[3] != room):
+            if r is not None and (r[0] or r[1]):
+                self.say("score: %s starts again at 0-0 (it was %d-%d; %s)" % (c.name, r[0], r[1], "another room" if now - r[2] <= SCORE_IDLE else "an hour without a match"))
+            r = self.score[self.score_key(c)] = [0, 0, now, room if room is not None else (r[3] if r is not None else 0)]
+        return r
+
+    @staticmethod
+    def score_name(c):
+        return (c.ladder_why if c.ladder_id is not None and c.ladder_why else c.name).encode("utf-8", "replace")[:NAME_LEN].ljust(NAME_LEN, b"\0")
+
+    def score_room_left(self, gid, ip, now):
+        for x in list(self.by_at.values()):
+            r = self.score.get(self.score_key(x))
+            if x.at[0] == ip and r is not None and r[3] == gid:
+                if r[0] or r[1]:
+                    self.say("score: %s left room %u: starts again at 0-0 (it was %d-%d)" % (x.name, gid, r[0], r[1]))
+                r[0] = r[1] = 0
+
+    def score_send(self, a, b, now, touch=False):
+        """SCORE to both fighters a and b (b may be None: a alone is told nothing)"""
+        if a is None or b is None or a is b:
+            return
+        ra = self.score_row(a, now, getattr(a, "match_key", 0) if touch else None)
+        rb = self.score_row(b, now, getattr(b, "match_key", 0) if touch else None)
+        if touch:
+            ra[2] = rb[2] = now
+        for x, o, rx, ro in ((a, b, ra, rb), (b, a, rb, ra)):
+            self.send(hdr(SCORE) + struct.pack(">IHHHH", o.ip, min(rx[0], 65535), min(rx[1], 65535), min(ro[0], 65535), min(ro[1], 65535))
+                      + self.score_name(x) + self.score_name(o), x.at)
+
+    def score_result(self, c, p, now):
+        """RESULT of a rollback match: the winner's win and the loser's loss, once per match"""
+        seed, peer, slot, rule_kind, stock, flags = struct.unpack_from(">QIBBBB", p, 12)
+        s0, s1, d0, d1 = struct.unpack_from(">BBHH", p, 48)
+        if seed in self.score_seeds or slot > 1 or not flags & F_STOCKS_FALLS or flags & 3:
+            return
+        win = 0 if s0 > s1 else 1 if s1 > s0 else 0 if d0 < d1 else 1 if d1 < d0 else None
+        if win is None:
+            return
+        self.score_seeds[seed] = now
+        if len(self.score_seeds) > 4096:
+            self.score_seeds.pop(next(iter(self.score_seeds)))
+        opp = self.by_ip.get(peer) or self.by_ip.get(c.rb_peer)
+        if opp is c:
+            opp = None
+        winner, loser = (c, opp) if win == slot else (opp, c)
+        for x, k in ((winner, 0), (loser, 1)):
+            if x is not None:
+                r = self.score_row(x, now)
+                r[k] += 1
+                r[2] = now
+        w, l = self.score_row(winner, now) if winner else None, self.score_row(loser, now) if loser else None
+        self.say("score: %s beat %s (session: %s, %s)" % (winner.name if winner else "?", loser.name if loser else "?",
+                 "%d-%d" % (w[0], w[1]) if w else "-", "%d-%d" % (l[0], l[1]) if l else "-"))
+        self.score_send(c, opp, now)
 
     def on_list(self, c, seq, now, other=False):
         """The game's Rooms List. other (flag 1, a newer game): the rooms of every build of this code, each LISTING ending
