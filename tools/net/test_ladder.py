@@ -86,8 +86,59 @@ class LadderTest(unittest.TestCase):
         c = os.urandom(16)
         self.assertEqual(self.ld.identify(c, "Mallory", key=os.urandom(32))[1], "not invited")
         self.ld.open_signup = True
-        self.assertEqual(self.ld.identify(c, "roberto", key=os.urandom(32))[1], "name taken")
-        self.assertEqual(self.ld.identify(c, "Mallory", key=os.urandom(32)), (c, "Mallory"))
+        self.assertEqual(self.ld.identify(c, "roberto", key=os.urandom(32)), (c, "roberto 2"))      # (a free variant)
+        d = os.urandom(16)
+        self.assertEqual(self.ld.identify(d, "Mallory", key=os.urandom(32)), (d, "Mallory"))
+
+    # accounts
+    def join(self, pid, key, name):
+        nonce = os.urandom(8)
+        return self.ld.identify(pid, name, nonce, LD.join_proof(key, nonce))
+
+    def test_rename_follows_the_game_with_open_signup(self):
+        self.assertEqual(self.join(self.a, self.ka, "Robert"), (self.a, "Roberto"))      # (invitation only: names are the admin's)
+        self.ld.open_signup = True
+        self.assertEqual(self.join(self.a, self.ka, "Robert"), (self.a, "Robert"))
+        self.assertEqual(self.join(self.a, self.ka, "fredy"), (self.a, "Robert"))        # (another account's name)
+        self.assertEqual(self.join(self.a, self.ka, "Player-1c83"), (self.a, "Robert"))  # (the game's placeholder)
+        self.assertEqual(self.join(self.a, self.ka, " x"), (self.a, "Robert"))            # (too short)
+        self.assertEqual(self.join(self.a, self.ka, "a\x07b"), (self.a, "Robert"))        # (a control character)
+        self.assertEqual(self.join(self.a, self.ka, "  Rob   Soto "), (self.a, "Rob Soto"))
+        self.assertEqual(self.ld.player(self.a)[0], "Rob Soto")
+
+    def test_signup_names(self):
+        self.ld.open_signup = True
+        self.assertEqual(self.ld.identify(os.urandom(16), "Player-0a1b", key=os.urandom(32))[1], "Player-0a1b")
+        self.assertEqual(self.ld.identify(os.urandom(16), "", key=os.urandom(32))[1], "Player")
+        self.assertEqual(self.ld.identify(os.urandom(16), "x" * 40, key=os.urandom(32))[1], "Player 2")
+        long_name = "N" * LD.NAME_MAX
+        self.assertEqual(self.ld.identify(os.urandom(16), long_name, key=os.urandom(32))[1], long_name)
+        self.assertEqual(self.ld.identify(os.urandom(16), long_name, key=os.urandom(32))[1], "N" * (LD.NAME_MAX - 2) + " 2")
+
+    def test_admin_rename_ban_delete(self):
+        self.assertIsNone(self.ld.rename("Roberto", "Beto"))
+        self.assertIn("another account", self.ld.rename("Beto", "fredy"))
+        self.assertIn("no account", self.ld.rename("Nadie", "X1"))
+        self.assertIn("not a valid name", self.ld.rename("Beto", "x"))
+        self.assertEqual(self.join(self.a, self.ka, "?"), (self.a, "Beto"))
+        self.assertIsNone(self.ld.ban("Beto"))
+        self.assertEqual(self.join(self.a, self.ka, "?"), (None, "banned"))
+        self.assertIsNone(self.ld.ban("Beto", False))
+        self.assertEqual(self.join(self.a, self.ka, "?"), (self.a, "Beto"))
+        self.assertEqual([r[0] for r in self.ld.accounts()], ["Beto", "FreDy"])
+        self.assertIsNone(self.ld.delete("Beto"))
+        self.assertIn("no account", self.ld.delete("Beto"))
+        self.assertEqual(self.join(self.a, self.ka, "?")[1], "unknown id")               # (the game signs up again)
+
+    def test_older_database_gets_the_banned_column(self):
+        path = os.path.join(self.dir.name, "old.db")
+        db = LD.sqlite3.connect(path)
+        db.executescript(LD.SCHEMA.replace(", banned INTEGER NOT NULL DEFAULT 0", ""))
+        db.close()
+        old = LD.Ladder(path, now=self.clock)
+        self.assertIn("no account", old.ban("nobody"))
+        self.assertIn("banned", [r[1] for r in old.db.execute("PRAGMA table_info(players)")])
+        old.db.close()
 
     def test_invite_is_single_use(self):
         code = self.ld.invite("Third")
@@ -249,7 +300,7 @@ class LobbyLadderTest(unittest.TestCase):
         with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.sport, path), timeout=3) as r:
             return r.read().decode()
 
-    def test_bo3_through_the_lobby(self):
+    def test_accounts_through_the_lobby(self):
         a, b = self.fake("Rob", self.inv[0]), self.fake("Fre", self.inv[1])
         self.assertEqual(a.join_ld()[0::6], (L.LD_RANKED, "Roberto"))
         self.assertEqual(b.join_ld()[0::6], (L.LD_RANKED, "FreDy"))
@@ -262,27 +313,18 @@ class LobbyLadderTest(unittest.TestCase):
         stranger = self.fake("Who")
         self.assertEqual(stranger.join_ld(signup=False)[0], L.LD_UNKNOWN)
         self.assertIsNone(self.fake("Old").join_ld(ld=False))       # an older game: no ladder, still joined
+        # (2026-11-03) a casual rollback match is never ranked: ratings change only with a whole set of the ladder queue
+        # (test_ladder_queue.py) or of a rated tournament; every RESULT is still acknowledged (the game stops resending)
         for seed, stocks in ((101, (2, 0)), (102, (0, 1)), (103, (1, 0))):
             a.result(seed, b.ip, 0, stocks)
-            self.assertEqual(a.ack(seed)[0], L.OUT_WAIT)
+            self.assertEqual(a.ack(seed)[0], L.OUT_UNRANKED)
             b.result(seed, a.ip, 1, stocks)
-            self.assertEqual(b.ack(seed)[0], L.OUT_OK)
-            got = a.ack(seed)
-            self.assertEqual(got[0], L.OUT_OK)
-        self.assertGreater(got[1], 1500)
-        self.assertEqual((got[3], got[4], got[5]), (1, 0, 1))
-        a.result(103, b.ip, 0, (1, 0))               # resent after its ACK was lost: the same outcome, counted once
-        self.assertEqual(a.ack(103)[0], L.OUT_OK)
-        a.result(104, b.ip, 0, (2, 0))
-        a.ack(104)
-        b.result(104, a.ip, 1, (2, 0), desyncs=1)
-        self.assertEqual(b.ack(104)[0], L.OUT_DISPUTED)
+            self.assertEqual(b.ack(seed)[0], L.OUT_UNRANKED)
         stranger.result(105, a.ip, 0, (2, 0))
         self.assertEqual(stranger.ack(105)[0], L.OUT_UNRANKED)
         table = json.loads(self.get("/ladder.json"))
-        self.assertEqual([(p["name"], p["wins"], p["losses"]) for p in table], [("Roberto", 1, 0), ("FreDy", 0, 1)])
-        hist = json.loads(self.get("/player/FreDy.json"))
-        self.assertEqual(hist["sets"][-1]["score"], [1, 2])
+        self.assertEqual(sorted((p["name"], p["wins"], p["losses"]) for p in table), [("FreDy", 0, 0), ("Roberto", 0, 0)])
+        self.assertEqual(json.loads(self.get("/player/FreDy.json"))["sets"], [])
         self.assertIn("<title>SSBU ladder</title>", self.get("/ladder"))
         doc = self.get("/ladder.json") + self.get("/player/Roberto.json")
         for leak in ("127.0.0.1", "10.13.", a.pid.hex(), a.key.hex(), b.pid.hex(), self.inv[0]):

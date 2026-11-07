@@ -22,7 +22,7 @@ def has(proto, p):
             return True
     return False
 add = []
-for proto, p, what in [("6", 443, "SSBU Online menu (NEX)")] + [("17", p, "SSBU Online menu") for p in (10025, 10125, 33334, 33335, 39599, 39500)]:
+for proto, p, what in [("6", 443, "SSBU Online menu (NEX)"), ("6", 8080, "SSBU tournaments web page")] + [("17", p, "SSBU Online menu") for p in (10025, 10125, 33334, 33335, 39599, 39500)]:
     if not has(proto, p):
         key = "udp-options" if proto == "17" else "tcp-options"
         add.append({"protocol": proto, "source": "0.0.0.0/0", "source-type": "CIDR_BLOCK", "is-stateless": False,
@@ -31,5 +31,5 @@ print(json.dumps(rules + add if add else None))
 PY
 if [ "$(cat /tmp/ssbu_in.json)" != null ]; then
     oci network security-list update --security-list-id "$SL" --ingress-security-rules file:///tmp/ssbu_in.json --force >/dev/null
-    echo "ports opened: TCP 443; UDP 10025 10125 33334 33335 39599 39500"
+    echo "ports opened: TCP 443 8080; UDP 10025 10125 33334 33335 39599 39500"
 else echo "the ports were already open"; fi

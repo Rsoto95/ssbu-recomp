@@ -4,6 +4,10 @@
 A closed group: a player is ranked only once the lobby knows its ladder id (a game's random 16-byte id, with a 32-byte
 key that proves it, see the 'L''D' block of JOIN). An id is admitted by a one-use invitation code (--ladder-invite) or,
 with --ladder-open, the first time it is seen; its key is then kept (trust on first use) and its name is bound to it.
+That id is the player's ACCOUNT (the game shows it, and an "account code" moves it to another PC). With --ladder-open the
+name follows the game's: a JOIN with another valid name renames the account when no other account has it (a name already
+taken at the sign-up gets a free variant, "Name 2"); the game's own placeholder "Player-xxxx" never renames one. The
+admin renames, bans and deletes accounts (ssbu_lobby.py --account-*).
 
 A set opens when two ranked players are paired for a rollback match; each game of it is counted only when BOTH games
 reported the same result for the same match seed (the handshake's) without a desync, under the ladder's rules (stock,
@@ -15,6 +19,7 @@ Python 3.8+, standard library only (sqlite3). No game content."""
 import hashlib
 import hmac
 import math
+import re
 import secrets
 import sqlite3
 import time
@@ -25,6 +30,8 @@ RULE_STOCK = 1                    # handshake rule_kind of a stock match (debug_
 LADDER_STOCKS, LADDER_TO = 3, 2   # 3 stocks, best of 3
 REPORT_WAIT = 60.0                # seconds the second report of a game is waited for
 ID_LEN, KEY_LEN = 16, 32
+NAME_MIN, NAME_MAX = 2, 24        # an account name: printable, no spaces at its ends
+PLACEHOLDER = re.compile(r"^Player-[0-9a-fA-F]{4}$")   # (net_relay.c: the name of a game without one, new at each start)
 F_ABANDON, F_DISCONNECT = 1, 2    # RESULT flags
 
 
@@ -83,6 +90,14 @@ def game_winner(stocks, dmg):
     return None
 
 
+def clean_name(name):
+    """name as an account name, or "" when it cannot be one (too short or long, control characters)"""
+    name = " ".join(str(name or "").split())
+    if not NAME_MIN <= len(name) <= NAME_MAX or not name.isprintable():
+        return ""
+    return name
+
+
 def join_proof(key, nonce):
     """The 'L''D' proof of a JOIN: HMAC-SHA256(key, the JOIN's nonce)."""
     return hmac.new(key, nonce, hashlib.sha256).digest()
@@ -93,7 +108,7 @@ CREATE TABLE IF NOT EXISTS seasons (id INTEGER PRIMARY KEY, name TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS players (
     id BLOB PRIMARY KEY, key BLOB NOT NULL, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
     rating REAL NOT NULL, rd REAL NOT NULL, vol REAL NOT NULL,
-    wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
+    wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, banned INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS invites (code TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL, used_by BLOB);
 CREATE TABLE IF NOT EXISTS sets (
     id INTEGER PRIMARY KEY, season INTEGER NOT NULL, p1 BLOB NOT NULL, p2 BLOB NOT NULL,
@@ -116,6 +131,10 @@ class Ladder:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")      # (the web thread reads while the lobby writes)
         self.db.executescript(SCHEMA)
+        if "banned" not in [r[1] for r in self.db.execute("PRAGMA table_info(players)")]:       # (a database of lobby 1.5 / 1.6)
+            self.db.execute("ALTER TABLE players ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
+        if "tid" not in [r[1] for r in self.db.execute("PRAGMA table_info(sets)")]:            # (2026-11-03) the set's match page
+            self.db.execute("ALTER TABLE sets ADD COLUMN tid INTEGER")
         self.db.execute("UPDATE sets SET state = 'void', closed = ? WHERE state = 'open'", (self.now(),))   # (a restarted lobby: those sets' games are lost)
         if self.db.execute("SELECT COUNT(*) FROM seasons WHERE ended IS NULL").fetchone()[0] == 0:
             self.db.execute("INSERT INTO seasons (name, started) VALUES (?, ?)", ("Season 1", self.now()))
@@ -139,10 +158,17 @@ class Ladder:
         (proof = join_proof(key, nonce)); an unknown one is admitted with its key by an invitation code or --ladder-open."""
         if len(pid) != ID_LEN:
             return None, "bad id"
-        row = self.db.execute("SELECT key, name FROM players WHERE id = ?", (pid,)).fetchone()
+        row = self.db.execute("SELECT key, name, banned FROM players WHERE id = ?", (pid,)).fetchone()
         if row is not None:
             if proof is None or nonce is None or not hmac.compare_digest(join_proof(row[0], nonce), proof):
                 return None, "wrong key"
+            if row[2]:
+                return None, "banned"
+            want = clean_name(name)
+            if self.open_signup and want and want != row[1] and not PLACEHOLDER.match(want) and self.name_free(want, pid):
+                self.db.execute("UPDATE players SET name = ? WHERE id = ?", (want, pid))
+                self.db.commit()
+                return pid, want
             return pid, row[1]
         if key is None or len(key) != KEY_LEN:
             return None, "unknown id"
@@ -154,6 +180,8 @@ class Ladder:
             name = inv[0]
         elif not self.open_signup:
             return None, "not invited"
+        else:
+            name = self.free_variant(clean_name(name) or "Player")
         if self.db.execute("SELECT 1 FROM players WHERE name = ?", (name,)).fetchone():
             return None, "name taken"
         self.db.execute("INSERT INTO players (id, key, name, rating, rd, vol, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -162,6 +190,50 @@ class Ladder:
             self.db.execute("UPDATE invites SET used_by = ? WHERE code = ?", (pid, invite))
         self.db.commit()
         return pid, name
+
+    def name_free(self, name, pid=None):
+        row = self.db.execute("SELECT id FROM players WHERE name = ?", (name,)).fetchone()
+        return row is None or row[0] == pid
+
+    def free_variant(self, name):
+        """name, or "name 2", "name 3"... : the first no account has"""
+        n, cand = 1, name
+        while not self.name_free(cand):
+            n += 1
+            suffix = " %d" % n
+            cand = name[:NAME_MAX - len(suffix)] + suffix
+        return cand
+
+    # ---- accounts (the admin: ssbu_lobby.py --account-*)
+    def accounts(self):
+        """[(name, rating, wins, losses, banned, created)] by name"""
+        return self.db.execute("SELECT name, rating, wins, losses, banned, created FROM players ORDER BY name").fetchall()
+
+    def rename(self, old, new):
+        """-> None, or why not"""
+        want = clean_name(new)
+        if not want:
+            return "not a valid name (%d to %d characters, printable)" % (NAME_MIN, NAME_MAX)
+        row = self.db.execute("SELECT id FROM players WHERE name = ?", (old,)).fetchone()
+        if row is None:
+            return "no account called %s" % old
+        if not self.name_free(want, row[0]):
+            return "another account is called %s" % want
+        self.db.execute("UPDATE players SET name = ? WHERE id = ?", (want, row[0]))
+        self.db.commit()
+        return None
+
+    def ban(self, name, on=True):
+        """-> None, or why not. A banned account is not ranked (its game plays on, unranked) until unbanned."""
+        cur = self.db.execute("UPDATE players SET banned = ? WHERE name = ?", (1 if on else 0, name))
+        self.db.commit()
+        return None if cur.rowcount else "no account called %s" % name
+
+    def delete(self, name):
+        """-> None, or why not. Its games and sets stay (without a name); the game signs up again as a new account."""
+        cur = self.db.execute("DELETE FROM players WHERE name = ?", (name,))
+        self.db.commit()
+        return None if cur.rowcount else "no account called %s" % name
 
     def rank(self, pid):
         """pid's place in the table (1 = first), 0 = not ranked"""
@@ -276,6 +348,39 @@ class Ladder:
         self.db.execute("UPDATE sets SET state = 'done', closed = ?, winner = ?, r1_before = ?, r1_after = ?, r2_before = ?, r2_after = ?"
                         " WHERE id = ?", (self.now(), winner, a[1], na[0], b[1], nb[0], set_id))
 
+    # ---- (2026-11-03) a whole set at once: the ladder queue's matches and rated tournament sets (tournament.py)
+    def record_set(self, p1, p2, winner, w1, w2, tid=None, games=()):
+        """p1 / p2 (ladder ids) played a set that winner (1 / 2) won w1 - w2; games: [(winner slot 0 / 1, chara1, chara2)].
+        Both ratings change (one Glicko-2 period). Returns ((p1 rating before, after), (p2 rating before, after)), or
+        None when one of the two has no account."""
+        a, b = self.player(p1), self.player(p2)
+        if a is None or b is None or p1 == p2:
+            return None
+        cur = self.db.execute("INSERT INTO sets (season, p1, p2, opened, w1, w2, tid) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (self.season(), p1, p2, self.now(), w1, w2, tid))
+        set_id = cur.lastrowid
+        for k, (gw, c1, c2) in enumerate(games):
+            self.db.execute("INSERT INTO games (set_id, seed, at, state, chara1, chara2, winner) VALUES (?, ?, ?, 'ok', ?, ?, ?)",
+                            (set_id, (tid or 0) * 100 + k, self.now(), c1 & 0x7FFFFFFFFFFFFFFF if c1 else None,
+                             c2 & 0x7FFFFFFFFFFFFFFF if c2 else None, gw))
+        self.close_set(set_id, winner)
+        self.db.commit()
+        na, nb = self.player(p1), self.player(p2)
+        return (a[1], na[1]), (b[1], nb[1])
+
+    def matches(self, n=30):
+        """the latest sets with a match page (the ladder queue's): names, score, winner, ratings (the web page)"""
+        db = sqlite3.connect(self.path)
+        try:
+            rows = db.execute("SELECT s.tid, a.name, b.name, s.w1, s.w2, s.winner, s.closed, s.r1_before, s.r1_after, s.r2_before, s.r2_after"
+                              " FROM sets s JOIN players a ON a.id = s.p1 JOIN players b ON b.id = s.p2"
+                              " WHERE s.state = 'done' AND s.tid IS NOT NULL ORDER BY s.id DESC LIMIT ?", (n,)).fetchall()
+            return [{"tid": tid, "players": [n1, n2], "score": [w1, w2], "winner": winner, "closed": closed,
+                     "rating": [[round(r1b), round(r1a)], [round(r2b), round(r2a)]] if r1b is not None else None}
+                    for tid, n1, n2, w1, w2, winner, closed, r1b, r1a, r2b, r2a in rows]
+        finally:
+            db.close()
+
     # ---- web (never ids, keys or addresses)
     def table(self):
         db = sqlite3.connect(self.path)
@@ -283,11 +388,11 @@ class Ladder:
             rows = db.execute("SELECT id, name, rating, rd, wins, losses FROM players ORDER BY rating - 2 * rd DESC, name").fetchall()
             out = []
             for pid, name, rating, rd, w, l in rows:
-                main = db.execute("SELECT c, COUNT(*) n FROM (SELECT g.chara1 c FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p1 = ?"
-                                  " UNION ALL SELECT g.chara2 FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p2 = ?)"
-                                  " GROUP BY c ORDER BY n DESC LIMIT 1", (pid, pid)).fetchone()
+                mains = db.execute("SELECT c, COUNT(*) n FROM (SELECT g.chara1 c FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p1 = ?"
+                                   " UNION ALL SELECT g.chara2 FROM games g JOIN sets s ON g.set_id = s.id WHERE g.state = 'ok' AND s.p2 = ?)"
+                                   " WHERE c IS NOT NULL GROUP BY c ORDER BY n DESC LIMIT 3", (pid, pid)).fetchall()
                 out.append({"name": name, "rating": round(rating), "rd": round(rd), "wins": w, "losses": l,
-                            "main": "%016x" % main[0] if main else None})
+                            "main": "%016x" % mains[0][0] if mains else None, "mains": [m[0] for m in mains]})
             return out
         finally:
             db.close()
@@ -299,13 +404,13 @@ class Ladder:
             if row is None:
                 return None
             pid = row[0]
-            sets = db.execute("SELECT s.id, s.p1, a.name, b.name, s.state, s.winner, s.w1, s.w2, s.closed, s.r1_before, s.r1_after, s.r2_before, s.r2_after"
+            sets = db.execute("SELECT s.id, s.p1, a.name, b.name, s.state, s.winner, s.w1, s.w2, s.closed, s.r1_before, s.r1_after, s.r2_before, s.r2_after, s.tid"
                               " FROM sets s JOIN players a ON a.id = s.p1 JOIN players b ON b.id = s.p2 WHERE s.p1 = ? OR s.p2 = ?"
                               " ORDER BY s.id DESC LIMIT 100", (pid, pid)).fetchall()
             out = []
-            for sid, p1, n1, n2, state, winner, w1, w2, closed, r1b, r1a, r2b, r2a in sets:
+            for sid, p1, n1, n2, state, winner, w1, w2, closed, r1b, r1a, r2b, r2a, tid in sets:
                 me1 = p1 == pid
-                out.append({"opponent": n2 if me1 else n1, "state": state, "score": [w1, w2] if me1 else [w2, w1],
+                out.append({"opponent": n2 if me1 else n1, "state": state, "score": [w1, w2] if me1 else [w2, w1], "tid": tid,
                             "won": None if winner is None else (winner == 1) == me1, "closed": closed,
                             "rating": [round(r1b), round(r1a)] if me1 and r1b is not None else [round(r2b), round(r2a)] if r2b is not None else None})
             return {"name": row[1], "sets": out}
