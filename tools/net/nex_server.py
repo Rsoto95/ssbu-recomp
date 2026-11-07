@@ -561,6 +561,7 @@ def join_matchmake_session_with_param(client, req):
         conns = a.setdefault("clients", {a["owner"]: a["client"]})
         conns[client.pid] = client
         others = [c for p, c in conns.items() if c is not client and p in parts]
+        came_back = a.get("left", {}).pop(client.pid, None)
     client.log("%s     JoinMatchmakeSessionWithParam: pid %d into arena %d (%d players: %s)" % (client.who, client.pid or 0, gid, len(parts), parts))
     joiner = client.pid or 0
     count = len(parts)
@@ -571,6 +572,14 @@ def join_matchmake_session_with_param(client, req):
         # too, is told "joiner joined" with the player count in param3; then the newcomer is told about each player
         # already in it, one notification each. Without the second part the newcomer never learnt the host was there:
         # the two games probed each other, then "one or more other consoles are not responding" (2618-0502).
+        if came_back:
+            # (2026-11-07) a player who had left this arena enters it again. The server never told the others it had
+            # left, and the host's game still counted it in: SUKO left arena 1067 (EndParticipation), came back 4
+            # times in 25 minutes, and each time the host never answered its probe (InitiateProbe sent, no
+            # RequestProbeInitiationExt back; every other join that night was answered within a second); the game
+            # gave up after ~45 s. The departure is told first (3008 left / 3007 dropped), then the join as usual.
+            for c in others:
+                c.notify(came_back, gid, joiner, source=joiner)
         client.notify(NOTIFY_PARTICIPATION, gid, joiner, source=joiner, param3=count)
         for c in others:
             c.notify(NOTIFY_PARTICIPATION, gid, joiner, source=joiner, param3=count)
@@ -669,9 +678,14 @@ def get_session_urls(client, req):
 _next_round = [1]
 
 
-def leave_arenas(pid, only_gid=None):
+NOTIFY_PARTICIPANT_DISCONNECTED = 3007   # ParticipationEvent 7: a member's connection dropped (param1 gid, param2 pid)
+NOTIFY_END_PARTICIPATION = 3008          # ParticipationEvent 8: a member left with EndParticipation (param1 gid, param2 pid)
+
+
+def leave_arenas(pid, only_gid=None, how=NOTIFY_PARTICIPANT_DISCONNECTED):
     """(2026-11-02) a member out of its arenas' member lists (a departed member kept there made the fighters wait for a
-    spectator's HELLO that never came, and the F1 counts were wrong). Call with ARENAS_LOCK held."""
+    spectator's HELLO that never came, and the F1 counts were wrong). The arena remembers how it left (`how`: 3007 or
+    3008) for a later join of the same player (join_matchmake_session_with_param). Call with ARENAS_LOCK held."""
     for gid, a in ARENAS.items():
         if only_gid is not None and gid != only_gid:
             continue
@@ -680,6 +694,7 @@ def leave_arenas(pid, only_gid=None):
             parts.remove(pid)
             a.get("clients", {}).pop(pid, None)
             a.get("seats", {}).pop(pid, None)
+            a.setdefault("left", {})[pid] = how
             set_session_count(a)
 
 
@@ -704,7 +719,7 @@ def referee_1(client, req):
     try:
         gid = struct.unpack_from("<I", req.body, 0)[0]
         with ARENAS_LOCK:
-            leave_arenas(client.pid, gid)              # (MatchMakingExt EndParticipation(gid, message): the member leaves)
+            leave_arenas(client.pid, gid, NOTIFY_END_PARTICIPATION)  # (MatchMakingExt EndParticipation(gid, message))
     except struct.error:
         pass
     client.log("%s     MatchmakeReferee 1 (%s): answered %d (UNCONFIRMED)" % (client.who, hexdump(req.body), n))
