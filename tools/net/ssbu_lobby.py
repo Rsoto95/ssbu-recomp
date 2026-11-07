@@ -70,7 +70,7 @@ rollback search, 0 outside one): a match in another room starts it again at 0-0,
 are told when their match starts and after each counted result; the game shows it over the fight (menu.cpp).
     28 SCORE        lobby:  the other fighter's address u32, wins u16, losses u16 (the one told), wins u16, losses u16 (the other),
                             name[32] (the one told), name[32] (the other): the ladder name, else the lobby name
-    29 ROOM_LEFT    nex_server.py on this host (from 127.0.0.1 only): arena gid u32, the player's public address u32: the
+    40 ROOM_LEFT    nex_server.py on this host (from 127.0.0.1 only): arena gid u32, the player's public address u32: the
                     players at that address whose count is of that arena start again at 0-0 (they left the room: by its
                     menu, a dropped connection, or the arena closed)
 
@@ -106,7 +106,7 @@ MATCH, MATCH_STATE = 20, 21                  # O2 matchmaking (net_relay.c): fin
 RESULT, RESULT_ACK = 22, 23                  # 1.5 ladder: a rollback match's result (net_relay.c, ladder_report.c)
 ARENA, ARENA_STATE = 24, 25                  # 1.6 arena: a queue of players taking turns at 1-on-1 rollback matches
 RB_GROUP = 27                                # 1.7 (2026-11-02): a Battle Arena's group (fighters + spectators, key = the arena)
-ROOM_LEFT = 29                               # 1.8: from nex_server.py on this host (127.0.0.1 only): a player left a Battle Arena
+ROOM_LEFT = 40                               # 1.8 (29..33: the tournaments and the relay): from nex_server.py on this host (127.0.0.1 only): a player left a Battle Arena
 SCORE = 28                                   # 1.8 (2026-11-07): the session's wins / losses of the two fighters of a rollback match
 SCORE_IDLE = 3600.0                          # a player's score starts again at 0-0 after an hour without a match
 F_STOCKS_FALLS = 4                           # RESULT flag: stocks left = the rule's stocks less the falls (a newer game: its winner is right)

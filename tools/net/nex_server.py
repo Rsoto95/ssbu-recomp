@@ -688,12 +688,12 @@ _notify_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 def notify_room_left(gid, client):
     """(2026-11-07, the score) tell the lobby on this host that the player at client's public address left arena gid:
-    its score (wins / losses of that room) starts again. 'S' 'U' 1 29 + gid u32 + address u32 (lobby ROOM_LEFT)."""
+    its score (wins / losses of that room) starts again. 'S' 'U' 1 40 + gid u32 + address u32 (lobby ROOM_LEFT)."""
     if not LOBBY_NOTIFY[0] or client is None:
         return
     try:
         ip = client.who.rsplit(":", 1)[0]
-        _notify_sock.sendto(b"SU" + bytes((1, 29)) + struct.pack(">I", gid & 0xFFFFFFFF) + socket.inet_aton(ip), LOBBY_NOTIFY[0])
+        _notify_sock.sendto(b"SU" + bytes((1, 40)) + struct.pack(">I", gid & 0xFFFFFFFF) + socket.inet_aton(ip), LOBBY_NOTIFY[0])
     except (OSError, ValueError, AttributeError):
         pass
 
