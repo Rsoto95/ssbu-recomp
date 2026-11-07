@@ -200,6 +200,44 @@ Windows PC with simulated 150 ms ping and loss (0 desyncs). The Linux port still
 [BUILDING_LINUX.md](../BUILDING_LINUX.md); if a long match fails, use the delay-based fallback
 (`SSBU_RB_NET_NOROLLBACK=1`). Please report how it feels.
 
+### Replays (2026-11-07, Brix)
+
+**A replay plays without rollback.** A replay starts its fight without the select screens' set-up, so no handshake runs
+for it. Before this change the controller took the start-up default ("agreed") or the last match's answer, started a
+rollback match against nobody (`[rbnet] match 1 (id 00000000) ... round trip -1.0 ms`) and the game froze, waiting for
+the other player's pad. Now a fight with no set-up since the previous fight is played like a Local Wireless room fight:
+no rollback, pads untouched; the log says `r1: RB NET: a fight with no set-up of its own (a replay): no rollback`
+(`rbn_setup_round()` in `net_session.c`, the check at the top of `rbg_step_body` in `rollback_controller.c`).
+Tested on 13.0.5 (Windows, RTX 5070 Ti): one replay played back 3 times in one session, rollback on: each time the log line
+above, no freeze. Every real online match in the logs of that day had its own set-up, so an online match is not
+affected; a Local Wireless room's match was not tested after the change.
+
+**Known issue: a replay saved from a rollback fight goes wrong partway.** Replays of local fights play to the end
+(tested). The replay of a Battle Arena match (172 s, 10,311 frames, `mispredictions 2`, `DESYNCS 0`: the match itself was
+right on both PCs) ran 105 s on playback and then no longer followed the match. Both rollbacks of that match were early:
+```
+r1: RB NET: rollback 1 at frame 25: wrong guess at 21, state of frame 20 loaded in 1.238 ms, 5 frames again
+r1: RB NET: rollback 2 at frame 29: wrong guess at 27, state of frame 26 loaded in 1.493 ms, 3 frames again
+r1: RB NET: match start, base state = frame 0 (fight frame 217); pacing 60 Hz; re-run skip mask 49, lite mask 123 (the last re-run pass too)
+```
+Two likely causes, not yet told apart (an inference from the logs, not measured):
+1. **Re-run frames recorded twice.** The game adds each frame's inputs to its replay recording; if the memory holding the
+   recording is not restored by `r1_ring_load`, the 5 + 3 re-run frames are added a second time and every input after
+   frame ~21 lands 8 frames late on playback.
+2. **The guesses stay in the replay.** Re-run passes are "lite" (skip mask 49, lite mask 123, the last one included); if
+   the game's replay recorder is in a skipped part, the corrected pads never reach the recording and frames 21 and 27
+   keep the guessed ones.
+
+How to tell them apart: force rollbacks in a local fight with the *same* pads (`SSBU_RB_SIM`), save the replay and play
+it. It breaks: cause 1 (`SSBU_RB_AUDIT=60`, `rollback/debug/ring_audit.c`, should then show the recording's block among
+the pages the ring did not take). It plays to the end: cause 2 (a run with every re-run pass full should then give a good
+replay).
+
+**Error 2214-0101 after a replay** (seen once, at the end of a replay's playback): `0xcad6` is the album's "any other
+failure" (`nnalbum.c`). Most likely (an inference: the caller was not traced) it is the video maker, which has no frame
+source yet, so `PrecheckToStartMovieMaker` reports a failure on purpose instead of recording a video without pictures.
+It is not a damaged replay. Since 2026-11-07 the error code is written to the log before the error box opens.
+
 
 ## Credit
 

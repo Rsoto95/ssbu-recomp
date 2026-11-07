@@ -127,6 +127,7 @@ void nvn_front_osk_redraw(void); long long nvn_front_presents(void);      /* nvn
 uint64_t nnhid_menu_buttons(void);                      /* nnhid.c: every controller's buttons, Npad bit order (B = bit 1), not seen by the game */
 static SRWLOCK g_hs_lock = SRWLOCK_INIT;
 static volatile LONG g_hs_round;                        /* this game's match set-ups so far (log lines) */
+long rbn_setup_round(void) { return g_hs_round; }       /* (2026-11-07) rollback_controller.c: a fight with no set-up of its own (a replay) is local */
 static volatile LONG g_hs_waiting;                      /* rbn_handshake is waiting */
 static uint32_t g_hs_nonce;                             /* this game's nonce of the newest wait (0 = none yet) */
 static uint32_t g_hs_peer_nonce;                        /* the other game's nonce seen in this wait (0 = none yet) */
