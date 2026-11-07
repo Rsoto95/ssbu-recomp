@@ -585,15 +585,17 @@ static void err_dialog(unsigned category, unsigned number) {
 }
 static void err_ShowErrorResult(Ctx *c) {                 /* (Result): the console shows the error applet */
     uint32_t r = (uint32_t)A0;
-    err_dialog(2000 + (r & 0x1ff), (r >> 9) & 0x1fff);
     printf("nn::err::ShowError: result 0x%x (module %u, description %u), caller 0x%llx\n", r, r & 0x1ff, (r >> 9) & 0x1fff,
            (unsigned long long)c->x[30] - 4);
+    fflush(stdout);                                       /* (2026-11-07) before the box: a game closed while it is up still has the code in its log */
     trace_printf("     nn::err::ShowError result 0x%x (module %u, description %u)\n", r, r & 0x1ff, (r >> 9) & 0x1fff);
+    err_dialog(2000 + (r & 0x1ff), (r >> 9) & 0x1fff);
 }
 static void err_ShowErrorCode(Ctx *c) {                   /* (ErrorCode { uint32_t category, number }) in x0 */
     printf("nn::err::ShowError: error code %04u-%04u, caller 0x%llx\n", (unsigned)(uint32_t)A0, (unsigned)(A0 >> 32),
            (unsigned long long)c->x[30] - 4);
     trace_printf("     nn::err::ShowError error code %04u-%04u\n", (unsigned)(uint32_t)A0, (unsigned)(A0 >> 32));
+    fflush(stdout);
     err_dialog((unsigned)(uint32_t)A0, (unsigned)(A0 >> 32));
 }
 
