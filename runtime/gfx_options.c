@@ -528,9 +528,19 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         double gb = GlobalMemoryStatusEx(&ms) ? (double)ms.ullTotalPhys / 1073741824.0 : 0.0;
         { const char *t = getenv("SSBU_TEST_RAM_GB"); if (t && atof(t) > 0) { gb = atof(t); printf("graphics options: SSBU_TEST_RAM_GB=%s: TEST, this PC's RAM taken as %.1f GB\n", t, gb); } }
         o->ram_gb = (int)(gb + 0.5);
+        /* (2026-11-07, owner: "this should happen by itself") Falsewolf: 31.9 GB of RAM, so start, but only ~14.5 GB of
+         * commit free when the game opened (RAM + page file, minus the other programs): the game took 12.4 GB, the
+         * rollback ring's base state needs ~2.4 GB + 1 GB kept free, 2.2-2.5 GB were left, and every online match of the
+         * session ran WITHOUT rollback (delay-based, input delay forced to 3 for both players). Now auto also looks at the
+         * commit free at start: under 18 GB (start's ~12.5 GB + the ring ~3.4 GB + 2 GB for the other programs) it is
+         * loading, ~3.3 GB less, so the ring fits. SSBU_TEST_COMMIT_GB: that free commit (test). */
+        double commit_gb = ms.dwLength && ms.ullAvailPageFile ? (double)ms.ullAvailPageFile / 1073741824.0 : 0.0;
+        { const char *t = getenv("SSBU_TEST_COMMIT_GB"); if (t && atof(t) > 0) { commit_gb = atof(t); printf("graphics options: SSBU_TEST_COMMIT_GB=%s: TEST, free commit taken as %.1f GB\n", t, commit_gb); } }
         if (o->shader_load_auto) {
-            o->shader_load = gb > 0.0 && gb < 20.0 ? 1 : 0;
-            printf("graphics options: shader_load = auto: %s (this PC has %.1f GB of RAM; 16 GB or less: loading, which uses ~4 GB less memory)\n", o->shader_load ? "loading" : "start", gb);
+            int low_ram = gb > 0.0 && gb < 20.0, low_commit = commit_gb > 0.0 && commit_gb < 18.0;
+            o->shader_load = low_ram || low_commit ? 1 : 0;
+            printf("graphics options: shader_load = auto: %s (this PC has %.1f GB of RAM, %.1f GB of commit free now (RAM + page file, minus the other programs); 16 GB of RAM or less, or under 18 GB of commit free: loading, which uses ~4 GB less memory, so the online rollback has room)\n",
+                   o->shader_load ? "loading" : "start", gb, commit_gb);
         }
     }
     if (o->profile == 1) {       /* the low-end profile wins over the three keys it sets, wherever they stand in the file (values: O1_options.md, session 9) */
