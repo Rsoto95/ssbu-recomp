@@ -613,16 +613,16 @@ int rbg_pad_synced(int id) { return (id == 0 || id == 1) && g_rbg_synced[id]; }
  * real pass of an agreed match, kept in memory and written to the log when the match ends: the frames where the pad
  * changed or the pass came 20 ms or more after the one before (frame:buttons/lx/ly, +gap ms). A dash or a fast fall
  * needs the stick from the centre to the edge within a few frames; this shows what the game got. SSBU_RB_PADLOG=0: off. */
-typedef struct { int f; uint16_t b; int16_t lx, ly; uint16_t gap10; } PadRec;
+typedef struct { int f; uint16_t b; int16_t lx, ly; uint16_t gap10; } PadLogRec;
 enum { PADLOG_CAP = 1 << 17 };                    /* 36 min of frames, 12 bytes each */
-static PadRec *g_padlog; static int g_padlog_n; static double g_padlog_t;
+static PadLogRec *g_padlog; static int g_padlog_n; static double g_padlog_t;
 static int padlog_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("SSBU_RB_PADLOG"); on = !(e && e[0] == '0'); } return on; }
 static void padlog_add(long long f, RbPad p) {
     if (!padlog_on()) return;
     if (!g_padlog) g_padlog = malloc(PADLOG_CAP * sizeof *g_padlog);
     double t = now_ms(), gap = g_padlog_n ? t - g_padlog_t : 0; g_padlog_t = t;
     if (!g_padlog || g_padlog_n >= PADLOG_CAP) return;
-    PadRec *r = &g_padlog[g_padlog_n++];
+    PadLogRec *r = &g_padlog[g_padlog_n++];
     r->f = (int)f; r->b = (uint16_t)p.buttons; r->lx = p.lx; r->ly = p.ly;
     r->gap10 = gap * 10 > 65535 ? 65535 : (uint16_t)(gap * 10);
 }
@@ -630,7 +630,7 @@ static void padlog_dump(int match) {
     if (!padlog_on() || !g_padlog || !g_padlog_n) { g_padlog_n = 0; return; }
     char line[1200]; int o = 0, shown = 0, slow = 0;
     for (int i = 0; i < g_padlog_n; i++) {
-        const PadRec *r = &g_padlog[i], *q = i ? &g_padlog[i - 1] : NULL;
+        const PadLogRec *r = &g_padlog[i], *q = i ? &g_padlog[i - 1] : NULL;
         int changed = !q || r->b != q->b || r->lx != q->lx || r->ly != q->ly, late = r->gap10 >= 200;
         if (late) slow++;
         if (!changed && !late) continue;
