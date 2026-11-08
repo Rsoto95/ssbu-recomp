@@ -449,6 +449,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
              * every spectator said HELLO; SSBU_RB_NET_ARENA_SPEC=1: with spectators the game's own netcode plays the match for
              * everyone (the old way), =0 (test): the fighters play with rollback, the spectators are not fed. */
             int players = 0, seat = -1, sor[2] = {0, 1}, ok = online_menu_arena(&agid, &players, &seat), nfight = dm_arena_fighters(sor);
+            {   int dm_arena_own_seat(int server_seat); if (ok && agid) seat = dm_arena_own_seat(seat); }     /* (2026-11-08) the game's table over the server's seat */
             int rank = seat == sor[0] ? 0 : seat == sor[1] ? 1 : -1, spectators = players - 2, spec_test = sp && sp[0] == '0', spec_off = sp && sp[0] == '1';
             const char *why = rr && rr[0] == '0' ? "arena rollback off (SSBU_RB_NET_ARENA=0)" : !ok ? "our NEX server did not say which arena" : !agid ? "the server knows no arena of this player"
                             : nfight != 2 ? "not a 1-on-1 match" : seat < 0 ? "this player's seat is not known" : spectators > 0 && spec_off ? "spectators in the arena and SSBU_RB_NET_ARENA_SPEC=1 (the game's own netcode for everyone)"

@@ -554,8 +554,21 @@ def join_matchmake_session_with_param(client, req):
             parts.append(client.pid)
         seats = a.setdefault("seats", {a["owner"]: 0})
         if client.pid not in seats:                    # (2026-11-03) the game's seat: the lowest one free now
-            taken = set(seats.values())
-            seats[client.pid] = next(s for s in range(64) if s not in taken)
+            # (2026-11-08) a seat whose member's connection dropped stays taken for SEAT_HOLD s: the game keeps that member in
+            # its seat until the host notices (one who joined 2 s after the member of seat 1 closed the game sat at seat 4 in
+            # the game, the server said 1: it took itself for a spectator and the match fell back to the game's own netcode)
+            now = time.monotonic()
+            held = a.setdefault("seat_hold", {})
+            for s_, (t_, p_) in list(held.items()):
+                if t_ <= now:
+                    del held[s_]
+            mine = [s_ for s_, (t_, p_) in held.items() if p_ == client.pid]     # (back within SEAT_HOLD: its own seat again)
+            if mine:
+                del held[mine[0]]
+                seats[client.pid] = mine[0]
+            else:
+                taken = set(seats.values()) | set(held)
+                seats[client.pid] = next(s for s in range(64) if s not in taken)
         set_session_count(a)
         session = a["session"]
         conns = a.setdefault("clients", {a["owner"]: a["client"]})
@@ -679,6 +692,7 @@ _next_round = [1]
 
 
 NOTIFY_PARTICIPANT_DISCONNECTED = 3007   # ParticipationEvent 7: a member's connection dropped (param1 gid, param2 pid)
+SEAT_HOLD = 30.0                         # (2026-11-08) s a dropped member's seat is not given to a newcomer (leave_arenas)
 NOTIFY_END_PARTICIPATION = 3008          # ParticipationEvent 8: a member left with EndParticipation (param1 gid, param2 pid)
 
 
@@ -709,7 +723,9 @@ def leave_arenas(pid, only_gid=None, how=NOTIFY_PARTICIPANT_DISCONNECTED):
         if parts and pid in parts and pid != a["owner"]:
             parts.remove(pid)
             notify_room_left(gid, a.get("clients", {}).pop(pid, None))
-            a.get("seats", {}).pop(pid, None)
+            seat = a.get("seats", {}).pop(pid, None)
+            if seat is not None and how == NOTIFY_PARTICIPANT_DISCONNECTED:
+                a.setdefault("seat_hold", {})[seat] = (time.monotonic() + SEAT_HOLD, pid)
             a.setdefault("left", {})[pid] = how
             set_session_count(a)
 

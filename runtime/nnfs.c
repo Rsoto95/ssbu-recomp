@@ -1232,10 +1232,19 @@ static int ini_player_name(char *out, size_t n) {          /* `player_name = <na
 }
 /* The nickname of the console user: SSBU_NICKNAME, else the name chosen in the settings menu (graphics.ini player_name),
  * else the name of the Windows user: UTF-8, at most 32 bytes, NUL-terminated, in the 33-byte Nickname. */
+static char g_nick[33];
+static volatile LONG g_nick_ready;
+const char *nnfs_nickname(void);
 static void acc_GetNickname(Ctx *c) {
-    static char name[33];
-    static volatile LONG ready;
-    if (InterlockedCompareExchange(&ready, 1, 0) == 0) {
+    const char *name = nnfs_nickname();
+    memset((void *)(uintptr_t)A0, 0, 33);
+    strcpy((char *)(uintptr_t)A0, name);
+    RET(0);
+}
+/* (2026-11-08) the same name for the runtime: a Battle Arena's set-up finds this player's own seat by it (debug_mode.c) */
+const char *nnfs_nickname(void) {
+    char *name = g_nick;
+    if (InterlockedCompareExchange(&g_nick_ready, 1, 0) == 0) {
         const char *env = getenv("SSBU_NICKNAME");
         char utf8[512] = "";
         if (env && env[0]) snprintf(utf8, sizeof utf8, "%s", env);
@@ -1250,12 +1259,10 @@ static void acc_GetNickname(Ctx *c) {
         if (len > 32) { len = 32; while (len > 0 && ((unsigned char)utf8[len] & 0xc0) == 0x80) len--; }   /* cut between characters */
         memcpy(name, utf8, len);
         name[len] = 0;
-        ready = 2;
+        g_nick_ready = 2;
     }
-    while (ready != 2) SwitchToThread();
-    memset((void *)(uintptr_t)A0, 0, 33);
-    strcpy((char *)(uintptr_t)A0, name);
-    RET(0);
+    while (g_nick_ready != 2) SwitchToThread();
+    return name;
 }
 static void acc_out_true(Ctx *c) { wr8(A0, 1); RET(0); }
 static void acc_out_false(Ctx *c) { wr8(A0, 0); RET(0); }

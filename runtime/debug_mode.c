@@ -502,6 +502,38 @@ int dm_melee_mode(void) { return rd8(MELEE_INFO); }      /* (2026-11-02) the mat
  * rank = record index. Read at player 1's record, before the handshake. */
 static int g_arena_on, g_arena_nfight, g_rank_of_seat[8], g_seat_of_rank[2] = {0, 1};
 int dm_arena_fighters(int seat_of_rank[2]) { seat_of_rank[0] = g_seat_of_rank[0]; seat_of_rank[1] = g_seat_of_rank[1]; return g_arena_on ? g_arena_nfight : -1; }
+/* (2026-11-08) this game's own seat, checked against the select table: an entry is + 0 its seat (0xff empty), + 8 the name's
+ * length, + 0xc the name (UTF-16, the account nickname). Our NEX server gives each member the lowest seat free when it joins,
+ * but the game keeps a member who closed the game in its seat until the host notices: one who joined 2 s after the member of
+ * seat 1 closed the game sat at seat 4 in the game while the server said 1, took itself for a spectator, and both fighters
+ * fell back to the game's own netcode. The server's seat stays when its entry has this player's name, or when the name is
+ * not in the table exactly once; otherwise the seat of the one entry with this player's name. */
+int dm_arena_own_seat(int server_seat) {
+    const char *nnfs_nickname(void);
+    wchar_t me[40]; int n = MultiByteToWideChar(CP_UTF8, 0, nnfs_nickname(), -1, me, 40) - 1;
+    if (n <= 0) return server_seat;
+    int hits = 0, found = -1, server_ok = 0; char names[400]; int nl = 0; names[0] = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t h[0x30]; if (!safe_read(GA(0x7105307770ULL) + 0x1c8ull * (uint64_t)i, h, sizeof h)) continue;
+        uint32_t seat, len; memcpy(&seat, h, 4); memcpy(&len, h + 8, 4);
+        if (seat != (uint32_t)i || len == 0 || len > 16) continue;
+        {   wchar_t w[17]; for (uint32_t k = 0; k < len; k++) { uint16_t c; memcpy(&c, h + 0xc + 2 * k, 2); w[k] = (wchar_t)c; } w[len] = 0;
+            char u[64]; WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof u, NULL, NULL);
+            if (nl < (int)sizeof names - 80) nl += snprintf(names + nl, sizeof names - nl, "%s%d %s", nl ? ", " : "", i, u); }
+        /* the arena shows at most 10 characters of a nickname: a longer one matches by its first 10 */
+        int cmp = n < 10 ? n : 10;
+        if (!(len == (uint32_t)n || (n > 10 && len == 10))) continue;
+        int same = 1; for (int k = 0; k < cmp; k++) { uint16_t c; memcpy(&c, h + 0xc + 2 * k, 2); if (c != (uint16_t)me[k]) { same = 0; break; } }
+        if (!same) continue;
+        hits++; found = i; if (i == server_seat) server_ok = 1;
+    }
+    printf("[arena] set-up: seats in the game's table: %s; this player's name %s (found %d time(s)), our NEX server's seat %d\n", names[0] ? names : "none", nnfs_nickname(), hits, server_seat);
+    fflush(stdout);
+    if (server_ok || hits != 1 || found == server_seat) return server_seat;
+    printf("[arena] set-up: this player's own seat is %d in the game's table (its name there), not %d as our NEX server said: seat %d taken\n", found, server_seat, found);
+    fflush(stdout);
+    return found;
+}
 static void arena_seats_read(void) {
     g_arena_on = rd8(MELEE_INFO) == 0x14; g_arena_nfight = 0;
     for (int i = 0; i < 8; i++) {
