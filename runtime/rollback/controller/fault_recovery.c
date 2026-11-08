@@ -120,6 +120,25 @@ static int fr_emulate(CONTEXT *cx) {
 int rb_fault_try_absorb(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !fr_enabled()) return 0;
+    {   /* (2026-11-08, the owner's match against Flame: c0000005 in ResInflateThread writing 0x29c58230000, +7, +f ... one fault
+         * per 8 bytes from the start of a page of window 1, stepped over each time until the game died) a page of window 1 the
+         * game had committed but not yet written at the state a load went back to, and decommitted later, was left decommitted
+         * by the load (snapshot_ring.c, fixed there too): to the game it is committed memory. A fault on a reserved, uncommitted
+         * page of window 1 now commits it (zeros, as a fresh commit) and the instruction runs again; the commit is told to the
+         * page tracking (r1_on_commit) so its writes are captured. SSBU_RB_FAULT_COMMIT=0: off. */
+        static int on = -1; if (on < 0) { const char *e = getenv("SSBU_RB_FAULT_COMMIT"); on = !(e && e[0] == '0'); }
+        uint8_t *fa = (uint8_t *)(uintptr_t)er->ExceptionInformation[1];
+        MEMORY_BASIC_INFORMATION fm;
+        if (on && g_win1 && fa >= g_win1 && fa < g_win1 + g_wn1 && VirtualQuery(fa, &fm, sizeof fm) && fm.State == MEM_RESERVE) {
+            uint8_t *pg = (uint8_t *)((uintptr_t)fa & ~(uintptr_t)(PG - 1));
+            if (VirtualAlloc(pg, PG, MEM_COMMIT, PAGE_READWRITE)) {
+                void r1_on_commit(void *p, size_t n); static long long n_commit;
+                r1_on_commit(pg, PG);
+                if (++n_commit <= 20 || n_commit % 100 == 0) LOG("r1: FAULT RECOVERY: a fault on an uncommitted page of window 1 (%p, thread %lu): committed (zeros) and run again (%lld so far)\n", (void *)fa, (unsigned long)GetCurrentThreadId(), n_commit);
+                return 1;
+            }
+        }
+    }
     CONTEXT *cx = ep->ContextRecord;
     const uint8_t *ip = (const uint8_t *)(uintptr_t)cx->Rip;
     MEMORY_BASIC_INFORMATION mi;

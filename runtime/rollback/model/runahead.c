@@ -372,6 +372,7 @@ static long long g_ra_fiber_waits, g_ra_fiber_skips; static double g_ra_fiber_wa
 /* hold the threads at a quiet moment: retry until `limit` ms */
 int ra_hold_quiet(double limit) {
     double t0 = now_ms(); int tries = 0;
+    g_ra_busy = NULL;                                     /* (2026-11-08) the busy thread of THIS hold (the resource-thread limit below) */
     for (;;) {
         if (ra_hold_save()) {
             double tf = g_hp_on > 0 ? now_ms() : 0; int fq = ra_fibers_quiet(); if (g_hp_on > 0) { g_hp_fib_ms += now_ms() - tf; g_hp_fib_n++; }
@@ -387,6 +388,13 @@ int ra_hold_quiet(double limit) {
             g_ra_busy = "a job fiber (task worker)"; g_ra_skip_why[3]++;
         }
         tries++;
+        /* (2026-11-08, Flame's Linux log against the owner) a capture waited the whole 500 ms Linux limit for ResLoadingThread,
+         * blocked in AcquireSemaphore with a guest mutex held while the fight's files were still loading: a half-second stop
+         * at frame 29, its pads came 160-190 ms late on the other game, which rolled back 7 frames at a time. A resource
+         * thread (ResLoadingThread, ResInflateThread, ResUpdateThread) that keeps a capture waiting gives it up after 30 ms
+         * (the Windows limit): the capture is skipped as before, the ring uses the state before it. SSBU_RB_RES_HOLD_MS. */
+        {   static double res_ms = -1; if (res_ms < 0) { const char *e = getenv("SSBU_RB_RES_HOLD_MS"); res_ms = e ? atof(e) : 30.0; }
+            if (g_ra_busy && !strncmp(g_ra_busy, "Res", 3) && limit > res_ms && now_ms() - t0 > res_ms) return 0; }
         if (now_ms() - t0 > limit) return 0;
         SwitchToThread();
     }

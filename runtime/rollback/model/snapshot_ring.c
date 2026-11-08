@@ -954,7 +954,11 @@ int r1_ring_load(long long frame, Ctx *c) {
         uint32_t id = g_rg_tl[n]; g_rg_touch[id] = 0;
         uint8_t *a = rg_addr(id), *src = rg_src(id);
         if (src == (uint8_t *)1) continue;                 /* decommitted then: left as it is */
-        if (id < g_rg_n1 && g_dc[id]) { if (!src) continue; VirtualAlloc(a, PG, MEM_COMMIT, PAGE_READWRITE); g_dc[id] = 0; }
+        /* (2026-11-08) decommitted now, a zero page at `frame` (src NULL: committed and never written, or not committed): committed
+         * again (a fresh commit is zeros). Before, it was left decommitted, and a page the game had committed before `frame`
+         * stayed missing under it: ResInflateThread wrote into one and died (the owner's match against Flame). A page that was
+         * really decommitted at `frame` only costs one committed page the game does not touch. */
+        if (id < g_rg_n1 && g_dc[id]) { VirtualAlloc(a, PG, MEM_COMMIT, PAGE_READWRITE); g_dc[id] = 0; if (!src) continue; }
         if (!src) memset(a, 0, PG); else cp_add(a, src);
     }
     {   /* (R3 net3) SSBU_RB_LOADCMP=1 (option, default off: measured no faster, na0 / na1): a page is written only if it differs from the value loaded */
