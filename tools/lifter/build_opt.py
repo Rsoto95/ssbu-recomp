@@ -194,12 +194,8 @@ def run_limited(cmd, limit, mem=0):
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=(os.name != 'nt'))
     try:
         out, _ = p.communicate(timeout=limit)
-        full = out.decode('latin-1')
-        out = full[-2000:]
-        # (2026-11-08) the whole output: clang's "out of memory" comes BEFORE its stack dump, so in the last 2,000 characters
-        # only "clang frontend command failed" was left: a compile over its address-space limit was taken for a compiler
-        # crash, the ladder went on to the whole file at -O0 (26 files of a Linux build, the fights at ~30 fps)
-        if out_of_memory(p.returncode, full):
+        out = out.decode('latin-1')[-2000:]
+        if out_of_memory(p.returncode, out):
             return None, OOM, time.time() - t
         return p.returncode, out, time.time() - t
     except subprocess.TimeoutExpired:
