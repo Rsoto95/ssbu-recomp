@@ -1815,6 +1815,49 @@ static void sec_rooms(void) {
 #ifdef _WIN32
 static void about_update_ui(void);                         /* (below: Check for updates) */
 #endif
+#ifdef __linux__
+/* (2026-11-08, owner: "pon ese dropdown en linux tambien": a friend on Linux had no way to choose staging) F1 > About >
+ * Version to follow on Linux: play.sh (scripts/run.py) passes GitHub's branches (SSBU_BRANCHES, from git ls-remote) and the
+ * clone's own (SSBU_UPDATE_BRANCH); a choice is written to <repo>/update_channel.txt and the next ./play.sh switches the
+ * clone to it and builds the game program again (run.py linux_update). Choosing the branch it is on again cancels. */
+#include <ctype.h>
+static int linux_branch_ok(const char *b) {
+    if (!b || !*b || strlen(b) >= 128 || strstr(b, "..") || b[0] == '/' || b[0] == '-') return 0;
+    for (const char *q = b; *q; q++) if (!isalnum((unsigned char)*q) && !strchr("._/-", *q)) return 0;
+    return 1;
+}
+static void about_update_ui_linux(void) {
+    const char *dir = getenv("SSBU_UPDATE_DIR"), *cur = getenv("SSBU_UPDATE_BRANCH"), *list = getenv("SSBU_BRANCHES");
+    const char *now = cur && *cur ? cur : "main";
+    static char chosen[128];
+    ImGui::Separator();
+    if (!dir || !*dir) { ImGui::TextDisabled("Updates: open the game with ./play.sh to choose a version."); return; }
+    if (!chosen[0]) snprintf(chosen, sizeof chosen, "%s", now);
+    char pick[128] = "";
+    ImGui::SetNextItemWidth(320);
+    if (ImGui::BeginCombo("Version to follow##branch", !strcmp(chosen, "main") ? "main (normal)" : chosen)) {
+        if (ImGui::Selectable("main (normal)", !strcmp(chosen, "main"))) snprintf(pick, sizeof pick, "main");
+        for (const char *q = list ? list : ""; *q; ) {
+            while (*q == ' ') q++;
+            const char *e = strchr(q, ' '); size_t n = e ? (size_t)(e - q) : strlen(q);
+            char b[128]; if (n && n < sizeof b) { memcpy(b, q, n); b[n] = 0;
+                if (strcmp(b, "main") && linux_branch_ok(b) && ImGui::Selectable(b, !strcmp(chosen, b))) snprintf(pick, sizeof pick, "%s", b); }
+            q += n;
+        }
+        ImGui::EndCombo();
+    }
+    if (pick[0] && linux_branch_ok(pick)) {
+        char p[1024]; snprintf(p, sizeof p, "%s/update_channel.txt", dir);
+        snprintf(chosen, sizeof chosen, "%s", pick);
+        if (!strcmp(pick, now)) remove(p);
+        else { FILE *f = fopen(p, "w"); if (f) { fprintf(f, "%s\n", pick); fclose(f); } }
+        printf("menu: version to follow: %s (on %s now; %s)\n", pick, now, strcmp(pick, now) ? "switched at the next ./play.sh" : "nothing to switch"); fflush(stdout);
+    }
+    if (strcmp(chosen, now)) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Close the game and open ./play.sh again: it switches to \"%s\" and builds it (a few minutes).", chosen);
+    else help(strcmp(now, "main") ? "You are on a TEST version. To go back: choose \"main (normal)\", close the game, open ./play.sh again."
+                                  : "main = the normal version. To test another: choose it, close the game, open ./play.sh again.");
+}
+#endif
 static void sec_about(void) {
 #ifdef _WIN32
     ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Windows");
@@ -1830,6 +1873,9 @@ static void sec_about(void) {
     ImGui::Text("controllers.ini: %s", nnpad_config_path());
 #ifdef _WIN32
     about_update_ui();
+#endif
+#ifdef __linux__
+    about_update_ui_linux();
 #endif
     ImGui::Separator();
     help("No game content is part of this program: it runs the game files you dumped from your own console.");
