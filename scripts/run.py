@@ -236,6 +236,66 @@ def dev_update(gini):
     return changed
 
 
+def linux_update(gini):
+    """(2026-11-08, owner: "haz que linux se actualice solo") play.sh on Linux: a git clone built here (no prebuilt game
+    program). When GitHub's branch of this copy has newer commits: `git pull --ff-only`, then the game program is built
+    again (setup.py --target linux --only link: the runtime's changed sources; a few minutes). True when the code changed
+    (run.py starts again with it). Nothing when graphics.ini auto_update = off, after a restart (SSBU_PLAY_UPDATED), with
+    changes not committed, or without internet. play.sh itself is never changed by an update (bash reads it while it runs)."""
+    if os.environ.get('SSBU_PLAY_UPDATED') or ini_get(gini, 'auto_update') in ('off', '0', 'no', 'false'):
+        return False
+    if not os.path.exists(os.path.join(REPO, '.git')):
+        return False
+    git = lambda *args, **k: subprocess.run(['git', '-C', REPO] + list(args), capture_output=True, text=True, **k)
+    try:
+        branch = git('rev-parse', '--abbrev-ref', 'HEAD', timeout=20).stdout.strip()
+        if not branch or branch == 'HEAD':
+            return False
+        f = git('fetch', '-q', 'origin', branch, timeout=60)
+        if f.returncode:
+            print('Update check skipped (git fetch: %s): playing this version.' % (f.stderr.strip().splitlines() or ['failed'])[-1])
+            return False
+        head, theirs = git('rev-parse', 'HEAD').stdout.strip(), git('rev-parse', 'FETCH_HEAD').stdout.strip()
+        if not theirs or head == theirs or git('merge-base', '--is-ancestor', theirs, 'HEAD').returncode == 0:
+            return False
+    except (OSError, subprocess.SubprocessError) as e:
+        print('Update check skipped (%s): playing this version.' % e)
+        return False
+    print('=' * 78)
+    print('A new version of the game is on GitHub (%s, branch %s): updating before the game starts.' % (theirs[:7], branch))
+    dirty = git('status', '--porcelain', '--untracked-files=no').stdout.strip()
+    if dirty:
+        print('NOT updated: files of the project have changes that are not committed (commit or stash them first):')
+        print(dirty)
+        print('=' * 78, flush=True)
+        return False
+    rc = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only', 'origin', branch]).returncode
+    if rc:
+        print('NOT updated: git pull --ff-only failed (code %d): this copy has commits GitHub does not have.' % rc)
+        print('=' * 78, flush=True)
+        return False
+    print('Code updated (%s -> %s). Building the game program again (a few minutes; do not close this window).' % (head[:7], git('rev-parse', 'HEAD').stdout.strip()[:7]), flush=True)
+    # (setup.py checks the dump at every run: the folders this build was made from, as its state.json keeps them)
+    dump = []
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(gini)), 'state.json'), encoding='utf-8') as f:
+            d = json.load(f).get('dump') or {}
+        for k in ('exefs', 'romfs', 'sysdata'):
+            if d.get(k):
+                dump += ['--' + k, d[k]]
+    except (OSError, ValueError):
+        pass
+    cmd = [sys.executable, '-u', os.path.join(REPO, 'scripts', 'setup.py'), '--target', 'linux'] + dump + ['--only', 'link']
+    rc = subprocess.run(cmd, cwd=REPO).returncode
+    if rc:
+        print('\nThe game program was not built again (code %d): the game starts with the one built before. To finish it by hand:' % rc)
+        print('  ' + ' '.join(cmd))
+    else:
+        print('\nUpdate installed.')
+    print('=' * 78, flush=True)
+    return True
+
+
 def update_watch_wanted(gini):
     """(fork, 2026-11-01) the same conditions as auto_update, minus the restart guard: a player's installed copy, not a git checkout.
     (2026-11-02) A git checkout too with auto_update = ask: it is told, and updates only when "Update and restart" is pressed."""
@@ -535,7 +595,11 @@ def main():
         if not os.path.exists(os.path.join(a.build, 'state.json')):
             print('no build in %s: run scripts/setup.py --target linux first (BUILDING_LINUX.md)' % a.build)
             return 1
-        if a.play and not a.log:                      # (2026-11-06) the game's log to a file, the last 10 kept, as on macOS:
+        if a.play and a.exe in (None, 'ssbu_native') and linux_update(os.path.join(a.build, 'config', 'graphics.ini')):
+            # the new run.py (and the rest) runs from here on; the launcher's own arguments again
+            return subprocess.run([sys.executable, os.path.abspath(__file__)] + sys.argv[1:],
+                                  env=dict(os.environ, SSBU_PLAY_UPDATED='1')).returncode
+        if a.play and not a.log:                     # (2026-11-06) the game's log to a file, the last 10 kept, as on macOS:
             logs = os.path.join(a.build, 'logs')      # what is sent to the group's server after each online match
             os.makedirs(logs, exist_ok=True)
             a.log = os.path.join(logs, time.strftime('game_%Y%m%d_%H%M%S.log'))

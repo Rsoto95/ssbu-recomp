@@ -147,6 +147,13 @@ against every library, so a broken package shows there and not an hour later.
 It works from any folder (a symlink to it in `~/bin` is fine) and takes the options of `scripts/run.py` (`./play.sh --help`).
 The game's output shows in the terminal and is kept in `~/.local/share/ssbu-recomp/last_run.log`.
 
+**Updates (2026-11-08):** `play.sh` keeps the game up to date by itself. Before the game starts it asks GitHub whether the
+branch of this copy has newer commits; when it does, it runs `git pull --ff-only` and builds the game program again
+(`setup.py --target linux --only link`, with the dump folders this build was made from: a few minutes). Nothing is updated
+when files of the project have changes that are not committed, without internet, or with `auto_update = off` in
+`build-linux/config/graphics.ini`. If the build fails, the game starts with the program built before and the command to
+finish it is printed. (A change to the lifter or the build tools still needs `setup.py --target linux --from lift` by hand.)
+
 - Saves go to `~/.local/share/ssbu-recomp/userdata` (`--userdata <folder>` for another one).
 - `scripts/linux/install_desktop.sh` adds **Super Smash Bros. Ultimate (recomp)** to your application menu; the game's
   output of the last start is then in `~/.local/share/ssbu-recomp/last_run.log`. `--remove` takes it out again.
