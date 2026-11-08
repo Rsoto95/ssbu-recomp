@@ -251,6 +251,31 @@ def linux_update(gini):
         branch = git('rev-parse', '--abbrev-ref', 'HEAD', timeout=20).stdout.strip()
         if not branch or branch == 'HEAD':
             return False
+        # (2026-11-08) F1 > About > Version to follow (menu.cpp, Linux) wrote update_channel.txt: this clone switches to that
+        # branch now and the game program is built again below. The file is a one-time request here (removed once done),
+        # so a clone checked out by hand on another branch is not pulled back by an old choice.
+        import update
+        want = update.channel_branch() if os.path.exists(update.CHANNEL_FILE) else branch
+        if want != branch:
+            if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
+                print('NOT switched to the version "%s" chosen in F1: files of the project have changes that are not committed.' % want)
+                return False
+            f = git('fetch', '-q', 'origin', want, timeout=60)
+            if f.returncode or git('checkout', '-q', '-B', want, 'FETCH_HEAD').returncode:
+                print('NOT switched to the version "%s" chosen in F1 (git: %s): playing this version.' % (want, (f.stderr.strip().splitlines() or ['checkout failed'])[-1]))
+                return False
+            try:
+                os.remove(update.CHANNEL_FILE)
+            except OSError:
+                pass
+            print('=' * 78)
+            print('Switched to the version "%s" chosen in F1 > About (was "%s"). Building the game program again (a few minutes; do not close this window).' % (want, branch), flush=True)
+            return linux_rebuild(gini)
+        if os.path.exists(update.CHANNEL_FILE):
+            try:
+                os.remove(update.CHANNEL_FILE)
+            except OSError:
+                pass
         f = git('fetch', '-q', 'origin', branch, timeout=60)
         if f.returncode:
             print('Update check skipped (git fetch: %s): playing this version.' % (f.stderr.strip().splitlines() or ['failed'])[-1])
@@ -275,6 +300,11 @@ def linux_update(gini):
         print('=' * 78, flush=True)
         return False
     print('Code updated (%s -> %s). Building the game program again (a few minutes; do not close this window).' % (head[:7], git('rev-parse', 'HEAD').stdout.strip()[:7]), flush=True)
+    return linux_rebuild(gini)
+
+
+def linux_rebuild(gini):
+    """The game program built again after linux_update changed the code (setup.py --target linux --only link). True."""
     # (setup.py checks the dump at every run: the folders this build was made from, as its state.json keeps them)
     dump = []
     try:
@@ -735,6 +765,17 @@ def main():
                     if os.path.isfile(p)), None)
         if icd:
             env['VK_DRIVER_FILES'] = icd
+    if a.play and a.linux and os.path.exists(os.path.join(REPO, '.git')):
+        # (2026-11-08, owner: "pon ese dropdown en linux tambien") F1 > About > Version to follow on Linux: the branches of
+        # GitHub (git ls-remote, here, so the game needs no web code) and the one this clone is on; a choice is written to
+        # update_channel.txt and linux_update switches to it at the next ./play.sh
+        env['SSBU_UPDATE_DIR'] = REPO
+        try:
+            env['SSBU_UPDATE_BRANCH'] = subprocess.run(['git', '-C', REPO, 'rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True, timeout=20).stdout.strip() or 'main'
+            out = subprocess.run(['git', '-C', REPO, 'ls-remote', '--heads', 'origin'], capture_output=True, text=True, timeout=20).stdout
+            env['SSBU_BRANCHES'] = ' '.join(l.split('refs/heads/', 1)[1].strip() for l in out.splitlines() if 'refs/heads/' in l)
+        except (OSError, subprocess.SubprocessError):
+            pass
     if a.play and os.name == 'nt' and not (a.linux or a.mac) and a.exe == main_exe and update_watch_wanted(gini):
         flag = os.path.join(a.build, 'update_ready.txt')    # (fork) a newer version found while playing (update_watch)
         try:
