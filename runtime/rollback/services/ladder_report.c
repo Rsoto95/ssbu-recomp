@@ -65,10 +65,12 @@ void ladder_fight_off(void) {
     g_lr_gone = 0;
     memset(g_lr_ring, 0, sizeof g_lr_ring);
     memset(g_lr_dmg, 0, sizeof g_lr_dmg);
-    if (!lr_on() || !have) return;
-    {   int rbn_spectating(void); if (rbn_spectating()) return; }      /* (2026-11-02) a Battle Arena's spectator: not its match */
+    if (!lr_on()) return;
+    /* (2026-11-08) the result is the score's and the arena's too, not only the ladder's: every gate that cuts it says so */
+    if (!have) { printf("[online] result: no final sample of the match (nothing sent)\n"); fflush(stdout); return; }
+    {   int rbn_spectating(void); if (rbn_spectating()) { printf("[online] result: a spectator's view (nothing sent)\n"); fflush(stdout); return; } }   /* (2026-11-02) a Battle Arena's spectator: not its match */
     memset(&r, 0, sizeof r);
-    if (!dm_ladder_match(&r.rule_kind, &r.stock, r.chara, &r.stage)) return;   /* (not an agreed online match: never ranked) */
+    if (!dm_ladder_match(&r.rule_kind, &r.stock, r.chara, &r.stage)) { printf("[online] result: not an agreed online match (nothing sent)\n"); fflush(stdout); return; }
     r.seed = rbn_match_seed();
     r.slot = rbn_local_player();
     for (int k = 0; k < 2; k++) { r.stocks[k] = s.stocks[k]; r.dmg10[k] = dmg10(s.dmg[k]); }

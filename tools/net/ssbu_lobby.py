@@ -869,8 +869,9 @@ class TourneyMixin:
         sid, by = rep["sid"], list(rep["by"].values())
         wins = {r["win"] for r in by}
         why = rep.get("why") or next((r["why"] for r in by if r["bad"]), "") or ("a draw" if None in wins else "the two games disagree" if len(wins) > 1 else "")
+        counted = False
         if why and t.is_ladder() and self.lq_dc_loser(t, sid, by, why, now):
-            pass                                    # (the player who lost the connection lost the set: lq_dc_loser)
+            counted = True                          # (the player who lost the connection lost the set: lq_dc_loser)
         elif why:
             p = t.proc(sid)
             if p is not None:
@@ -882,6 +883,7 @@ class TourneyMixin:
             self.say("tournament %d: set %d: a game was not counted (%s)" % (t.id, sid, why))
             t.changed()
         else:
+            counted = True
             w = wins.pop()
             out = t.game_result(sid, w, chara=by[0]["chara"])
             sc = t.score(sid)
@@ -892,6 +894,11 @@ class TourneyMixin:
                 ch = t.champion()
                 self.say("tournament %d: over, %s won it" % (t.id, t.entrants[ch]["name"] if ch is not None and ch >= 0 else "?"))
         self.t_changed(t, now)
+        if t.is_ladder():                           # (2026-11-08) both games learn the outcome (after t_rate: the set score is current)
+            ps = [self.t_client(t, e) if 0 <= e < len(t.entrants) else None for e in t.view[sid]["p"]]     # (BYE = -1)
+            for x, o in ((ps[0], ps[1]), (ps[1], ps[0])):
+                if x is not None and x.ladder_id is not None:
+                    self.ladder_ack(x, seed, OUT_OK if counted else OUT_DISPUTED, o)
 
     def t_sweep(self, now):
         """the tournaments' clocks (stage steps, no-shows: tournament.py sweep); a game with one report only after
@@ -1231,10 +1238,13 @@ class Lobby(TourneyMixin):
         elif kind == RESULT and len(p) >= RESULT_LEN and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             # (2026-11-03) ratings change only with a whole set of the ladder queue (or of a rated tournament: t_rate);
             # a casual rollback match (Smash, a Battle Arena) is never ranked. The ack ends the game's resending.
+            # (2026-11-08) a ladder set's game: "waiting" until both games' RESULTs agree (t_settle then acks both with the outcome);
+            # any other game stays "not ranked". The ack goes out before t_result, which may settle the set and ack too.
+            act = self.t_active(c)
+            self.ladder_ack(c, struct.unpack_from(">Q", p, 12)[0], OUT_WAIT if act is not None and act[0].is_ladder() else OUT_UNRANKED)
             self.score_result(c, p, now)
             self.arena_result(c, p, now)
             self.t_result(c, p, now)
-            self.ladder_ack(c, struct.unpack_from(">Q", p, 12)[0], OUT_UNRANKED)
         elif kind == TOURNEY and len(p) >= 23 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.on_tourney(c, p, now)
         elif kind == ARENA and len(p) >= 13 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
