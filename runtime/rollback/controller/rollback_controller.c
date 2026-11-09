@@ -307,6 +307,7 @@ static void rbg_step_body(Ctx *c) {
         }
         if (g_rbg_wdfix) g_ra_wd_pause = 1;
         g_rbg_in_match = 1;
+        { void wp_snapshot(void); wp_snapshot(); }      /* (winprobe, SSBU_WIN_PROBE=1 only) the match block at the start */
         if (i > 0) LOG("r1: RB NET: the base state was made %lld passes after the first safe point with the fight on (fight frame %lld): it is frame %lld, as on the other game (net3)\n", i, g_rbg_ff_first, i);
         rbn_start(i);
         rbn_pass_hash(0);                               /* (hs12) the checksum of frame 1 starts here (run tw8: frame-line lines from before the base, a different number on the two games, made frame 1 of match 2 differ) */
@@ -806,6 +807,7 @@ static void rb_mem_report(const char *when) {
 void rbg_fight_off(void) {
     if (!g_rbg_in_match) return;
     rb_fault_report();                                  /* once per match: the safety net and the quiet states (fault_recovery.c, snapshot_ring.c) */
+    { void wp_report(void); if (g_rbg_in_match == 1) wp_report(); }                 /* (winprobe, SSBU_WIN_PROBE=1 only) the changes by the end */
     { void ladder_fight_off(void); if (g_rbg_in_match == 1) ladder_fight_off(); }   /* (lobby 1.5) an agreed rollback match: its result to the ladder (ladder_report.c) */
     if (g_rbg_in_match == 1) {                          /* (2026-11-05) a PC at its limit: the sound off from the next fight (never over a choice in F1) */
         int over = 0, n = 0;

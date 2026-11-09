@@ -945,3 +945,27 @@ int dm_ladder_stocks(int entry) { uint64_t r = fighter_info_record(entry); retur
  * 0x71020c9e50: record + 0xcc + 0xd0 + 0xd4). It counts the fall at once, the last one too: the stock count (+ 0xd8) of a
  * fighter KO'd on its last stock stays 1 (no rebirth comes), so "1 / 1" at the end told nobody who won. -1 = no record */
 int dm_ladder_deaths(int entry) { uint64_t r = fighter_info_record(entry); return r ? (int)(rd32(r + 0xcc) + rd32(r + 0xd0) + rd32(r + 0xd4)) : -1; }
+
+/* (2026-11-08) WINPROBE, diagnostic only: SSBU_WIN_PROBE=1. The game's global match block (MELEE_INFO) is saved when an
+ * agreed online match starts and compared when it ends (rollback_controller.c); the bytes that changed are printed, so that
+ * the one that says who won can be found by playing two fights and noting the winner of each. Nothing is changed in the game. */
+static uint8_t g_wp_snap[0x1000];
+static int g_wp_on = -1, g_wp_have;
+static int wp_on(void) { if (g_wp_on < 0) { const char *e = getenv("SSBU_WIN_PROBE"); g_wp_on = e && e[0] == '1'; } return g_wp_on; }
+void wp_snapshot(void) {
+    if (!wp_on()) return;
+    g_wp_have = safe_read(MELEE_INFO, g_wp_snap, sizeof g_wp_snap) ? 1 : 0;
+    printf("[winprobe] match block saved at the start (%s)\n", g_wp_have ? "ok" : "NOT READABLE"); fflush(stdout);
+}
+void wp_report(void) {
+    if (!wp_on()) return;
+    static uint8_t now[0x1000];
+    if (!g_wp_have || !safe_read(MELEE_INFO, now, sizeof now)) { printf("[winprobe] no match block at the end\n"); fflush(stdout); return; }
+    int n = 0;
+    for (int o = 0; o < (int)sizeof now; o++) if (now[o] != g_wp_snap[o]) {
+        if (n < 400) printf("[winprobe] +0x%03x: %02x -> %02x\n", o, g_wp_snap[o], now[o]);
+        n++;
+    }
+    printf("[winprobe] %d bytes changed in the match block by the end (window 0x1000)\n", n); fflush(stdout);
+    g_wp_have = 0;
+}
