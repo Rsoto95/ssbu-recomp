@@ -716,7 +716,11 @@ void net_ladder_result(const NetLadderResult *r) {
     uint32_t dst = nnldn_other_ip();
     if (!dst) dst = g_rb_match_peer;
     if (!dst) dst = g_rb_peer;
-    if (!g_ld_on || !net_rb_ready() || !dst || !r->seed) return;
+    /* (2026-11-08) not gated on the ladder's identity (g_ld_on): the lobby counts the score and the arena from this too */
+    if (!net_rb_ready() || !dst || !r->seed) {
+        say("ladder: result not sent (%s, the other game's address %s)", !net_rb_ready() ? "not on the lobby's rollback link" : "no address", dst ? "known" : "unknown");
+        return;
+    }
     uint8_t *p = g_ld_res;
     InterlockedExchange(&g_ld_res_left, 0);
     hdr(p, T_RESULT); s64(p + 4, g_cookie); s64(p + 12, r->seed); s32(p + 20, dst);

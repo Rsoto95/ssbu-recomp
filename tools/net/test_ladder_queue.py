@@ -228,6 +228,22 @@ class LadderQueueTest(TL.TournamentLobbyTest):
         self.assertGreater(int(v["lr"][5]), int(v["lr"][4]))
         self.assertTrue(any("lost the connection" in l for l in self.lines))
 
+    def test_ladder_game_acks_waiting_then_counted(self):
+        """(2026-11-08) a ladder set's game is acked "waiting" by its first RESULT, and both games learn "counted" once the two
+        RESULTs agree (before, every RESULT was acked "not ranked", so the game showed a ranked match as unranked)"""
+        a, b = self.fake("Rober"), self.fake("napky")
+        a.view(0, L.T_LADDER_JOIN)
+        b.view(0, L.T_LADDER_JOIN)
+        time.sleep(0.6)
+        h, g = self.to_fight(a, b)
+        seed = 0x6666
+        result(h, seed, g.ip, 0, (2, 1), chara("mario"), chara("fox"))
+        self.assertEqual(h.ack(seed)[0], L.OUT_WAIT)
+        result(g, seed, h.ip, 1, (2, 1), chara("mario"), chara("fox"))
+        self.assertEqual(g.ack(seed)[0], L.OUT_WAIT)
+        self.assertEqual(h.ack(seed)[0], L.OUT_OK)
+        self.assertEqual(g.ack(seed)[0], L.OUT_OK)
+
     def test_casual_match_not_ranked(self):
         a, b = self.fake("Rober"), self.fake("napky")
         a.match(L.KIND_ROLLBACK, 1)
@@ -240,6 +256,35 @@ class LadderQueueTest(TL.TournamentLobbyTest):
         time.sleep(0.2)
         table = json.loads(self.get("/ladder.json"))
         self.assertEqual([(r["wins"], r["losses"]) for r in table], [(0, 0), (0, 0)])
+
+    def test_casual_match_counts_the_score(self):
+        """(2026-11-08) the win counter (1.8 score) is the casual match's too: both games send the same RESULT, the
+        stocks left are the rule's stocks less the falls (flag 4), and the lobby says who beat whom"""
+        a, b = self.fake("Rober"), self.fake("napky")
+        a.match(L.KIND_ROLLBACK, 1)
+        b.match(L.KIND_ROLLBACK, 1)
+        a.until(L.MS_MATCHED)
+        b.until(L.MS_MATCHED)
+        flags = L.F_STOCKS_FALLS
+        for f, o, slot in ((a, b, 0), (b, a, 1)):
+            f.tx(L.RESULT, struct.pack(">QQIBBBBI", f.cookie, 0x9100, o.ip, slot, LD.RULE_STOCK, 3, flags, 7)
+                 + struct.pack(">QQBBHHII", chara("mario"), chara("fox"), 3, 1, 0, 0, 9000, 0))
+        time.sleep(0.3)
+        self.assertTrue(any("score: Rober beat napky" in l for l in self.lines), "".join(self.lines[-10:]))
+
+    def test_abandoned_finish_still_counts_the_winner(self):
+        """(2026-11-08) a match that ends with both still holding stocks (time-up, or a leaver) counts for the one with more"""
+        a, b = self.fake("Rober"), self.fake("napky")
+        a.match(L.KIND_ROLLBACK, 1)
+        b.match(L.KIND_ROLLBACK, 1)
+        a.until(L.MS_MATCHED)
+        b.until(L.MS_MATCHED)
+        flags = L.F_STOCKS_FALLS | 1                                # 1 = abandoned, as the game marks it when both still hold stocks
+        for f, o, slot in ((a, b, 0), (b, a, 1)):
+            f.tx(L.RESULT, struct.pack(">QQIBBBBI", f.cookie, 0x9200, o.ip, slot, LD.RULE_STOCK, 3, flags, 7)
+                 + struct.pack(">QQBBHHII", chara("mario"), chara("fox"), 2, 1, 0, 0, 9000, 0))
+        time.sleep(0.3)
+        self.assertTrue(any("score: Rober beat napky" in l for l in self.lines), "".join(self.lines[-10:]))
 
 
 if __name__ == "__main__":
