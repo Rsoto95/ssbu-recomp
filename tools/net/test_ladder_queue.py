@@ -272,6 +272,20 @@ class LadderQueueTest(TL.TournamentLobbyTest):
         time.sleep(0.3)
         self.assertTrue(any("score: Rober beat napky" in l for l in self.lines), "".join(self.lines[-10:]))
 
+    def test_abandoned_finish_still_counts_the_winner(self):
+        """(2026-11-08) a match that ends with both still holding stocks (time-up, or a leaver) counts for the one with more"""
+        a, b = self.fake("Rober"), self.fake("napky")
+        a.match(L.KIND_ROLLBACK, 1)
+        b.match(L.KIND_ROLLBACK, 1)
+        a.until(L.MS_MATCHED)
+        b.until(L.MS_MATCHED)
+        flags = L.F_STOCKS_FALLS | 1                                # 1 = abandoned, as the game marks it when both still hold stocks
+        for f, o, slot in ((a, b, 0), (b, a, 1)):
+            f.tx(L.RESULT, struct.pack(">QQIBBBBI", f.cookie, 0x9200, o.ip, slot, LD.RULE_STOCK, 3, flags, 7)
+                 + struct.pack(">QQBBHHII", chara("mario"), chara("fox"), 2, 1, 0, 0, 9000, 0))
+        time.sleep(0.3)
+        self.assertTrue(any("score: Rober beat napky" in l for l in self.lines), "".join(self.lines[-10:]))
+
 
 if __name__ == "__main__":
     unittest.main()

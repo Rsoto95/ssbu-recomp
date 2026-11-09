@@ -1381,7 +1381,9 @@ class Lobby(TourneyMixin):
         """RESULT of a rollback match: the winner's win and the loser's loss, once per match"""
         seed, peer, slot, rule_kind, stock, flags = struct.unpack_from(">QIBBBB", p, 12)
         s0, s1, d0, d1 = struct.unpack_from(">BBHH", p, 48)
-        if seed in self.score_seeds or slot > 1 or not flags & F_STOCKS_FALLS or flags & 3:
+        # (2026-11-08) every finished match counts its winner, abandoned or not: the stocks left at the end decide it
+        # (a match that ends with both still holding stocks is a time-up or a leaver, and the one with more stocks wins)
+        if seed in self.score_seeds or slot > 1 or not flags & F_STOCKS_FALLS:
             return
         win = 0 if s0 > s1 else 1 if s1 > s0 else 0 if d0 < d1 else 1 if d1 < d0 else None
         if win is None:
