@@ -228,20 +228,47 @@ uint64_t net_copy_id(void) {
     if (ini_value("ladder_id", v, sizeof v) && hex_bytes(v, id, LD_ID)) memcpy(&r, id, sizeof r);
     return r;
 }
+static int ladder_new_identity(void) {                  /* a new random id and key, written to graphics.ini; 1 = written */
+    char t[2 * LD_KEY + 1];
+    for (int i = 0; i < LD_ID; i += 8) { uint64_t r = rnd64(); memcpy(g_ld_id + i, &r, 8); }
+    for (int i = 0; i < LD_KEY; i += 8) { uint64_t r = rnd64(); memcpy(g_ld_key + i, &r, 8); }
+    hex_text(g_ld_id, LD_ID, t);
+    int ok = gfx_ini_set("ladder_id", t);
+    hex_text(g_ld_key, LD_KEY, t);
+    ok &= gfx_ini_set("ladder_key", t);
+    gfx_ini_set("ladder_registered", "0");
+    InterlockedExchange(&g_ld_registered, 0);
+    return ok;
+}
+/* (2026-11-09) this PC's id for the lobby: the first 16 bytes of SHA-256 of the Windows install's MachineGuid. The lobby
+ * keeps the PC an identity was first used on; the same identity from another PC (a game folder copied over, graphics.ini
+ * with it) is told so (WELCOME status 3) and makes a new one. 0 = none (not Windows, or not readable): no check. */
+static uint8_t g_ld_machine[16];
+static int g_ld_have_machine = -1;
+static int ladder_machine(void) {
+    if (g_ld_have_machine >= 0) return g_ld_have_machine;
+    g_ld_have_machine = 0;
+#ifdef _WIN32
+    char guid[64] = "";
+    DWORD gl = sizeof guid;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                     NULL, guid, &gl) == ERROR_SUCCESS && guid[0]) {
+        Sha256 s;
+        uint8_t h[32];
+        sha256_init(&s); sha256_add(&s, (const uint8_t *)"ssbu-machine:", 13); sha256_add(&s, (const uint8_t *)guid, strlen(guid)); sha256_end(&s, h);
+        memcpy(g_ld_machine, h, sizeof g_ld_machine);
+        g_ld_have_machine = 1;
+    }
+#endif
+    return g_ld_have_machine;
+}
 static void ladder_config(void) {
-    char v[160], t[2 * LD_KEY + 1];
+    char v[160];
     const char *e = getenv("SSBU_LADDER");
     g_ld.state = NET_LADDER_OFF; g_ld.last_outcome = -1;
     if (e && is_off(e)) return;
     if (!(ini_value("ladder_id", v, sizeof v) && hex_bytes(v, g_ld_id, LD_ID)) || !(ini_value("ladder_key", v, sizeof v) && hex_bytes(v, g_ld_key, LD_KEY))) {
-        for (int i = 0; i < LD_ID; i += 8) { uint64_t r = rnd64(); memcpy(g_ld_id + i, &r, 8); }
-        for (int i = 0; i < LD_KEY; i += 8) { uint64_t r = rnd64(); memcpy(g_ld_key + i, &r, 8); }
-        hex_text(g_ld_id, LD_ID, t);
-        int ok = gfx_ini_set("ladder_id", t);
-        hex_text(g_ld_key, LD_KEY, t);
-        ok &= gfx_ini_set("ladder_key", t);
-        gfx_ini_set("ladder_registered", "0");
-        if (!ok) { printf("[online] ladder: graphics.ini cannot be written: no ladder identity\n"); fflush(stdout); return; }
+        if (!ladder_new_identity()) { printf("[online] ladder: graphics.ini cannot be written: no ladder identity\n"); fflush(stdout); return; }
         printf("[online] ladder: a new ladder identity was made (graphics.ini ladder_id / ladder_key; keep them to keep your rating)\n");
     }
     g_ld_registered = ini_value("ladder_registered", v, sizeof v) && !is_off(v);
@@ -251,19 +278,23 @@ static void ladder_config(void) {
     g_ld.state = NET_LADDER_UNKNOWN;
 }
 /* JOIN's 'L''D' block (after the 'M''S' block): version 1, id[16], HMAC-SHA256(key, nonce as sent)[32], flags u8 (1: the
- * sign-up follows: key[32], invitation length u8, invitation) */
+ * sign-up follows: key[32], invitation length u8, invitation), then (2026-11-09) 'M''C' + this PC's id[16] (ladder_machine;
+ * an older lobby ignores it) */
 static int ladder_block(uint8_t *p, const uint8_t *nonce) {
     if (!g_ld_on) return 0;
     int n = 0, il = (int)strlen(g_ld_invite);
     p[n++] = 'L'; p[n++] = 'D'; p[n++] = 1;
     memcpy(p + n, g_ld_id, LD_ID); n += LD_ID;
     hmac_sha256(g_ld_key, LD_KEY, nonce, 8, p + n); n += 32;
-    if (g_ld_registered) { p[n++] = 0; return n; }
-    p[n++] = 1;
-    memcpy(p + n, g_ld_key, LD_KEY); n += LD_KEY;
-    p[n++] = (uint8_t)il;
-    memcpy(p + n, g_ld_invite, (size_t)il);
-    return n + il;
+    if (g_ld_registered) p[n++] = 0;
+    else {
+        p[n++] = 1;
+        memcpy(p + n, g_ld_key, LD_KEY); n += LD_KEY;
+        p[n++] = (uint8_t)il;
+        memcpy(p + n, g_ld_invite, (size_t)il); n += il;
+    }
+    if (ladder_machine()) { p[n++] = 'M'; p[n++] = 'C'; memcpy(p + n, g_ld_machine, sizeof g_ld_machine); n += (int)sizeof g_ld_machine; }
+    return n;
 }
 static void ladder_numbers(const uint8_t *p) {          /* rating, RD, wins, losses, place (u16 each); g_ld_lock held */
     g_ld.rating = g16(p); g_ld.rd = g16(p + 2); g_ld.wins = g16(p + 4); g_ld.losses = g16(p + 6); g_ld.place = g16(p + 8);
@@ -282,6 +313,12 @@ static void ladder_welcome(const uint8_t *p, int n) {   /* WELCOME's 'L''D' tail
     ReleaseSRWLockExclusive(&g_ld_lock);
     if (st == 1 && !g_ld_registered) { InterlockedExchange(&g_ld_registered, 1); gfx_ini_set("ladder_registered", "1"); if (g_ld_invite[0]) gfx_ini_set("ladder_invite", ""); g_ld_invite[0] = 0; }
     if (st == 2 && g_ld_registered) { InterlockedExchange(&g_ld_registered, 0); gfx_ini_set("ladder_registered", "0"); }   /* (a new ladder: sign up again) */
+    if (st == 3) {                                      /* (2026-11-09) this identity is another PC's (a copied game folder): a new one */
+        int ok = ladder_new_identity();
+        printf("[online] ladder: this identity belongs to another PC (the game folder was copied): %s\n",
+               ok ? "a new one was made for this PC" : "graphics.ini cannot be written, none made");
+        fflush(stdout);
+    }
     if (was != g_ld.state || st == 2) { printf("[online] ladder: %s%s%s\n", st == 1 ? "ranked as " : "not ranked: ", text, st == 1 ? "" : st == 2 ? " (signing up)" : ""); fflush(stdout); }
 }
 
@@ -1922,7 +1959,7 @@ static int setup(void) {                        /* (client thread) where the lob
 
 static void send_join(void) {
     enum { BASE = 4 + 8 + 2 * NAME_LEN + BUILD_LEN + 4 + 2 + 1 };
-    uint8_t p[BASE + 2 + sizeof g_mods_wire + 3 + LD_ID + 32 + 1 + LD_KEY + 1 + LD_INVITE] = {0};
+    uint8_t p[BASE + 2 + sizeof g_mods_wire + 3 + LD_ID + 32 + 1 + LD_KEY + 1 + LD_INVITE + 2 + 16] = {0};
     hdr(p, T_JOIN);
     s64(p + 4, g_nonce);
     memcpy(p + 12, g_code, strlen(g_code));
@@ -2018,7 +2055,11 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             {   static int shown; const char *ssbu_version(void);      /* the version on screen once, to compare with the others' */
                 if (!g_joined && !shown) { char t[96]; shown = 1; snprintf(t, sizeof t, "Version %s", ssbu_version()); menu_popup("Online: connected", t); } }
             InterlockedExchange(&g_joined, 1);
-            if (n > 24) { int reg = g_ld_registered; ladder_welcome(buf + 24, n - 24); if (reg && !g_ld_registered) send_join(); }   /* (ladder: an unknown id signs up at once) */
+            if (n > 24) {                              /* (ladder: an unknown id signs up at once; a copied one, with its new identity) */
+                int reg = g_ld_registered, copied = n - 24 >= 3 && buf[24] == 'L' && buf[25] == 'D' && buf[26] == 3;
+                ladder_welcome(buf + 24, n - 24);
+                if ((reg && !g_ld_registered) || copied) send_join();
+            }
             break;
         case T_RESULT_ACK:
             if (g_joined) ladder_ack(buf + 4, n - 4);

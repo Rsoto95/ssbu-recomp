@@ -135,6 +135,8 @@ class Ladder:
             self.db.execute("ALTER TABLE players ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
         if "tid" not in [r[1] for r in self.db.execute("PRAGMA table_info(sets)")]:            # (2026-11-03) the set's match page
             self.db.execute("ALTER TABLE sets ADD COLUMN tid INTEGER")
+        if "machine" not in [r[1] for r in self.db.execute("PRAGMA table_info(players)")]:     # (2026-11-09) the PC an id belongs to
+            self.db.execute("ALTER TABLE players ADD COLUMN machine BLOB")
         self.db.execute("UPDATE sets SET state = 'void', closed = ? WHERE state = 'open'", (self.now(),))   # (a restarted lobby: those sets' games are lost)
         if self.db.execute("SELECT COUNT(*) FROM seasons WHERE ended IS NULL").fetchone()[0] == 0:
             self.db.execute("INSERT INTO seasons (name, started) VALUES (?, ?)", ("Season 1", self.now()))
@@ -190,6 +192,18 @@ class Ladder:
             self.db.execute("UPDATE invites SET used_by = ? WHERE code = ?", (pid, invite))
         self.db.commit()
         return pid, name
+
+    def machine_ok(self, pid, machine):
+        """(2026-11-09) Is `machine` (the game's 16-byte PC id) the PC this account belongs to? The first PC it is seen on
+        is kept; another one is a copied game folder (graphics.ini with the id and key) and must make its own identity."""
+        row = self.db.execute("SELECT machine FROM players WHERE id = ?", (pid,)).fetchone()
+        if row is None:
+            return True
+        if row[0] is None:
+            self.db.execute("UPDATE players SET machine = ? WHERE id = ?", (machine, pid))
+            self.db.commit()
+            return True
+        return bytes(row[0]) == bytes(machine)
 
     def name_free(self, name, pid=None):
         row = self.db.execute("SELECT id FROM players WHERE name = ?", (name,)).fetchone()
