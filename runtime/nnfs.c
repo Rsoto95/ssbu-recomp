@@ -1264,6 +1264,18 @@ const char *nnfs_nickname(void) {
     while (g_nick_ready != 2) SwitchToThread();
     return name;
 }
+/* (2026-11-09) a new name for the rest of this run (net_relay.c: a copied game folder gets a random one); SSBU_NICKNAME wins */
+void nnfs_set_nickname(const char *utf8) {
+    const char *env = getenv("SSBU_NICKNAME");
+    if ((env && env[0]) || !utf8 || !utf8[0]) return;
+    nnfs_nickname();                                    /* (made first, so a later first call does not overwrite this) */
+    size_t len = strlen(utf8);
+    if (len > 32) len = 32;
+    char tmp[33];
+    memcpy(tmp, utf8, len);
+    tmp[len] = 0;
+    memcpy(g_nick, tmp, len + 1);
+}
 static void acc_out_true(Ctx *c) { wr8(A0, 1); RET(0); }
 static void acc_out_false(Ctx *c) { wr8(A0, 0); RET(0); }
 /* [sdk] 0x4b3a8 (EnsureNetworkServiceAccountAvailable): the SDK treats the account results 124-0200 .. 124-0269 from

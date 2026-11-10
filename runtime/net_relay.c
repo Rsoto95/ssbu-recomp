@@ -315,8 +315,17 @@ static void ladder_welcome(const uint8_t *p, int n) {   /* WELCOME's 'L''D' tail
     if (st == 2 && g_ld_registered) { InterlockedExchange(&g_ld_registered, 0); gfx_ini_set("ladder_registered", "0"); }   /* (a new ladder: sign up again) */
     if (st == 3) {                                      /* (2026-11-09) this identity is another PC's (a copied game folder): a new one */
         int ok = ladder_new_identity();
-        printf("[online] ladder: this identity belongs to another PC (the game folder was copied): %s\n",
-               ok ? "a new one was made for this PC" : "graphics.ini cannot be written, none made");
+        /* the name came with the folder too: a random one, as a game with no name gets (F1 > Experimental > Your name
+         * changes it); SSBU_ONLINE_NAME, a choice of this run, is kept */
+        char nm[NAME_LEN + 1], v[160];
+        snprintf(nm, sizeof nm, "Player-%04x", (unsigned)(rnd64() & 0xffff));
+        gfx_ini_set("player_name", nm);
+        if (ini_value("online_name", v, sizeof v) && *v) gfx_ini_set("online_name", nm);
+        const char *e = getenv("SSBU_ONLINE_NAME");
+        if (!(e && *e)) snprintf(g_name, sizeof g_name, "%s", nm);
+        { void nnfs_set_nickname(const char *utf8); nnfs_set_nickname(nm); }
+        printf("[online] ladder: this identity belongs to another PC (the game folder was copied): %s; the name is now %s\n",
+               ok ? "a new one was made for this PC" : "graphics.ini cannot be written, none made", nm);
         fflush(stdout);
     }
     if (was != g_ld.state || st == 2) { printf("[online] ladder: %s%s%s\n", st == 1 ? "ranked as " : "not ranked: ", text, st == 1 ? "" : st == 2 ? " (signing up)" : ""); fflush(stdout); }
