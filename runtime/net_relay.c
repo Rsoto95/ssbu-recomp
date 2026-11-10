@@ -218,6 +218,16 @@ static int hex_bytes(const char *t, uint8_t *out, int n) {
     return 1;
 }
 static void hex_text(const uint8_t *b, int n, char *out) { for (int i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", b[i]); }
+/* (2026-11-09) this copy's own random id (graphics.ini ladder_id, made once per copy by ladder_config): the Online menu's
+ * player id mixes it in (online_menu.inc om_nsa_id). Two PCs of one owner, both with the Windows user "Rober", were one
+ * player to the arena server: the second could not join the arena the first made. 0 = none yet. */
+uint64_t net_copy_id(void) {
+    char v[160];
+    uint8_t id[LD_ID];
+    uint64_t r = 0;
+    if (ini_value("ladder_id", v, sizeof v) && hex_bytes(v, id, LD_ID)) memcpy(&r, id, sizeof r);
+    return r;
+}
 static void ladder_config(void) {
     char v[160], t[2 * LD_KEY + 1];
     const char *e = getenv("SSBU_LADDER");

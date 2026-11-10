@@ -121,14 +121,34 @@ static void om_nifm_GetCurrentPrimaryIpAddress(Ctx *c) {
 }
 
 /* ---------------------------------------------------------------- nn::account: a network service account */
+uint64_t net_copy_id(void);
 static uint64_t om_nsa_id(void) {                          /* a stable id per player: FNV-1a of the nickname (phase 1: the ladder id) */
+    /* (2026-11-09) and of this copy's own random id (net_relay.c net_copy_id): the Windows user name alone made two PCs
+     * of one owner the same player (both "Rober": the arena server took the join for the creator itself). Kept for the
+     * whole run, so the id never changes under the arena server. */
+    static uint64_t id;
+    if (id) return id;
     const char *e = getenv("SSBU_NICKNAME");
     char name[64];
     DWORD n = sizeof name;
     if (!(e && *e)) { if (!GetUserNameA(name, &n)) strcpy(name, "Player"); e = name; }
     uint64_t h = 0xcbf29ce484222325ull;
     for (; *e; e++) { h ^= (uint8_t)*e; h *= 0x100000001b3ull; }
-    return h | 1;
+    uint64_t copy = net_copy_id();
+    for (int i = 0; i < 8; i++) { h ^= (uint8_t)(copy >> (8 * i)); h *= 0x100000001b3ull; }
+    /* the Windows install's own id too: a copy of the game folder (graphics.ini with it) taken to another PC is another player */
+    char guid[64] = "";
+#ifdef _WIN32
+    DWORD gl = sizeof guid;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                     NULL, guid, &gl) != ERROR_SUCCESS) {
+        gl = sizeof guid;
+        if (!GetComputerNameA(guid, &gl)) guid[0] = 0;
+    }
+#endif
+    for (const char *g = guid; *g; g++) { h ^= (uint8_t)*g; h *= 0x100000001b3ull; }
+    id = h | 1;
+    return id;
 }
 static void om_acc_IsNsaAvailable(Ctx *c) { wr8(A0, 1); RET(0); }
 static void om_acc_ok(Ctx *c) { RET(0); }
