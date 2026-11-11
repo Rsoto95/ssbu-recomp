@@ -74,6 +74,7 @@ int osk_active(void);                                               /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
 extern "C" void display_refresh_switched(int *from, int *to);       /* display.c: refresh_switch (0, 0 = not switched) */
+extern "C" void display_refresh_undone(int *from, int *to);         /* display.c: a switch taken back (it showed 30 fps) */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 int rbg_score_slot(void);                                            /* rollback_controller.c: this game's player in an online fight, -1 = none */
@@ -610,6 +611,11 @@ static void sec_display(int cw, int ch) {
         if (rs_to) {       /* (2026-11-06) refresh_switch = auto set the screen to a k x 60 Hz mode while the game runs */
             ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Screen set from %d Hz to %d Hz while the game runs: every frame is shown equally long.", rs_from, rs_to);
             help("Windows puts the old rate back when the game closes. graphics.ini refresh_switch = off: the screen is never changed.");
+        }
+        int ru_from, ru_to; display_refresh_undone(&ru_from, &ru_to);
+        if (ru_to) {       /* (2026-11-11) rs_watch: at the switched rate this PC showed 30 fps */
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Screen put back to %d Hz: at %d Hz this PC showed only 30 fps.", ru_from, ru_to);
+            help("The game noticed it by itself and saved refresh_switch = off in graphics.ini: the screen is not changed again. Nothing to do.");
         }
         if (hz > 30 && k == 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Your screen runs at %.0f Hz: not a multiple of 60, so motion is uneven.", hz);

@@ -204,6 +204,35 @@ static int refresh_switch(const char *dev) {
     printf("display: REFRESH SWITCH: the screen %s set from %d Hz to %d Hz while the game runs (every frame equally long; the old rate comes back when the game closes; graphics.ini refresh_switch = off: never)%c", dev, g_rs_from, g_rs_to, 10);
     return 1;
 }
+/* (2026-11-11, Dekaeme: "iba a 30 fps y no sabe por que") a laptop with a 144 Hz panel and an RTX 3050 (Optimus) was set to
+ * 60 Hz and from then on showed exactly 30.0 fps, the menus too: the frame was done on the GPU in 8 ms, then the window
+ * texture's acquire waited ~25 ms, every frame (one picture per two refreshes). Left at 144 Hz (his runs of 11-04 / 11-05)
+ * the same PC showed 60. Now display_present_done watches the frames after a switch: 270 of 300 (loads, 100 ms or more
+ * apart, not counted) 30-37 ms apart = the new mode halves this PC's rate: the vblank thread puts the old rate back, the
+ * refresh is measured again and the lock chosen again, and graphics.ini gets refresh_switch = off (next start: not switched
+ * at all). Five windows of 300 frames without it: the watch ends. */
+static volatile LONG g_rs_undo, g_relock;           /* 1: put the old rate back (present_done -> vblank thread); 1: vsync thread chooses the lock again */
+static int g_rs_undone_from, g_rs_undone_to;        /* menu.cpp: the switch that was taken back */
+static void rs_watch(double ms) {
+    static int n, half, fine, done;
+    if (done || !g_rs_to || ms >= 100.0) return;
+    n++;
+    if (ms > 30.0 && ms < 37.0) half++;
+    if (n < 300) return;
+    if (half >= 270) {
+        done = 1;
+        printf("display: REFRESH SWITCH TAKEN BACK: at %d Hz this PC shows every frame for two refreshes (%d of the last 300 frames 30-37 ms apart = 30 fps): the screen goes back to %d Hz, and graphics.ini refresh_switch = off%c", g_rs_to, half, g_rs_from, 10);
+        InterlockedExchange(&g_rs_undo, 1);
+    } else if (++fine >= 5) done = 1;
+    n = half = 0;
+}
+static void rs_undo(const char *dev) {
+    LONG r = ChangeDisplaySettingsExA(dev, NULL, NULL, 0, NULL);       /* the mode of the registry: the one before the switch */
+    printf("display: the screen %s put back to %d Hz %s (%ld)%c", dev, g_rs_from, r == DISP_CHANGE_SUCCESSFUL ? "" : "FAILED", r, 10);
+    g_rs_undone_from = g_rs_from; g_rs_undone_to = g_rs_to;
+    g_rs_from = g_rs_to = 0;
+    gfx_ini_set("refresh_switch", "off");
+}
 static DWORD WINAPI vblank_thread(LPVOID arg) {
     (void)arg;
     HMODULE gdi = LoadLibraryA("gdi32.dll");
@@ -231,6 +260,15 @@ static DWORD WINAPI vblank_thread(LPVOID arg) {
         QueryPerformanceCounter(&now);
         if (st != 0) { if (++fails == 20) { printf("display: the vblank wait fails (status 0x%lx): display lock off%c", (unsigned long)st, 10); InterlockedExchange(&g_vb_state, -1); return 0; } Sleep(50); prev = 0; continue; }
         fails = 0;
+        if (g_rs_undo == 1) {                                          /* rs_watch: the switch halved the rate; measure the old rate again */
+            InterlockedExchange(&g_rs_undo, 2);
+            InterlockedExchange(&g_vb_state, 1);
+            InterlockedExchange(&g_relock, 1);
+            rs_undo(mi.szDevice);
+            Sleep(1500);
+            nfirst = 0; prev = 0;
+            continue;
+        }
         LONGLONG dt = prev ? now.QuadPart - prev : 0;
         prev = now.QuadPart;
         LONG64 steps = 1;
@@ -597,6 +635,9 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         pace_options();
         display_perf_thread();
         for (;;) {
+#ifdef _WIN32
+            if (g_relock && InterlockedExchange(&g_relock, 0)) { lock_tried = 0; InterlockedExchange(&g_lock_k, 0); }      /* rs_watch: the screen's rate changed back */
+#endif
             if (g_pace_want && !lock_tried && g_vb_state == 2) {                  /* session 14: the refresh is measured: lock to it or not */
                 lock_tried = 1;
                 int k = pace_try_lock();
@@ -1065,6 +1106,9 @@ void display_present_done(int fight) {
                 printf("display-late: the frame shown before presented frame %lld was on screen for %lld refreshes; %.1f ms between the two presents%s\n", (long long)g_prof15_frame, (long long)refs, ms,
                        ms >= 100.0 ? " (100 ms or more: NOT counted in the display-timing lines)" : "");
         }
+#ifdef _WIN32
+        rs_watch(ms);
+#endif
         if (ms < 100.0) for (int i = 0; i <= (fight ? 1 : 0); i++) {
             g_ps[i].n++; g_ps[i].hist[refs < 0 ? 0 : refs >= PS_HIST ? PS_HIST - 1 : refs]++; g_ps[i].sum += ms; g_ps[i].sum2 += ms * ms;
             if (g_ps[i].n == 1 || ms < g_ps[i].mn) g_ps[i].mn = ms;
@@ -1262,6 +1306,14 @@ void display_refresh_info(double *hz, int *lock_k) {
 void display_refresh_switched(int *from, int *to) {
 #ifdef _WIN32
     *from = g_rs_from; *to = g_rs_to;
+#else
+    *from = *to = 0;
+#endif
+}
+/* menu.cpp: a switch taken back by rs_watch (the switched rate showed 30 fps): from, to (0, 0: none) */
+void display_refresh_undone(int *from, int *to) {
+#ifdef _WIN32
+    *from = g_rs_undone_from; *to = g_rs_undone_to;
 #else
     *from = *to = 0;
 #endif
