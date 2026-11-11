@@ -309,7 +309,13 @@ void xww_poll(void) {
         if (g_xaddrs_cap < np) { PVOID *n = realloc(g_xaddrs, (np + 1) * sizeof *n); if (!n) { memset(g_xdirty + g_xr[i].e0, 1, np); continue; } g_xaddrs = n; g_xaddrs_cap = np; }
         ULONG_PTR cnt = np; ULONG gran = 0;
         if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, g_xr[i].a, g_xr[i].n, g_xaddrs, &cnt, &gran)) { memset(g_xdirty + g_xr[i].e0, 1, np); continue; }
-        for (ULONG_PTR k = 0; k < cnt; k++) g_xdirty[g_xr[i].e0 + (((uint8_t *)g_xaddrs[k] - g_xr[i].a) >> 12)] = 1;
+        /* (2026-11-11) GetWriteWatch answers whole pages: for a range not on page boundaries the first page lies before
+         * g_xr[i].a and the last one at np; both are kept inside this range's np marks (they were written past them) */
+        for (ULONG_PTR k = 0; k < cnt; k++) {
+            uint8_t *w = (uint8_t *)g_xaddrs[k];
+            size_t idx = w < g_xr[i].a ? 0 : (size_t)(w - g_xr[i].a) >> 12;
+            g_xdirty[g_xr[i].e0 + (idx < np ? idx : np - 1)] = 1;
+        }
     }
 }
 int xls_skip(size_t e) { if (!g_xdirty || e >= g_xn) return 0; return !g_xdirty[e]; }
