@@ -156,6 +156,7 @@ LADDER_GONE_FOR = float(os.environ.get("SSBU_LADDER_GONE_FOR", "180"))   # s: a 
 T_PLAYER_OPS = (T_STAGE, T_READY, T_UNREADY)        # (they act on the player's own set, whatever tournament it looks at)
 T_CHUNK, T_LIST, T_REPORT_WAIT, T_ERR_FOR = 1000, 8, 60.0, 8.0
 LD_UNRANKED, LD_RANKED, LD_UNKNOWN = 0, 1, 2
+LD_COPIED = 3       # (2026-11-09) the identity belongs to another PC (a copied game folder): the game makes a new one and joins again
 OUT_WAIT, OUT_OK, OUT_DRAW, OUT_DISPUTED, OUT_UNRANKED = range(5)
 RESULT_LEN = 4 + 8 + 8 + 4 + 4 + 4 + 16 + 2 + 4 + 4 + 4
 (MS_IDLE, MS_SEARCHING, MS_MATCHED, MS_TIMEOUT, MS_PEER_LEFT, MS_TOGETHER, MS_EXPIRED) = range(7)
@@ -1304,11 +1305,20 @@ class Lobby(TourneyMixin):
         if self.ladder is not None and len(ld) >= 16 + 32 + 1:
             pid, proof, flags = bytes(ld[:16]), bytes(ld[16:48]), ld[48]
             key = invite = None
+            end = 49
             if flags & 1 and len(ld) >= 49 + 32 + 1:
                 key, n = bytes(ld[49:81]), ld[81]
                 invite = text(ld[82:82 + n]) or None
+                end = 82 + n
+            # (2026-11-09) 'M''C' + the game's PC id[16] (an older game sends none: not checked)
+            machine = bytes(ld[end + 2:end + 18]) if ld[end:end + 2] == b"MC" and len(ld) >= end + 18 else None
             got, why = self.ladder.identify(pid, c.name, nonce, proof, key, invite)
-            if got is None and why == "unknown id":
+            if got is not None and machine is not None and not self.ladder.machine_ok(got, machine):
+                self.say("ladder: %s uses the identity of %s from another PC (a copied game folder): told to make its own" % (c.name, why))
+                got, why, status = None, "identity of another PC", LD_COPIED
+            if status == LD_COPIED:
+                pass
+            elif got is None and why == "unknown id":
                 status = LD_UNKNOWN
             elif got is not None:
                 status = LD_RANKED

@@ -233,8 +233,8 @@ class RankedFake(Fake):
         super().__init__(lobby, name, mods=b"\0")
         self.pid, self.key, self.invite = os.urandom(16), os.urandom(32), invite
 
-    def join_ld(self, signup=True, ld=True):
-        """JOIN with the ladder block; returns WELCOME's 'L''D' tail as (status, rating, rd, wins, losses, place, text)"""
+    def join_ld(self, signup=True, ld=True, machine=None):
+        """JOIN with the ladder block (and the PC id); returns WELCOME's 'L''D' tail as (status, rating, rd, wins, losses, place, text)"""
         port = self.s.getsockname()[1]
         block = b""
         if ld:
@@ -244,6 +244,8 @@ class RankedFake(Fake):
                 block += b"\1" + self.key + bytes((len(inv),)) + inv
             else:
                 block += b"\0"
+            if machine is not None:
+                block += b"MC" + machine
         self.tx(L.JOIN, self.nonce + self.code.ljust(32, b"\0") + self.name.encode().ljust(32, b"\0") + self.build.ljust(40, b"\0")
                 + struct.pack(">IHB", 0x7F000001, port, 1) + b"MS" + self.mods + block)
         b = self.rx(L.WELCOME)
@@ -299,6 +301,21 @@ class LobbyLadderTest(unittest.TestCase):
     def get(self, path):
         with urllib.request.urlopen("http://127.0.0.1:%d%s" % (self.sport, path), timeout=3) as r:
             return r.read().decode()
+
+    def test_a_copied_identity_from_another_pc(self):
+        pc1, pc2 = b"\x01" * 16, b"\x02" * 16
+        a = self.fake("Rob", self.inv[0])
+        self.assertEqual(a.join_ld(machine=pc1)[0::6], (L.LD_RANKED, "Roberto"))         # the first PC: the account's own
+        a2 = self.fake("Rob")                                                              # the game folder copied to another PC
+        a2.pid, a2.key = a.pid, a.key
+        self.assertEqual(a2.join_ld(signup=False, machine=pc2)[0], L.LD_COPIED)
+        a3 = self.fake("Rob")                                                              # the first PC again, and a game without the PC id
+        a3.pid, a3.key = a.pid, a.key
+        self.assertEqual(a3.join_ld(signup=False, machine=pc1)[0::6], (L.LD_RANKED, "Roberto"))
+        a4 = self.fake("Rob")
+        a4.pid, a4.key = a.pid, a.key
+        self.assertEqual(a4.join_ld(signup=False)[0::6], (L.LD_RANKED, "Roberto"))
+        self.assertTrue(any("from another PC" in l for l in self.lines))
 
     def test_accounts_through_the_lobby(self):
         a, b = self.fake("Rob", self.inv[0]), self.fake("Fre", self.inv[1])
