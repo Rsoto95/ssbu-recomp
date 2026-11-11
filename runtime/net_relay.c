@@ -1753,6 +1753,30 @@ static const char *ip_text(uint32_t ip, char *b) { snprintf(b, 16, "%u.%u.%u.%u"
 
 static uint16_t g_upnp_mapped;
 static void upnp_cleanup(void) { if (g_upnp_mapped) upnp_unmap_udp(g_upnp_mapped); }
+/* (2026-11-11) LOBBY mode: the router is asked (UPnP) to forward this game's UDP port too. A router that lets in only the
+ * address and port this game sent to dropped every packet of a player whose own router changes the port per destination
+ * (a Linux friend: "straight to the opponent sent 1080, received 0", the whole match through the lobby at 177 ms): with
+ * the port forwarded, his packets arrive from whatever port, and learn_cand answers there. In a thread of its own (the
+ * router's answer takes up to seconds; the lobby is joined meanwhile). online_upnp = off: not asked. */
+static DWORD WINAPI lobby_upnp_thread(LPVOID arg) {
+    (void)arg;
+    char why[128] = "", ext[32] = "";
+    uint16_t port = g_lan_port;
+    if (upnp_map_udp(port, g_lan_ip, "SSBU online", ext, sizeof ext, why, sizeof why)) {
+        g_upnp_mapped = port; atexit(upnp_cleanup);
+        say("lobby: UPnP: the router forwards UDP port %u to this PC%s%s (other players reach this game directly, whatever their router does)", port, ext[0] ? ", public address " : "", ext);
+        snprintf(g_upnp_text, sizeof g_upnp_text, "UPnP: the router forwards UDP port %u to this PC", port);
+    } else {
+        say("lobby: UPnP: %s (direct paths by punching only)", why);
+        snprintf(g_upnp_text, sizeof g_upnp_text, "UPnP: %s", why);
+    }
+    return 0;
+}
+static void lobby_upnp(void) {
+    if (!g_upnp || g_loopback || !g_lan_ip || !g_lan_port) return;
+    HANDLE th = CreateThread(NULL, 0, lobby_upnp_thread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
+}
 static int start_host(void) {                   /* HOST mode: the lobby in this game, its code, the NAT opened if we can */
     uint16_t port = g_host_port;
     uint32_t lan = outbound_ip(), pub = 0;
@@ -1988,7 +2012,7 @@ static int setup(void) {                        /* (client thread) where the lob
         }
         return 1;
     default:
-        if (resolve()) return 1;
+        if (resolve()) { lobby_upnp(); return 1; }
         snprintf(g_reject, sizeof g_reject, "cannot find the lobby %s", g_server);
         return 0;
     }
