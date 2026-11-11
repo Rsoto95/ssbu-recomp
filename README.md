@@ -90,7 +90,7 @@ by default; **In progress**; **Planned**.
 | One-click installer: private Python, PC check, finds keys and games in emulator folders, update + DLC, prebuilt runtime (no Visual Studio), no firmware needed, shortcuts, self-update, resume | Done |
 | Vulkan renderer (OpenGL fallback), shaders loaded at start, 16:9 window, F11 borderless | Done |
 | In-game settings menu (F1, controller Home, or − and + held 1 s; on by default): graphics, window / fullscreen / borderless, volume, full key and button remapping for keyboard and controllers per player, log viewer and export, F2 stats overlay | Done |
-| On-screen keyboard for controllers (no Windows dialogs) | Done |
+| On-screen keyboard for controllers (drawn in the game, no system dialogs) | Done |
 | Any controller through SDL3 (hot-plug, up to 8 players, rumble, gyro) | Done in automated tests with virtual devices; physical pads not yet confirmed |
 | Online play through the game's Local Wireless over a LAN, a room code or a lobby server ([docs/ONLINE.md](docs/ONLINE.md)) | Experimental |
 | Rollback netcode: input queues, wire format, time sync and a ring of game-state snapshots (up to 7 frames) are done; frames that run only the game logic come next | In progress |

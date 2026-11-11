@@ -1,9 +1,9 @@
 /* The on-screen keyboard: nn::swkbd::ShowKeyboard answered by a keyboard of our own drawn in the game's window, used
- * with any controller (like the console's own) or with the PC keyboard, instead of a Windows dialog.
+ * with any controller (like the console's own) or with the PC keyboard, instead of a system dialog.
  *
- * The picture is drawn here with GDI into a 1920x1080 bitmap (any character the game's text can hold: accents, kana...);
- * the Vulkan renderer copies that bitmap over the presented frame (nvn_vk_draw.c osk_draw) and, while the game presents
- * nothing (the calling thread waits here), presents its last frame again with it (nvn_front_osk_redraw).
+ * Windows draws the picture with GDI into a 1920x1080 bitmap; the Vulkan renderer copies it over the presented frame
+ * (nvn_vk_draw.c osk_draw). Linux / macOS publish the same state and the settings menu's Dear ImGui layer draws it
+ * (menu.cpp, osk_view); the Vulkan renderer presents its last frame again with it (nvn_front_osk_redraw).
  *
  * Controller: d-pad / left stick move, A types the key, B deletes, Y space, X switches the symbols page, L / R move the
  * text cursor, ZL or the left stick button = shift, + = OK, - = cancel. PC keyboard: type, Backspace / Delete,
@@ -13,26 +13,14 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
-
-#ifndef _WIN32
-/* Linux build: the keyboard is drawn with GDI, which Linux does not have. Every entry answers "not available here", so
- * nnapplet.c uses its other path (a desktop text dialog). */
-int osk_key(UINT msg, WPARAM w) { (void)msg; (void)w; return 0; }
-int osk_active(void) { return 0; }
-int osk_take(uint32_t *dst, LONG *seen) { (void)dst; (void)seen; return 0; }
-void osk_size(int *w, int *h) { *w = 1920; *h = 1080; }
-void osk_test_start(void) {}
-int osk_message(const wchar_t *msg, int question) { (void)msg; (void)question; return -1; }
-int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out) {
-    (void)header; (void)guide; (void)initial; (void)max_len; (void)min_len; (void)password; (void)out; return -1;
-}
-#else
+#include "menu.h"
 
 #define OSK_W 1920
 #define OSK_H 1080
-#define OSK_MAX 500
+#define OSK_MAX OSK_TEXT_MAX
 
 uint64_t nnhid_menu_buttons(void);                 /* nnhid.c */
 int nvn_front_osk_ready(void);                     /* nvn_gl.c: 1 when the Vulkan renderer runs (the only one that draws it) */
@@ -41,57 +29,16 @@ long long nvn_front_presents(void);                /* nvn_gl.c: frames presented
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN };
 
-static CRITICAL_SECTION g_lock;
-static INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
-static uint32_t *g_px;                             /* the picture (BGRA, top-down), valid while g_on */
-static volatile LONG g_on, g_version;
-static HDC g_dc;
-static HBITMAP g_bmp;
-static HFONT g_f_head, g_f_text, g_f_key, g_f_small;
-
-/* keys from the window (display.c), consumed by the loop */
-#define KQ 64
-static struct { UINT msg; WPARAM w; } g_q[KQ];
-static int g_qn;
-
-static BOOL CALLBACK osk_init(PINIT_ONCE o, PVOID p, PVOID *c) {
-    (void)o; (void)p; (void)c;
-    InitializeCriticalSection(&g_lock);
-    return TRUE;
-}
-
-/* display.c, window thread: 1 when the key went to the keyboard (the game does not see it) */
-int osk_key(UINT msg, WPARAM w) {
-    if (!g_on) return 0;
-    if (msg != WM_CHAR && msg != WM_KEYDOWN) return 0;
-    EnterCriticalSection(&g_lock);
-    if (g_qn < KQ) { g_q[g_qn].msg = msg; g_q[g_qn].w = w; g_qn++; }
-    LeaveCriticalSection(&g_lock);
-    return 1;
-}
-
-/* nvn_vk_draw.c, render thread: the picture when it changed since `*seen` (copied into dst, OSK_W x OSK_H), else NULL */
-int osk_active(void) { return g_on != 0; }
-int osk_take(uint32_t *dst, LONG *seen) {
-    if (!g_on) return 0;
-    int got = 0;
-    EnterCriticalSection(&g_lock);
-    if (g_px && *seen != g_version) { memcpy(dst, g_px, (size_t)OSK_W * OSK_H * 4); *seen = g_version; got = 1; }
-    LeaveCriticalSection(&g_lock);
-    return got;
-}
-void osk_size(int *w, int *h) { *w = OSK_W; *h = OSK_H; }
-
-/* ---------------------------------------------------------------- layout */
-#define COLS 11
-#define ROWS 4
+/* ---------------------------------------------------------------- the keyboard's state and layout (both platforms) */
+#define COLS OSK_COLS
+#define ROWS OSK_ROWS
 static const wchar_t *const k_pages[3][ROWS] = {
     {L"1234567890-", L"qwertyuiop/", L"asdfghjkl:'", L"zxcvbnm,.?!"},
     {L"1234567890_", L"QWERTYUIOP@", L"ASDFGHJKL;\"", L"ZXCVBNM<>?!"},
     {L"!@#$%^&*()_", L"~`=+[]{}\\|;", L"àèéìòùçñüöä", L"«»¿¡€£¥°ßæø"},
 };
 /* the bottom row: shift, symbols, space (wide), delete, OK */
-enum { F_SHIFT, F_SYM, F_SPACE, F_DEL, F_OK, F_N };
+enum { F_SHIFT, F_SYM, F_SPACE, F_DEL, F_ACCEPT, F_N };
 static const int k_fspan[F_N] = {2, 2, 4, 2, 1};   /* in key widths: 11 in all */
 
 typedef struct {
@@ -102,6 +49,97 @@ typedef struct {
     int row, col, page, shift_once;                /* focus: row 0..4 (4 = the bottom row), col in keys / function index */
     const wchar_t *note;                           /* a line under the text (too short ...) */
 } Osk;
+
+static CRITICAL_SECTION g_lock;
+static INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
+static volatile LONG g_on;                          /* the keyboard (or its message) is on screen */
+/* keys from the window (display.c, menu.cpp), consumed by the loop */
+#define KQ 64
+static struct { UINT msg; WPARAM w; } g_q[KQ];
+static int g_qn;
+
+static BOOL CALLBACK osk_init(PINIT_ONCE o, PVOID p, PVOID *c) {
+    (void)o; (void)p; (void)c;
+    InitializeCriticalSection(&g_lock);
+    return TRUE;
+}
+
+/* display.c / menu.cpp, window thread: 1 when the key went to the keyboard (the game does not see it) */
+int osk_key(UINT msg, WPARAM w) {
+    if (!g_on) return 0;
+    if (msg != WM_CHAR && msg != WM_KEYDOWN) return 0;
+    EnterCriticalSection(&g_lock);
+    if (g_qn < KQ) { g_q[g_qn].msg = msg; g_q[g_qn].w = w; g_qn++; }
+    LeaveCriticalSection(&g_lock);
+    return 1;
+}
+int osk_active(void) { return g_on != 0; }
+
+static wchar_t key_char(const Osk *k, int row, int col) {
+    int page = k->page == 2 ? 2 : (k->page == 1 || k->shift_once) ? 1 : 0;
+    return k_pages[page][row][col];
+}
+
+static void ins(Osk *k, wchar_t ch) {
+    if (k->len >= k->max_len || ch < 0x20) return;
+    memmove(k->text + k->cur + 1, k->text + k->cur, (size_t)(k->len - k->cur) * sizeof(wchar_t));
+    k->text[k->cur++] = ch; k->len++; k->text[k->len] = 0;
+    k->shift_once = 0;
+}
+static void del_back(Osk *k) {
+    if (k->cur <= 0) return;
+    memmove(k->text + k->cur - 1, k->text + k->cur, (size_t)(k->len - k->cur) * sizeof(wchar_t));
+    k->cur--; k->len--; k->text[k->len] = 0;
+}
+static void del_fwd(Osk *k) { if (k->cur < k->len) { k->cur++; del_back(k); } }
+
+/* 1 = OK accepted, 0 = not yet */
+static int try_ok(Osk *k) {
+    if (k->len < k->min_len) { k->note = L"The text is too short"; return 0; }
+    return 1;
+}
+
+int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);
+int osk_message(const wchar_t *msg, int question);
+
+static void move(Osk *k, int dx, int dy) {
+    if (dy) {
+        int old = k->row;
+        k->row = (k->row + dy + ROWS + 1) % (ROWS + 1);
+        if (k->row == ROWS && old != ROWS) {      /* into the bottom row: the function key under the column */
+            int c = 0, x = 0;
+            while (c < F_N - 1 && x + k_fspan[c] <= k->col) x += k_fspan[c++];
+            k->col = c;
+        } else if (old == ROWS && k->row != ROWS) {
+            int x = 0;
+            for (int c = 0; c < k->col; c++) x += k_fspan[c];
+            k->col = x;
+        }
+    }
+    if (dx) {
+        int n = k->row == ROWS ? F_N : COLS;
+        k->col = (k->col + dx + n) % n;
+    }
+}
+
+static void press(Osk *k, int *done, int *result) {
+    if (k->row < ROWS) { ins(k, key_char(k, k->row, k->col)); return; }
+    switch (k->col) {
+    case F_SHIFT: if (k->page == 2) k->page = 0; else if (k->page == 1) k->page = 0; else if (k->shift_once) { k->shift_once = 0; k->page = 1; } else k->shift_once = 1; break;
+    case F_SYM: k->page = k->page == 2 ? 0 : 2; k->shift_once = 0; break;
+    case F_SPACE: ins(k, L' '); break;
+    case F_DEL: del_back(k); break;
+    case F_ACCEPT: if (try_ok(k)) { *done = 1; *result = 1; } break;
+    }
+}
+
+#ifdef _WIN32
+/* ---------------------------------------------------------------- Windows: GDI picture (nvn_vk_draw.c osk_draw) */
+static uint32_t *g_px;                             /* the picture (BGRA, top-down), valid while g_on */
+static volatile LONG g_version;
+static HDC g_dc;
+static HBITMAP g_bmp;
+static HFONT g_f_head, g_f_text, g_f_key, g_f_small;
 
 static COLORREF rgb(int r, int g, int b) { return RGB(r, g, b); }
 static void fill(int x, int y, int w, int h, COLORREF c) {
@@ -117,11 +155,6 @@ static void text(HFONT f, COLORREF c, int x, int y, int w, int h, const wchar_t 
     RECT r = {x, y, x + w, y + h};
     SelectObject(g_dc, f); SetTextColor(g_dc, c); SetBkMode(g_dc, TRANSPARENT);
     DrawTextW(g_dc, s, n, &r, how | DT_NOPREFIX);
-}
-
-static wchar_t key_char(const Osk *k, int row, int col) {
-    int page = k->page == 2 ? 2 : (k->page == 1 || k->shift_once) ? 1 : 0;
-    return k_pages[page][row][col];
 }
 
 static void render(const Osk *k) {
@@ -164,7 +197,7 @@ static void render(const Osk *k) {
     for (int f = 0; f < F_N; f++) {
         int w = k_fspan[f] * kw, on = k->row == ROWS && k->col == f;
         int lit = (f == F_SHIFT && (k->page == 1 || k->shift_once)) || (f == F_SYM && k->page == 2);
-        COLORREF c = on ? keyf : f == F_OK ? rgb(0, 140, 170) : lit ? rgb(110, 110, 125) : keyc;
+        COLORREF c = on ? keyf : f == F_ACCEPT ? rgb(0, 140, 170) : lit ? rgb(110, 110, 125) : keyc;
         rbox(x + gap / 2, y, w - gap, kh, 18, c, on ? white : c, on ? 4 : 1);
         text(g_f_key, on ? dark : white, x, y, w, kh, f == F_SYM && k->page == 2 ? L"abc" : fname[f], -1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         x += w;
@@ -180,25 +213,6 @@ static void publish(const Osk *k) {
     for (size_t i = 0, n = (size_t)OSK_W * OSK_H; i < n; i++) g_px[i] |= 0xff000000u;      /* GDI leaves alpha 0 */
     InterlockedIncrement(&g_version);
     LeaveCriticalSection(&g_lock);
-}
-
-static void ins(Osk *k, wchar_t ch) {
-    if (k->len >= k->max_len || ch < 0x20) return;
-    memmove(k->text + k->cur + 1, k->text + k->cur, (size_t)(k->len - k->cur) * sizeof(wchar_t));
-    k->text[k->cur++] = ch; k->len++; k->text[k->len] = 0;
-    k->shift_once = 0;
-}
-static void del_back(Osk *k) {
-    if (k->cur <= 0) return;
-    memmove(k->text + k->cur - 1, k->text + k->cur, (size_t)(k->len - k->cur) * sizeof(wchar_t));
-    k->cur--; k->len--; k->text[k->len] = 0;
-}
-static void del_fwd(Osk *k) { if (k->cur < k->len) { k->cur++; del_back(k); } }
-
-/* 1 = OK accepted, 0 = not yet */
-static int try_ok(Osk *k) {
-    if (k->len < k->min_len) { k->note = L"The text is too short"; return 0; }
-    return 1;
 }
 
 static int setup_gdi(void) {
@@ -220,36 +234,18 @@ static int setup_gdi(void) {
     return 1;
 }
 
-static void move(Osk *k, int dx, int dy) {
-    if (dy) {
-        int old = k->row;
-        k->row = (k->row + dy + ROWS + 1) % (ROWS + 1);
-        if (k->row == ROWS && old != ROWS) {      /* into the bottom row: the function key under the column */
-            int c = 0, x = 0;
-            while (c < F_N - 1 && x + k_fspan[c] <= k->col) x += k_fspan[c++];
-            k->col = c;
-        } else if (old == ROWS && k->row != ROWS) {
-            int x = 0;
-            for (int c = 0; c < k->col; c++) x += k_fspan[c];
-            k->col = x;
-        }
-    }
-    if (dx) {
-        int n = k->row == ROWS ? F_N : COLS;
-        k->col = (k->col + dx + n) % n;
-    }
-}
+static int osk_ready(void) { return nvn_front_osk_ready() && setup_gdi(); }
 
-static void press(Osk *k, int *done, int *result) {
-    if (k->row < ROWS) { ins(k, key_char(k, k->row, k->col)); return; }
-    switch (k->col) {
-    case F_SHIFT: if (k->page == 2) k->page = 0; else if (k->page == 1) k->page = 0; else if (k->shift_once) { k->shift_once = 0; k->page = 1; } else k->shift_once = 1; break;
-    case F_SYM: k->page = k->page == 2 ? 0 : 2; k->shift_once = 0; break;
-    case F_SPACE: ins(k, L' '); break;
-    case F_DEL: del_back(k); break;
-    case F_OK: if (try_ok(k)) { *done = 1; *result = 1; } break;
-    }
+/* nvn_vk_draw.c, render thread: the picture when it changed since `*seen` (copied into dst, OSK_W x OSK_H), else NULL */
+int osk_take(uint32_t *dst, LONG *seen) {
+    if (!g_on) return 0;
+    int got = 0;
+    EnterCriticalSection(&g_lock);
+    if (g_px && *seen != g_version) { memcpy(dst, g_px, (size_t)OSK_W * OSK_H * 4); *seen = g_version; got = 1; }
+    LeaveCriticalSection(&g_lock);
+    return got;
 }
+void osk_size(int *w, int *h) { *w = OSK_W; *h = OSK_H; }
 
 /* TEST ONLY: SSBU_OSK_TEST=<presented frame>[,<keys>] opens the keyboard from a thread of its own at that frame, feeds
  * <keys> as typed characters (default "Hello"; '>' = OK at the end), writes the picture as osk_test.bmp beside the exe
@@ -265,7 +261,17 @@ static void dump_bmp(const char *path) {
     EnterCriticalSection(&g_lock); fwrite(g_px, 4, (size_t)OSK_W * OSK_H, f); LeaveCriticalSection(&g_lock);
     fclose(f);
 }
-static DWORD WINAPI feeder(LPVOID p);
+static DWORD WINAPI feeder(LPVOID p) {
+    const char *s = p;
+    while (!g_on) Sleep(10);
+    Sleep(500);
+    for (; *s; s++) {
+        Sleep(120);
+        if (*s == '>') { dump_bmp("osk_test.bmp"); printf("osk: TEST: picture written to osk_test.bmp\n"); fflush(stdout); osk_key(WM_CHAR, 13); }
+        else osk_key(WM_CHAR, (WPARAM)(unsigned char)*s);
+    }
+    return 0;
+}
 static DWORD WINAPI osk_test_thread(LPVOID arg) {
     const char *e = arg;
     long long at = _atoi64(e);
@@ -279,17 +285,6 @@ static DWORD WINAPI osk_test_thread(LPVOID arg) {
     fflush(stdout);
     return 0;
 }
-static DWORD WINAPI feeder(LPVOID p) {
-    const char *s = p;
-    while (!g_on) Sleep(10);
-    Sleep(500);
-    for (; *s; s++) {
-        Sleep(120);
-        if (*s == '>') { dump_bmp("osk_test.bmp"); printf("osk: TEST: picture written to osk_test.bmp\n"); fflush(stdout); osk_key(WM_CHAR, 13); }
-        else osk_key(WM_CHAR, (WPARAM)(unsigned char)*s);
-    }
-    return 0;
-}
 void osk_test_start(void) {
     const char *e = getenv("SSBU_OSK_TEST");
     if (!e || !*e) return;
@@ -301,7 +296,7 @@ void osk_test_start(void) {
  * Enter / Esc on the PC keyboard. Returns 1 for OK / Yes, 0 for No, -1 when not available here. */
 int osk_message(const wchar_t *msg, int question) {
     InitOnceExecuteOnce(&g_once, osk_init, NULL, NULL);
-    if (!nvn_front_osk_ready() || !setup_gdi()) return -1;
+    if (!osk_ready()) return -1;
     const COLORREF bg = rgb(40, 40, 46), white = rgb(240, 240, 245), grey = rgb(160, 160, 170), keyf = rgb(0, 190, 220);
     fill(0, 0, OSK_W, OSK_H, bg);
     rbox(260, 260, OSK_W - 520, OSK_H - 520, 30, rgb(28, 28, 32), keyf, 4);
@@ -333,10 +328,112 @@ int osk_message(const wchar_t *msg, int question) {
     InterlockedExchange(&g_on, 0);
     return answer;
 }
+#else
+/* ---------------------------------------------------------------- Linux / macOS: state for the menu's ImGui layer */
+static OskView g_view;
 
+static void wcopy(wchar_t *d, size_t n, const wchar_t *s) {
+    if (!s) { d[0] = 0; return; }
+    wcsncpy(d, s, n - 1);
+    d[n - 1] = 0;
+}
+
+static void publish(const Osk *k) {
+    EnterCriticalSection(&g_lock);
+    g_view.is_message = 0; g_view.question = 0;
+    wcopy(g_view.header, sizeof g_view.header / sizeof g_view.header[0], k->header);
+    wcopy(g_view.guide, sizeof g_view.guide / sizeof g_view.guide[0], k->guide);
+    wcopy(g_view.note, sizeof g_view.note / sizeof g_view.note[0], k->note);
+    wcopy(g_view.text, sizeof g_view.text / sizeof g_view.text[0], k->text);
+    for (int r = 0; r < ROWS; r++)
+        for (int c = 0; c < COLS; c++) g_view.keys[r][c] = key_char(k, r, c);
+    g_view.len = k->len; g_view.cur = k->cur; g_view.max_len = k->max_len; g_view.password = k->password;
+    g_view.page = k->page; g_view.row = k->row; g_view.col = k->col; g_view.shift_once = k->shift_once;
+    LeaveCriticalSection(&g_lock);
+}
+static void publish_message(const wchar_t *msg, int question) {
+    EnterCriticalSection(&g_lock);
+    wcopy(g_view.message, sizeof g_view.message / sizeof g_view.message[0], msg);
+    g_view.is_message = 1; g_view.question = question;
+    LeaveCriticalSection(&g_lock);
+}
+int osk_view(OskView *v) {
+    if (!g_on) return 0;
+    EnterCriticalSection(&g_lock);
+    *v = g_view;
+    LeaveCriticalSection(&g_lock);
+    return 1;
+}
+static int osk_ready(void) { return nvn_front_osk_ready() && menu_osk_ready(); }
+
+/* TEST ONLY: SSBU_OSK_TEST=<presented frame>[,<keys>] drives the keyboard without a controller (the Windows test writes
+ * osk_test.bmp; here the picture is the menu's, so the log result is the check). */
+static DWORD WINAPI feeder(LPVOID p) {
+    const char *s = p;
+    while (!g_on) Sleep(10);
+    Sleep(500);
+    for (; *s; s++) {
+        Sleep(120);
+        if (*s == '>') osk_key(WM_CHAR, 13);
+        else osk_key(WM_CHAR, (WPARAM)(unsigned char)*s);
+    }
+    return 0;
+}
+static DWORD WINAPI osk_test_thread(LPVOID arg) {
+    const char *e = arg;
+    long long at = atoll(e);
+    static char feed[256];
+    strncpy(feed, strchr(e, ',') ? strchr(e, ',') + 1 : "Hello>", sizeof feed - 1);
+    while (nvn_front_presents() < at) Sleep(50);
+    static wchar_t out[OSK_MAX + 2];
+    CreateThread(NULL, 0, feeder, feed, 0, NULL);
+    int r = osk_run(L"Test of the on-screen keyboard", L"Type a name", L"", 20, 1, 0, out);
+    printf("osk: TEST (SSBU_OSK_TEST): result %d, text \"%ls\"\n", r, r == 1 ? out : L"");
+    /* TEST ONLY: SSBU_OSK_MSG_TEST=1, with SSBU_OSK_TEST, shows the game's text-check panel after the keyboard's test */
+    if (getenv("SSBU_OSK_MSG_TEST")) { int a = osk_message(L"Test message of the text check", 1); printf("osk: TEST MESSAGE result %d\n", a); }
+    fflush(stdout);
+    return 0;
+}
+void osk_test_start(void) {
+    const char *e = getenv("SSBU_OSK_TEST");
+    if (!e || !*e) return;
+    InitOnceExecuteOnce(&g_once, osk_init, NULL, NULL);
+    CreateThread(NULL, 0, osk_test_thread, (LPVOID)e, 0, NULL);
+}
+
+/* The game's text check, over the last frame: A = OK / Yes, B = No (question only); Enter / Esc on the PC keyboard. */
+int osk_message(const wchar_t *msg, int question) {
+    InitOnceExecuteOnce(&g_once, osk_init, NULL, NULL);
+    if (!osk_ready()) return -1;
+    publish_message(msg, question);
+    EnterCriticalSection(&g_lock); g_qn = 0; LeaveCriticalSection(&g_lock);
+    InterlockedExchange(&g_on, 1);
+    uint64_t prev = nnhid_menu_buttons();
+    ULONGLONG last_redraw = 0;
+    int answer = -2;
+    while (answer == -2) {
+        Sleep(16);
+        EnterCriticalSection(&g_lock);
+        for (int i = 0; i < g_qn; i++) if (g_q[i].msg == WM_CHAR) { if (g_q[i].w == 13) answer = 1; else if (g_q[i].w == 27) answer = question ? 0 : 1; }
+        g_qn = 0;
+        LeaveCriticalSection(&g_lock);
+        uint64_t b = nnhid_menu_buttons(), down = b & ~prev;
+        prev = b;
+        if (down >> B_A & 1) answer = 1;
+        else if (down >> B_B & 1) answer = question ? 0 : 1;
+        ULONGLONG now = GetTickCount64();
+        if (now - last_redraw >= 33) { last_redraw = now; nvn_front_osk_redraw(); }
+    }
+    InterlockedExchange(&g_on, 0);
+    nvn_front_osk_redraw();
+    return answer;
+}
+#endif
+
+/* ---------------------------------------------------------------- the loop (both platforms) */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out) {
     InitOnceExecuteOnce(&g_once, osk_init, NULL, NULL);
-    if (!nvn_front_osk_ready() || !setup_gdi()) return -1;
+    if (!osk_ready()) return -1;
     static Osk k;
     memset(&k, 0, sizeof k);
     k.header = header; k.guide = guide; k.password = password;
@@ -362,7 +459,7 @@ int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial,
         /* the PC keyboard */
         UINT qm[KQ]; WPARAM qw[KQ]; int qn;
         EnterCriticalSection(&g_lock);
-        qn = g_qn; memcpy(qm, g_q, 0); for (int i = 0; i < qn; i++) { qm[i] = g_q[i].msg; qw[i] = g_q[i].w; } g_qn = 0;
+        qn = g_qn; for (int i = 0; i < qn; i++) { qm[i] = g_q[i].msg; qw[i] = g_q[i].w; } g_qn = 0;
         LeaveCriticalSection(&g_lock);
         for (int i = 0; i < qn && !done; i++) {
             dirty = 1; k.note = NULL;
@@ -415,9 +512,8 @@ int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial,
     }
     InterlockedExchange(&g_on, 0);
     nvn_front_osk_redraw();                         /* the frame without the keyboard */
-    if (result) { wcsncpy(out, k.text, OSK_MAX + 1); out[OSK_MAX + 1] = 0; }
+    if (result) wcscpy(out, k.text);                /* the caller's out holds at least max_len + 1 characters */
     printf("osk: closed: %s (%d characters)\n", result ? "OK" : "cancelled", k.len);
     fflush(stdout);
     return result;
 }
-#endif

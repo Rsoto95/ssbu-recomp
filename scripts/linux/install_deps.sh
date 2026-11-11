@@ -81,7 +81,7 @@ if [ "$SYSTEM" = 1 ]; then
         echo "  library; Python 3.10+ with venv; git"
         exit 1
     fi
-    echo "  optional: zenity or kdialog (the game's on-screen keyboard, e.g. for naming a Mii, uses a dialog)"
+    echo "  optional: zenity or kdialog (only the fallback text dialog; the game's own keyboard is drawn in-game)"
 fi
 
 # ---------------------------------------------------------------------------------------------- 2. Python packages

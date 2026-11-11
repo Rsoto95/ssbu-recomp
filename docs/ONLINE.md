@@ -22,9 +22,10 @@ Online play is experimental and ON by default: the game joins the project's publ
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).
 
-**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller"; on Linux, "Type in a
-dialog"). It is the name the game and the other players see (`player_name` in `config\graphics.ini`); empty = your
-login name (the Windows user name on Windows). Used from the next start.
+**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller": the in-game keyboard on
+Windows, Linux and macOS). If it cannot be drawn, the desktop's text dialog is used. It is the name the game and the
+other players see (`player_name` in `config\graphics.ini`); empty = your login name (the Windows user name on Windows).
+Used from the next start.
 
 ## The easy way: the F1 menu
 

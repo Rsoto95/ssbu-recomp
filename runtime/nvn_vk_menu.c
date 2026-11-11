@@ -170,7 +170,11 @@ static void mu_shot_write(void) {
     menu_shot_done(g_mu.shot_path, w, h, ok);
 }
 static void menu_vk_draw(uint32_t index) {
+#ifdef _WIN32
     if (!menu_enabled() || g_mu.failed) return;
+#else
+    if ((!menu_enabled() && !osk_active()) || g_mu.failed) return;      /* the keyboard draws without the menu */
+#endif
     mu_shot_write();
     MenuDraw d;
     if (!menu_frame((int)V.extent.width, (int)V.extent.height, &d) || !d.nidx || !d.nvtx) return;

@@ -42,10 +42,12 @@
  * String *text) with text->bufSize temporarily set to the size of the entered text; it returns
  * [doc] TextCheckResult 0 Success, 1 ShowFailureDialog, 2 ShowConfirmDialog, with the message in
  * textCheckWorkBuf.
- * Here the applet is a small Win32 dialog (edit box, OK, Cancel) run on the calling guest thread, which
- * blocks exactly like on the console. Scripted runs must not block: SSBU_SWKBD=cancel answers "cancelled",
+ * Here the applet is our on-screen keyboard (osk.c; its ImGui layer on Linux / macOS) or, where that cannot be
+ * drawn, a small Win32 dialog (edit box, OK, Cancel), run on the calling guest thread, which blocks exactly like on
+ * the console. Scripted runs must not block: SSBU_SWKBD=cancel answers "cancelled",
  * SSBU_SWKBD=text:<utf-8 text> answers that text, SSBU_SWKBD=dialog forces the dialog; without the
- * variable the dialog is used unless an input script (SSBU_SEQ / SSBU_PRESS / SSBU_SCRIPT) is active.
+ * variable the keyboard (or the dialog where it cannot be drawn) is used unless an input script
+ * (SSBU_SEQ / SSBU_PRESS / SSBU_SCRIPT) is active.
  *
  * ---- nn::nfp
  * Console modelled: the player-1 controller has an NFC reader (as a Pro Controller / right Joy-Con does)

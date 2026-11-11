@@ -56,7 +56,8 @@ Controllers: any pad SDL3 knows. Remapping: `build-macos/config/controllers.ini`
 - **Mods and the hook table are off** on macOS.
 - The **settings menu (F1)** is built (Dear ImGui, fetched by `install_mac.sh` into `deps/imgui`): F1, a controller's
   Home / Guide button, or hold − and + together for 1 s. It compiles in CI but **has not been tried on a Mac yet**.
-  Text boxes: the keyboard, or "Type in a dialog" (a macOS dialog through `osascript`).
+  Text boxes: the keyboard, or "Type with the controller" (the in-game keyboard on the Vulkan build; otherwise a macOS
+  dialog through `osascript`).
 - **Online play is off.**
 - Recording movies to the album does not work (the self-test cases for it are accepted as known failures).
 
