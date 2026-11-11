@@ -575,8 +575,8 @@ typedef struct {
     uint32_t ip;
     char name[NAME_LEN + 1];
     uint64_t secret, since, last_ack, next_hello, acks_window;
-    int state, via, ncand, acks, rtt;
-    Cand cand[2];                                     /* through its router (as the lobby sees it), then on its own LAN */
+    int state, via, ncand, acks, rtt, nlobby;         /* nlobby: the candidates the lobby gave (1-2); ncand 3 = cand[2] learnt */
+    Cand cand[3];                                     /* through its router (as the lobby sees it), then on its own LAN, then as its punches came (learn_cand) */
 } Peer;
 static SRWLOCK g_peers_lock = SRWLOCK_INIT;
 static Peer g_peers[MAX_PEERS];
@@ -690,6 +690,54 @@ void net_rb_path_stats(long long *dtx, long long *drx, long long *ltx, long long
     *dtx = g_rbd_tx; *drx = g_rbd_rx; *ltx = g_rbl_tx; *lrx = g_rbl_rx; *direct_now = net_rb_direct();
 }
 static volatile LONG g_rbd_said;
+/* (2026-11-11, the owner and a Linux friend: 38 ms straight, 176 ms through the lobby, straight in 1 match of 4) THE SECOND
+ * PORT. The friend's router keeps a socket's port for the first destination it talks to (the lobby saw his local port as
+ * his public one in 10+ sessions) but may give another one for a second destination: his packets then came to the owner
+ * from a port the owner's router (which lets in only the address AND port this PC sent to; no UPnP behind the ISP's modem)
+ * had never seen. So, when the first path has not answered RBF_WAIT_MS after the lobby paired the two, each game opens a
+ * NEW UDP socket that talks to the opponent ONLY: its first destination, so the router most likely keeps its port. The
+ * games tell each other that port through the lobby (a rollback message 0xF5 'F' 'R' '2' port u16 state u8: an older game counts it
+ * as a bad message), send their RB_DIRECT messages from it to the other's, and a thread of its own receives there. A
+ * packet from the opponent's address but another port moves the target to that port. Nothing changes when the first path
+ * answers; the lobby stays the fallback as before. SSBU_ONLINE_PORT2=0: off.
+ * (the same night, second version: both games opened their second port and told it, and still nothing came) WHO SENDS FIRST
+ * matters: the friend could never enter the owner's Battle Arena but the owner always entered his (there the friend's game
+ * sends first), and his fixed port 39530 was the one his router changed. A packet of ours that reaches his router BEFORE
+ * he has sent us anything from that port is noted there as a connection of its own; his own first packet then collides
+ * with that note and leaves from another port. So a second socket begins with a SHORT TIME TO LIVE (RBF_TTL hops): its
+ * packets pass this side's own router(s), which note the way out, and die before the other side's router. Each game tells
+ * through the lobby when its openers are out (message 0xF5 'F' 'R' '2' port u16 state u8); when both are, or when a
+ * message arrives on the second socket, the time to live goes back to normal and the match's messages are sent there.
+ * SSBU_ONLINE_PORT2_TTL=<n>: the openers' hops (default 4: two routers of this side and two hops more). */
+#define RBF_WAIT_MS 2000
+#define RBF_TTL 4
+#define RBF_OPENERS 4                               /* openers before this game says "mine are out" */
+static volatile LONG g_rbf_out, g_rbf_peer_out, g_rbf_live;      /* openers sent / the opponent said its own are out / normal time to live: sending */
+static int g_rbf_ttl0 = 64;                             /* the socket's own time to live, put back when it goes live */
+static int rbf_ttl(void) { static int v = -1; if (v < 0) { const char *e = getenv("SSBU_ONLINE_PORT2_TTL"); v = e && atoi(e) > 0 && atoi(e) < 64 ? atoi(e) : RBF_TTL; } return v; }
+static SOCKET g_rbf_sock = INVALID_SOCKET;              /* (g_rbd_lock) the second socket; INVALID_SOCKET = not opened */
+static uint16_t g_rbf_port;                             /* (g_rbd_lock) its local port */
+static struct sockaddr_in g_rbf_at;                     /* (g_rbd_lock) the opponent's second port; sin_port 0 = not known yet */
+static volatile LONG g_rbf_gen, g_rbf_said;             /* gen: a socket's thread ends when it changed */
+static volatile LONG64 g_rbm_last_rx, g_rbf_last_rx, g_rbf_opened, g_rbf_tx, g_rbf_rx;
+static volatile LONG64 g_rbd_first_tx, g_rbd_last_tx;   /* when this game first / last sent this opponent a direct message */
+static volatile LONG g_rbm_ever;                        /* the first path has answered this opponent at least once */
+typedef struct { SOCKET s; LONG gen; } RbfArg;
+static SRWLOCK g_rbrx_lock = SRWLOCK_INIT;              /* rbn_rx: one caller at a time (the client thread and the second port's) */
+static void rbn_rx_one(const uint8_t *p, int n) { AcquireSRWLockExclusive(&g_rbrx_lock); rbn_rx(p, n); ReleaseSRWLockExclusive(&g_rbrx_lock); }
+static int rbf_wanted(void) { static int v = -1; if (v < 0) { const char *e = getenv("SSBU_ONLINE_PORT2"); v = !(e && e[0] == '0'); } return v; }
+static void rbf_close_locked(void) {                    /* (g_rbd_lock held exclusively) */
+    if (g_rbf_sock != INVALID_SOCKET) { InterlockedIncrement(&g_rbf_gen); closesocket(g_rbf_sock); g_rbf_sock = INVALID_SOCKET; }
+    g_rbf_port = 0; memset(&g_rbf_at, 0, sizeof g_rbf_at);
+    InterlockedExchange64(&g_rbf_last_rx, 0); InterlockedExchange64(&g_rbf_opened, 0); InterlockedExchange(&g_rbf_said, 0);
+    InterlockedExchange(&g_rbf_out, 0); InterlockedExchange(&g_rbf_peer_out, 0); InterlockedExchange(&g_rbf_live, 0);
+}
+static void rbf_go_live(SOCKET s, const char *why) {    /* the openers are over: normal time to live, the match's messages go there */
+    if (InterlockedExchange(&g_rbf_live, 1)) return;
+    int ttl = g_rbf_ttl0;
+    setsockopt(s, IPPROTO_IP, IP_TTL, (const char *)&ttl, sizeof ttl);
+    say("match: second port: %s: the match's messages are sent there now", why);
+}
 static void rbd_set(uint32_t peer, uint32_t ip, uint16_t port) {   /* (client thread) MATCH_STATE 'A' */
     AcquireSRWLockExclusive(&g_rbd_lock);
     int same = g_rbd_peer == peer && g_rbd_at.sin_port == htons(port);
@@ -698,9 +746,129 @@ static void rbd_set(uint32_t peer, uint32_t ip, uint16_t port) {   /* (client th
     g_rbd_at.sin_addr.s_addr = ip ? htonl(ip) : g_lobby.sin_addr.s_addr;      /* (0: the game on the lobby's PC) */
     g_rbd_at.sin_port = htons(port);
     g_rbd_peer = peer;
+    if (!same) rbf_close_locked();                      /* (another opponent, or the same one after a restart: its second port too) */
     ReleaseSRWLockExclusive(&g_rbd_lock);
-    if (!same) { char a[16]; InterlockedExchange64(&g_rbd_last_rx, 0); InterlockedExchange(&g_rbd_said, 0);
+    if (!same) { char a[16]; InterlockedExchange64(&g_rbd_last_rx, 0); InterlockedExchange64(&g_rbm_last_rx, 0); InterlockedExchange(&g_rbd_said, 0);
+        InterlockedExchange64(&g_rbd_first_tx, 0); InterlockedExchange64(&g_rbd_last_tx, 0); InterlockedExchange(&g_rbm_ever, 0);
         say("match: the opponent's address for a direct connection: %s:%u", ip_text(ntohl(g_rbd_at.sin_addr.s_addr), a), port); }
+}
+static DWORD WINAPI rbf_thread(LPVOID arg) {            /* the second socket's receiver, until the socket is replaced */
+    SOCKET s = ((RbfArg *)arg)->s;
+    LONG gen = ((RbfArg *)arg)->gen;
+    free(arg);
+    uint8_t *b = malloc(2048);
+    if (!b) return 0;
+    for (;;) {
+        struct sockaddr_in from;
+        int flen = sizeof from;
+        int n = recvfrom(s, (char *)b, 2048, 0, (struct sockaddr *)&from, &flen);
+        if (g_rbf_gen != gen) break;                    /* (the socket was closed: another opponent) */
+        if (n < 0) { Sleep(1); continue; }              /* (the 200 ms wait ran out, or an error: never a busy loop) */
+        if (n <= 8 || b[0] != 'S' || b[1] != 'U' || b[2] != PROTO || b[3] != T_RB_DIRECT || !g_joined) continue;
+        int moved = 0; uint16_t was = 0;
+        AcquireSRWLockExclusive(&g_rbd_lock);
+        int ok = g_rbf_sock == s && g_rbd_at.sin_port && from.sin_addr.s_addr == g_rbd_at.sin_addr.s_addr && g32(b + 4) == g_rbd_peer && g_rbd_peer == g_rb_match_peer;
+        if (ok && g_rbf_at.sin_port != from.sin_port) { moved = 1; was = ntohs(g_rbf_at.sin_port); g_rbf_at = from; }      /* (answered where it came from) */
+        ReleaseSRWLockExclusive(&g_rbd_lock);
+        if (!ok) continue;
+        if (moved && was) say("match: second port: the opponent's packets come from port %u, not %u: answered there", ntohs(from.sin_port), was);
+        if (!g_rbf_live) rbf_go_live(s, "a message of the opponent arrived on it");
+        LONG64 t = (LONG64)ms_now();
+        InterlockedExchange64(&g_rbf_last_rx, t); InterlockedExchange64(&g_rbd_last_rx, t); InterlockedIncrement64(&g_rbf_rx); InterlockedIncrement64(&g_rbd_rx);
+        if (!g_rbf_said) { InterlockedExchange(&g_rbf_said, 1); char a[16];
+            say("match: DIRECT connection with the opponent through the SECOND PORT (%s:%u): the match no longer goes through the lobby", ip_text(ntohl(from.sin_addr.s_addr), a), ntohs(from.sin_port)); }
+        g_rb_peer = g32(b + 4);
+        rbn_rx_one(b + 8, n - 8);
+    }
+    free(b);
+    return 0;
+}
+static void rbf_open(void) {                            /* (client thread) the second socket, once per opponent */
+    AcquireSRWLockExclusive(&g_rbd_lock);
+    if (g_rbf_sock != INVALID_SOCKET || !g_rbd_at.sin_port) { ReleaseSRWLockExclusive(&g_rbd_lock); return; }
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    uint16_t port = 0;
+    if (s != INVALID_SOCKET) {
+        struct sockaddr_in a = {0};
+        DWORD bytes = 0; BOOL off = FALSE; int big = 1 << 20, len = sizeof a;
+        a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY;
+        net_set_rcvtimeo(s, 200);
+        setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&big, sizeof big);
+        WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
+        if (bind(s, (struct sockaddr *)&a, sizeof a) || getsockname(s, (struct sockaddr *)&a, &len)) { closesocket(s); s = INVALID_SOCKET; }
+        else {
+            int ttl = 0, tl = sizeof ttl, low = rbf_ttl();
+            port = ntohs(a.sin_port);
+            if (!getsockopt(s, IPPROTO_IP, IP_TTL, (char *)&ttl, &tl) && ttl > 0) g_rbf_ttl0 = ttl;
+            setsockopt(s, IPPROTO_IP, IP_TTL, (const char *)&low, sizeof low);      /* (the openers: see RBF_TTL) */
+        }
+    }
+    RbfArg *ra = s != INVALID_SOCKET ? malloc(sizeof *ra) : NULL;
+    if (s != INVALID_SOCKET && !ra) { closesocket(s); s = INVALID_SOCKET; }
+    if (s != INVALID_SOCKET) { g_rbf_sock = s; g_rbf_port = port; InterlockedExchange64(&g_rbf_opened, (LONG64)ms_now()); ra->s = s; ra->gen = g_rbf_gen; }
+    ReleaseSRWLockExclusive(&g_rbd_lock);
+    if (s == INVALID_SOCKET) { say("match: second port: the socket could not be made (error %d)", WSAGetLastError()); return; }
+    HANDLE th = CreateThread(NULL, 0, rbf_thread, ra, 0, NULL);
+    if (th) CloseHandle(th); else free(ra);
+    say("match: second port: UDP %u opened for this opponent only (the first path does not answer): told through the lobby; openers of %d hops first", port, rbf_ttl());
+}
+static void rbf_peer_port(uint32_t src, uint16_t port, int out) {       /* (client thread) the opponent's 0xF5 'F' 'R' '2' message */
+    int set = 0;
+    if (!rbf_wanted() || !port || g_loopback) return;
+    AcquireSRWLockExclusive(&g_rbd_lock);
+    int ok = g_rbd_at.sin_port && g_rbd_peer == src && g_rbd_at.sin_addr.s_addr != g_lobby.sin_addr.s_addr;
+    int alive = g_rbf_last_rx && ms_now() - (uint64_t)g_rbf_last_rx < RBD_STALE_MS;
+    if (ok && !alive && g_rbf_at.sin_port != htons(port)) { g_rbf_at = g_rbd_at; g_rbf_at.sin_port = htons(port); set = 1; }
+    ReleaseSRWLockExclusive(&g_rbd_lock);
+    if (!ok) return;
+    rbf_open();                                         /* (ours too, if this game had not opened it yet) */
+    if (set) say("match: second port: the opponent's is UDP %u", port);
+    if (out && !InterlockedExchange(&g_rbf_peer_out, 1)) say("match: second port: the opponent's openers are out");
+}
+static void rbf_tick(uint64_t t) {                      /* (client thread) opens the second port when the first path stays quiet; tells its number */
+    static uint64_t last_told;
+    uint32_t mp = g_rb_match_peer;
+    if (!rbf_wanted() || !g_direct || g_loopback || !mp || nnldn_other_ip()) return;
+    AcquireSRWLockShared(&g_rbd_lock);
+    int have = g_rbd_at.sin_port && g_rbd_peer == mp && g_rbd_at.sin_addr.s_addr != g_lobby.sin_addr.s_addr;
+    uint16_t port = g_rbf_port;
+    ReleaseSRWLockShared(&g_rbd_lock);
+    if (!have) return;
+    int main_ok = g_rbm_last_rx && t - (uint64_t)g_rbm_last_rx < RBD_STALE_MS, fresh_ok = g_rbf_last_rx && t - (uint64_t)g_rbf_last_rx < RBD_STALE_MS;
+    uint64_t first = (uint64_t)g_rbd_first_tx, last = (uint64_t)g_rbd_last_tx;
+    if (!first || t - last > 1000) return;              /* (only while this game is sending this opponent rollback messages: a handshake, a match) */
+    if (!port) {
+        /* (only for an opponent the first path NEVER answered: between two matches of a pair that plays straight nothing is
+         * sent for a while, which is not a dead path) */
+        if (g_rbm_ever || main_ok || t - first < RBF_WAIT_MS) return;
+        rbf_open();
+        AcquireSRWLockShared(&g_rbd_lock); port = g_rbf_port; ReleaseSRWLockShared(&g_rbd_lock);
+        if (!port) return;
+        last_told = 0;
+    }
+    if (main_ok || fresh_ok) return;                    /* (a path answers: nothing to tell) */
+    if (!g_rbf_live) {                                  /* the openers: 8 bytes (a receiver ignores them), every 100 ms, short time to live */
+        static uint64_t last_opener;
+        if (t - last_opener >= 100) {
+            uint8_t o[8];
+            last_opener = t;
+            hdr(o, T_RB_DIRECT); s32(o + 4, g_ip);
+            AcquireSRWLockShared(&g_rbd_lock);
+            int sent = g_rbf_sock != INVALID_SOCKET && g_rbf_at.sin_port && g_rbd_peer == mp;
+            SOCKET fs = g_rbf_sock;
+            if (sent) sendto(fs, (const char *)o, sizeof o, 0, (const struct sockaddr *)&g_rbf_at, sizeof g_rbf_at);
+            ReleaseSRWLockShared(&g_rbd_lock);
+            if (sent && g_rbf_out < RBF_OPENERS && InterlockedIncrement(&g_rbf_out) == RBF_OPENERS) say("match: second port: this game's openers are out");
+            if (sent && g_rbf_out >= RBF_OPENERS && g_rbf_peer_out) rbf_go_live(fs, "both games' openers are out");
+        }
+    }
+    uint64_t every = t - (uint64_t)g_rbf_opened < 30000 ? 300 : 5000;
+    if (t - last_told < every) return;
+    last_told = t;
+    uint8_t b[16 + 7];
+    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, mp);
+    b[16] = 0xF5; b[17] = 'F'; b[18] = 'R'; b[19] = '2'; s16(b + 20, port); b[22] = g_rbf_out >= RBF_OPENERS;
+    tx(b, sizeof b, &g_lobby);
 }
 static void rbd_rx(const uint8_t *b, int n, const struct sockaddr_in *from) {      /* (client thread) RB_DIRECT */
     if (n <= 8 || !g_joined) return;
@@ -708,10 +876,11 @@ static void rbd_rx(const uint8_t *b, int n, const struct sockaddr_in *from) {   
     int ok = g_rbd_at.sin_port && from->sin_addr.s_addr == g_rbd_at.sin_addr.s_addr && g32(b + 4) == g_rbd_peer && g_rbd_peer == g_rb_match_peer;
     ReleaseSRWLockShared(&g_rbd_lock);
     if (!ok) return;
-    InterlockedExchange64(&g_rbd_last_rx, (LONG64)ms_now()); InterlockedIncrement64(&g_rbd_rx);
+    InterlockedExchange64(&g_rbd_last_rx, (LONG64)ms_now()); InterlockedExchange64(&g_rbm_last_rx, (LONG64)ms_now()); InterlockedIncrement64(&g_rbd_rx);
+    if (!g_rbm_ever) InterlockedExchange(&g_rbm_ever, 1);
     if (!g_rbd_said) { InterlockedExchange(&g_rbd_said, 1); char a[16]; say("match: DIRECT connection with the opponent (%s): the match no longer goes through the lobby", ip_text(ntohl(from->sin_addr.s_addr), a)); }
     g_rb_peer = g32(b + 4);
-    rbn_rx(b + 8, n - 8);
+    rbn_rx_one(b + 8, n - 8);
 }
 int net_rb_direct(void) { return g_rbd_last_rx && ms_now() - (uint64_t)g_rbd_last_rx < RBD_STALE_MS; }    /* 1 = the match goes player to player now */
 int net_rb_send(const void *p, int n) {
@@ -727,7 +896,22 @@ int net_rb_send(const void *p, int n) {
         AcquireSRWLockShared(&g_rbd_lock); at = g_rbd_at; peer = g_rbd_peer; ReleaseSRWLockShared(&g_rbd_lock);
         if (at.sin_port && peer == dst) {
             hdr(b, T_RB_DIRECT); s32(b + 4, g_ip); memcpy(b + 8, p, (size_t)n);
-            tx(b, 8 + n, &at); InterlockedIncrement64(&g_rbd_tx);
+            /* (the second port, see RBF_WAIT_MS) the path that answers carries the match; the other one gets 1 message in
+             * 30 (it may open later, and its router entry stays); neither answers: both */
+            uint64_t tn = ms_now();
+            if (!g_rbd_first_tx) InterlockedExchange64(&g_rbd_first_tx, (LONG64)tn);
+            InterlockedExchange64(&g_rbd_last_tx, (LONG64)tn);
+            int main_ok = g_rbm_last_rx && tn - (uint64_t)g_rbm_last_rx < RBD_STALE_MS, fresh_ok = g_rbf_last_rx && tn - (uint64_t)g_rbf_last_rx < RBD_STALE_MS;
+            static unsigned alt; int turn = ++alt % 30 == 0, on_main = main_ok || !fresh_ok || turn;
+            if (on_main) { tx(b, 8 + n, &at); InterlockedIncrement64(&g_rbd_tx); }
+            if (!main_ok || turn) {
+                AcquireSRWLockShared(&g_rbd_lock);
+                if (g_rbf_live && g_rbf_sock != INVALID_SOCKET && g_rbf_at.sin_port && g_rbd_peer == dst) {
+                    sendto(g_rbf_sock, (const char *)b, 8 + n, 0, (const struct sockaddr *)&g_rbf_at, sizeof g_rbf_at);
+                    InterlockedIncrement64(&g_rbf_tx); if (!on_main) InterlockedIncrement64(&g_rbd_tx);
+                }
+                ReleaseSRWLockShared(&g_rbd_lock);
+            }
             static unsigned keep;                       /* (the other way works too: the lobby is not needed; 1 in 30 still goes through it, so the */
             if (net_rb_direct() && ++keep % 30) return 1;   /* room sees the match being played: net_minilobby.c rb_seen / ml_arena_playing) */
         }
@@ -885,14 +1069,16 @@ static void read_peers(const uint8_t *p, int n) {               /* PEERS body */
             q->cand[1].at.sin_port = htons(g16(a + 10));
             q->ncand = 2;
         }
+        q->nlobby = q->ncand;
         const Peer *old = NULL;
         for (int j = 0; j < g_npeers && !old; j++) if (g_peers[j].ip == q->ip && g_peers[j].secret == q->secret) old = &g_peers[j];
-        int same = old && old->ncand == q->ncand;
-        for (int c = 0; same && c < q->ncand; c++) same = same_at(&old->cand[c].at, &q->cand[c].at);
+        int same = old && old->nlobby == q->nlobby;
+        for (int c = 0; same && c < q->nlobby; c++) same = same_at(&old->cand[c].at, &q->cand[c].at);
         if (same) {
             q->state = old->state; q->via = old->via; q->since = old->since; q->last_ack = old->last_ack; q->rtt = old->rtt;
             q->next_hello = old->next_hello; q->acks = old->acks; q->acks_window = old->acks_window;
             memcpy(q->cand, old->cand, sizeof q->cand);
+            q->ncand = old->ncand;                    /* a learnt address (cand[2]) is kept */
         } else {
             char at[24];
             q->state = PS_PUNCHING;
@@ -947,6 +1133,27 @@ static Peer *peer_at(uint64_t secret, const struct sockaddr_in *from, int *cand)
     }
     return NULL;
 }
+/* (2026-11-11, a Linux friend: 176 ms through the lobby, "straight to the opponent sent 16853, received 0") a router that
+ * gives every destination its own outside port (his game's UDP 39530 was 9454 toward the lobby): his punches reached the
+ * other game from ANOTHER port than the lobby had announced, and were dropped here (peer_at knew only the announced one), and
+ * the answers sent to the announced port never got through his router. Now a punch with the right secret, from the
+ * player's own address and the public IP the lobby gave, but from a new port, makes that port a candidate (cand[2]): it is
+ * answered there, and his router lets the answer in (it is the reply to his own packets). (peers lock held) */
+static Peer *learn_cand(uint64_t secret, uint32_t from_ip, uint32_t to_ip, const struct sockaddr_in *from, int *cand) {
+    for (int i = 0; i < g_npeers; i++) {
+        Peer *q = &g_peers[i];
+        if (q->secret != secret) continue;
+        if (q->ip != from_ip || to_ip != g_ip || q->cand[0].at.sin_addr.s_addr != from->sin_addr.s_addr) return NULL;
+        Cand *k = &q->cand[2];
+        if (q->ncand == 3 && q->state == PS_DIRECT && q->via == 2) return NULL;     /* a working learnt port is not replaced */
+        memset(k, 0, sizeof *k);
+        k->at = *from;
+        q->ncand = 3;
+        *cand = 2;
+        return q;
+    }
+    return NULL;
+}
 
 static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from) {
     uint64_t t = ms_now();
@@ -972,9 +1179,13 @@ static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from)
     uint32_t from_ip = g32(p + 12), to_ip = g32(p + 16);
     int ack = p[20];
     uint64_t word = g64(p + 21);
-    char line[160] = "";
+    char line[160] = "", learnt[160] = "";
     AcquireSRWLockExclusive(&g_peers_lock);
     Peer *q = peer_at(secret, from, &c);
+    if (!q && (q = learn_cand(secret, from_ip, to_ip, from, &c)) != NULL) {
+        char at[24], was[24];
+        snprintf(learnt, sizeof learnt, "%s: its punches come from %s, not %s (its router changes the port per destination): answered there", q->name, at_text(from, at), at_text(&q->cand[0].at, was));
+    }
     if (q && q->ip == from_ip && to_ip == g_ip) {
         Cand *k = &q->cand[c];
         if (ack) {
@@ -987,7 +1198,7 @@ static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from)
                     char at[24];
                     q->state = PS_DIRECT;
                     q->via = c;
-                    snprintf(line, sizeof line, "%s: direct path via %s %s (%d ms)", q->name, c ? "LAN" : "public", at_text(&k->at, at), q->rtt);
+                    snprintf(line, sizeof line, "%s: direct path via %s %s (%d ms)", q->name, c == 1 ? "LAN" : c == 2 ? "learnt" : "public", at_text(&k->at, at), q->rtt);
                 }
             }
         } else {
@@ -999,6 +1210,7 @@ static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from)
         }
     }
     ReleaseSRWLockExclusive(&g_peers_lock);
+    if (learnt[0]) say("%s", learnt);
     if (line[0]) say("%s", line);
 }
 
@@ -1725,6 +1937,33 @@ static const char *ip_text(uint32_t ip, char *b) { snprintf(b, 16, "%u.%u.%u.%u"
 
 static uint16_t g_upnp_mapped;
 static void upnp_cleanup(void) { if (g_upnp_mapped) upnp_unmap_udp(g_upnp_mapped); }
+/* (2026-11-11) LOBBY mode: the router is asked (UPnP) to forward this game's UDP port too. A router that lets in only the
+ * address and port this game sent to dropped every packet of a player whose own router changes the port per destination
+ * (a Linux friend: "straight to the opponent sent 1080, received 0", the whole match through the lobby at 177 ms): with
+ * the port forwarded, his packets arrive from whatever port, and learn_cand answers there. In a thread of its own (the
+ * router's answer takes up to seconds; the lobby is joined meanwhile). online_upnp = off: not asked. */
+static DWORD WINAPI lobby_upnp_thread(LPVOID arg) {
+    (void)arg;
+    char why[128] = "", ext[32] = "";
+    uint16_t port = g_lan_port;
+    if (upnp_map_udp(port, g_lan_ip, "SSBU online", ext, sizeof ext, why, sizeof why)) {
+        g_upnp_mapped = port; atexit(upnp_cleanup);
+        say("lobby: UPnP: the router forwards UDP port %u to this PC%s%s (other players reach this game directly, whatever their router does)", port, ext[0] ? ", public address " : "", ext);
+        snprintf(g_upnp_text, sizeof g_upnp_text, "UPnP: the router forwards UDP port %u to this PC", port);
+    } else {
+        say("lobby: UPnP: %s (direct paths by punching only)", why);
+        snprintf(g_upnp_text, sizeof g_upnp_text, "UPnP: %s", why);
+    }
+    return 0;
+}
+/* (2026-11-11, second try) asked from a thread of its own after the JOIN, the router answered "port in use": it keeps the
+ * port of a packet's sender, so the JOIN to the lobby had already taken that outside port for its own NAT entry. Now it
+ * is asked here, on the client thread, BEFORE the first packet leaves the socket (at most UPNP_WAIT_MS, while the game is
+ * still loading: the lobby is joined that much later, nothing waits for it). */
+static void lobby_upnp(void) {
+    if (!g_upnp || g_loopback || !g_lan_ip || !g_lan_port) return;
+    lobby_upnp_thread(NULL);
+}
 static int start_host(void) {                   /* HOST mode: the lobby in this game, its code, the NAT opened if we can */
     uint16_t port = g_host_port;
     uint32_t lan = outbound_ip(), pub = 0;
@@ -1960,7 +2199,7 @@ static int setup(void) {                        /* (client thread) where the lob
         }
         return 1;
     default:
-        if (resolve()) return 1;
+        if (resolve()) { lobby_upnp(); return 1; }      /* (before the first JOIN: see lobby_upnp) */
         snprintf(g_reject, sizeof g_reject, "cannot find the lobby %s", g_server);
         return 0;
     }
@@ -2042,6 +2281,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         if (g_joined) mm_tick(t);                                                                         /* O2 */
         if (g_joined) ladder_tick(t);                                                                     /* ladder: a match result until acknowledged */
         if (g_joined) arena_tick(t);                                                                      /* arena (lobby 1.6) */
+        if (g_joined) rbf_tick(t);                                                                        /* the second port of a rollback match */
         struct sockaddr_in from;
         int flen = sizeof from;
         int n = recvfrom(g_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
@@ -2126,7 +2366,8 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         case T_RB:                                       /* R3: a rollback message of the other player */
             if (n > 8 && g_joined) { uint32_t src = g32(buf + 4), mp = g_rb_match_peer;
                 if (mp && src != mp && !nnldn_other_ip()) { InterlockedIncrement64(&g_rb_rx_other); break; }     /* (R3 net3) not our opponent */
-                if (src && src != g_ip) { g_rb_peer = src; InterlockedIncrement64(&g_rbl_rx); rbn_rx(buf + 8, n - 8); } }
+                if (src && src != g_ip && n == 8 + 7 && buf[8] == 0xF5 && buf[9] == 'F' && buf[10] == 'R' && buf[11] == '2') { rbf_peer_port(src, g16(buf + 12), buf[14]); break; }      /* (the opponent's second port) */
+                if (src && src != g_ip) { g_rb_peer = src; InterlockedIncrement64(&g_rbl_rx); rbn_rx_one(buf + 8, n - 8); } }
             break;
         }
     }

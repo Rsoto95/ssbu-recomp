@@ -78,8 +78,12 @@ static int phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
         if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_W)) continue;
-        uint8_t *a = (uint8_t *)(uintptr_t)(info->dlpi_addr + ph->p_vaddr);
-        add_span(a, a + ph->p_memsz);
+        /* (2026-11-11) whole pages: a segment's start and end are not page-aligned, and a range that ends inside a page made
+         * page_tracker_posix.c xww_poll mark one byte past its share of g_xdirty (a Linux friend's game: "free(): invalid
+         * next size" at a rollback fight's start, three times). add_span keeps only the read-write parts. */
+        uintptr_t lo = (uintptr_t)(info->dlpi_addr + ph->p_vaddr) & ~(uintptr_t)(PG - 1);
+        uintptr_t hi = ((uintptr_t)(info->dlpi_addr + ph->p_vaddr + ph->p_memsz) + PG - 1) & ~(uintptr_t)(PG - 1);
+        add_span((uint8_t *)lo, (uint8_t *)hi);
     }
     return 0;
 }

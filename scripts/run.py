@@ -680,7 +680,11 @@ def main():
             rb_moved = b'Battle Arenas and rollback netcode are on by default' in f.read()
     except OSError:
         rb_moved = True
-    if a.play and a.exe == main_exe and not a.mac and (not rb_moved or ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false')):   # (fork: on unless graphics.ini says off; Windows and Linux)
+    # (2026-11-11) any exe name but the old rollback pair's: a Linux friend's copy under another name (ssbu_runtime_current)
+    # started WITHOUT rollback, and every Battle Arena fight with him fell back to the game's own netcode ("no opponent
+    # found in 10 s"). Before, only main_exe got it.
+    old_rb_exe = os.path.splitext(a.exe)[0].endswith('_rb')
+    if a.play and not old_rb_exe and not a.mac and (not rb_moved or ini_get(gini, 'rollback') not in ('off', '0', 'no', 'false')):   # (fork: on unless graphics.ini says off; Windows and Linux)
         # F1 > Experimental > Rollback netcode: the normal exe and game DLL with SSBU_RB_NET (since R4 the ring saves the fight on
         # the normal build: runtime/rb_learned.c); the old pair ssbu_native_rb.exe + ssbu_game_r1.dll of an older install is not used
         rollback = True
