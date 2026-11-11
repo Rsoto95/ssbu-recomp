@@ -282,14 +282,25 @@ void ppool_init(void) {}
 uint8_t *ppool_bookkeeping(size_t *n) { if (n) *n = 0; return NULL; }
 static void xls_setup(void) {
     free(g_xdirty); g_xdirty = NULL; g_nxr = 0; g_xn = 0;
-    size_t total = 0;
+    size_t total = 0, unaligned_pages = 0; int unaligned = 0;
     for (int i = 0; i < g_nx && g_nxr < XR_MAX; i++) {
         if (!g_x[i].n) continue;
         g_xr[g_nxr].a = g_x[i].a; g_xr[g_nxr].n = g_x[i].n; g_xr[g_nxr].e0 = total;
-        g_xr[g_nxr].ww = plat_writewatch_add(g_x[i].a, g_x[i].n);
+        /* (2026-11-11, a Linux friend's game: "f_720052e2f0 handled an exception but was not entered through nro_catch_call",
+         * std::terminate at the first rollback of a match, three times) only a run that starts on a page boundary is write-
+         * watched. The catch table (nnunwind.c g_catch, 128 KB in the exe's .bss, memory_map.c) starts inside a page: its
+         * 4 KB pieces each lie over two real pages, the OS names real pages, and xww_poll marked one piece per page written
+         * (the one before it), so a piece written in its upper page stayed "not written", was neither captured nor loaded,
+         * and a load brought back a table that was partly the capture's and partly the present one: a coroutine's catch
+         * record pointed into another host stack. Such a run is compared whole at every capture now, as on Windows (where
+         * only memory allocated with MEM_WRITE_WATCH is watched and the table never was). */
+        int aligned = !((uintptr_t)g_x[i].a & (PG - 1));
+        g_xr[g_nxr].ww = aligned ? plat_writewatch_add(g_x[i].a, g_x[i].n) : 0;
+        if (!aligned) { unaligned++; unaligned_pages += g_x[i].n / PG; }
         total += g_x[i].n / PG;
         g_nxr++;
     }
+    {   static int said; if (unaligned && !said++) LOG("r1: LS-X (POSIX): %d extras runs (%zu pages) do not start on a page boundary: compared at every capture, not write-watched\n", unaligned, unaligned_pages); }
     g_xn = total;
     if (!g_xn) return;
     g_xdirty = calloc(g_xn, 1);
