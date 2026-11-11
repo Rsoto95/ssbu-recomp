@@ -1772,10 +1772,13 @@ static DWORD WINAPI lobby_upnp_thread(LPVOID arg) {
     }
     return 0;
 }
+/* (2026-11-11, second try) asked from a thread of its own after the JOIN, the router answered "port in use": it keeps the
+ * port of a packet's sender, so the JOIN to the lobby had already taken that outside port for its own NAT entry. Now it
+ * is asked here, on the client thread, BEFORE the first packet leaves the socket (at most UPNP_WAIT_MS, while the game is
+ * still loading: the lobby is joined that much later, nothing waits for it). */
 static void lobby_upnp(void) {
     if (!g_upnp || g_loopback || !g_lan_ip || !g_lan_port) return;
-    HANDLE th = CreateThread(NULL, 0, lobby_upnp_thread, NULL, 0, NULL);
-    if (th) CloseHandle(th);
+    lobby_upnp_thread(NULL);
 }
 static int start_host(void) {                   /* HOST mode: the lobby in this game, its code, the NAT opened if we can */
     uint16_t port = g_host_port;
@@ -2012,7 +2015,7 @@ static int setup(void) {                        /* (client thread) where the lob
         }
         return 1;
     default:
-        if (resolve()) { lobby_upnp(); return 1; }
+        if (resolve()) { lobby_upnp(); return 1; }      /* (before the first JOIN: see lobby_upnp) */
         snprintf(g_reject, sizeof g_reject, "cannot find the lobby %s", g_server);
         return 0;
     }
