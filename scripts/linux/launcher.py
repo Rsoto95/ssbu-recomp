@@ -133,7 +133,7 @@ def main(argv=None):
         App.win.show_all()
 
         def cycle():
-            for name in ('source', 'files', 'extras', 'location', 'review', 'progress', 'ready'):
+            for name in ('home', 'source', 'files', 'extras', 'location', 'review', 'progress', 'ready'):
                 App._show_step(name)
             GLib.timeout_add(300, Gtk.main_quit)
             return False
@@ -160,7 +160,7 @@ class Launcher:
         self.game_proc = None
         self.stopping = False
         self.q = queue.Queue()
-        self.page_name = 'source'
+        self.page_name = 'home'
         self.step = 0
         self.setup_state = {}
         self.info = read_json(os.path.join(self.storage, 'install.json'))
@@ -168,7 +168,7 @@ class Launcher:
         self._build_window()
         self._load()
         self._sync()
-        self._show_step('source')
+        self._show_step('home')
         self._refresh_storage()
         self._refresh_review()
         self._refresh_install()
@@ -216,6 +216,7 @@ class Launcher:
         self.stack.set_vexpand(True)
         outer.pack_start(self.stack, True, True, 0)
         self._build_action_bar(outer)
+        self._build_home_page()
         self._build_source_page()
         self._build_files_page()
         self._build_extras_page()
@@ -301,6 +302,30 @@ class Launcher:
         entry.connect('changed', lambda *_: (self._file_sub(entry, sub), self._update_nav(), self._refresh_review()))
         return row, sub
 
+    def _build_home_page(self):
+        Gtk = self.Gtk
+        page, content = self._page('Play or rebuild',
+                                   'Play the game built on this PC, or rebuild it from your own game files.')
+        card = self._card()
+        self.home_play = Gtk.Button(label='Play')
+        self.home_play.get_style_context().add_class('suggested-action')
+        self.home_play.connect('clicked', self._play)
+        play_row, self.home_play_sub = self._row('Play the game', 'No finished build yet.', self.home_play)
+        card.add(play_row)
+        self.home_rebuild = Gtk.Button(label='Build')
+        self.home_rebuild.connect('clicked', lambda *_: self._show_step('source'))
+        build_row, _ = self._row('Build or rebuild the game',
+                                'Choose your game files, update, DLC or storage folder. Saves are kept.',
+                                self.home_rebuild)
+        card.add(build_row)
+        content.pack_start(card, False, False, 0)
+        self.home_storage = Gtk.Label()
+        self.home_storage.set_xalign(0)
+        self.home_storage.set_line_wrap(True)
+        self.home_storage.get_style_context().add_class('wizard-subtitle')
+        content.pack_start(self.home_storage, False, False, 0)
+        self.stack.add_named(page, 'home')
+
     def _build_source_page(self):
         Gtk = self.Gtk
         page, content = self._page(*PAGE_TITLES[0])
@@ -316,12 +341,6 @@ class Launcher:
         box.pack_start(self.rb_packages, False, False, 0)
         box.pack_start(self.rb_dump, False, False, 0)
         content.pack_start(box, False, False, 0)
-        self.play_now_btn = Gtk.Button(label='Play the installed build')
-        self.play_now_btn.get_style_context().add_class('suggested-action')
-        self.play_now_btn.connect('clicked', self._play)
-        self.play_now_btn.set_no_show_all(True)
-        self.play_now_btn.set_halign(Gtk.Align.CENTER)
-        content.pack_start(self.play_now_btn, False, False, 8)
         self.stack.add_named(page, 'source')
 
     def _build_files_page(self):
@@ -482,7 +501,7 @@ class Launcher:
         self.play_btn.connect('clicked', self._play)
         self.open_log_btn = Gtk.Button(label='Open log')
         self.open_log_btn.connect('clicked', self._open_install_log)
-        self.install_again_btn = Gtk.Button(label='Install again')
+        self.install_again_btn = Gtk.Button(label='Rebuild')
         self.install_again_btn.connect('clicked', self._install_again)
         center = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.step_label = Gtk.Label()
@@ -593,7 +612,16 @@ class Launcher:
         exe = os.path.join(self.info.get('build', ''), 'work', 'ssbu_native') if self.info else ''
         ready = bool(self.info and os.path.isfile(exe))
         self.play_btn.set_sensitive(ready and self.proc is None)
-        self.play_now_btn.set_visible(ready and self.proc is None)
+        self.home_play.set_sensitive(ready)
+        self.home_play.set_tooltip_text(None if ready else 'No finished build in %s' % self.storage)
+        self.home_rebuild.set_label('Rebuild' if ready else 'Build')
+        if ready:
+            self.home_play_sub.set_text('Game version %s — ready to play.' % (
+                self.info.get('game_version') or '13.0.5'))
+        else:
+            self.home_play_sub.set_text('No finished build yet — build the game first.')
+        self.home_storage.set_text('Build and saves: %s' % self.storage)
+        self.home_storage.set_tooltip_text(self.storage)
         if ready:
             self.ready_status.set_text('Game version %s, built in %s.' % (
                 self.info.get('game_version') or '13.0.5', os.path.dirname(self.info.get('build', ''))))
@@ -611,9 +639,11 @@ class Launcher:
             self.step_label.set_text('Step %d of %d' % (self.step + 1, len(PAGES)))
             self.next_btn.set_label('Install' if name == 'review' else 'Next')
             self.next_btn.set_sensitive(self._validate())
-        self.about_btn.set_visible(name == 'source')
-        self.back_btn.set_visible((setup and self.step > 0) or (name == 'progress' and self.proc is None))
-        self.back_btn.set_label('Back to review' if name == 'progress' else 'Previous')
+        self.about_btn.set_visible(name in ('home', 'source'))
+        self.back_btn.set_visible((setup and self.step > 0) or name == 'source' or
+                                  (name == 'progress' and self.proc is None))
+        self.back_btn.set_label('Back to review' if name == 'progress' else
+                                'Back to start' if name == 'source' else 'Previous')
         self.back_btn.set_sensitive(True)
         self.next_btn.set_visible(setup or (name == 'progress' and self.proc is None))
         if name == 'progress' and self.proc is None:
@@ -724,6 +754,8 @@ class Launcher:
         self.stack.set_visible_child_name(name)
         if name in PAGES:
             self.step = PAGES.index(name)
+        if name == 'home':
+            self._refresh_install()
         if name == 'review':
             self._refresh_review()
         if name == 'location':
@@ -744,6 +776,9 @@ class Launcher:
             self._show_step(PAGES[i + 1])
 
     def _previous(self, *_):
+        if self.page_name == 'source':
+            self._show_step('home')
+            return
         if self.page_name == 'progress':
             self._show_step('review')
             return
@@ -931,10 +966,10 @@ class Launcher:
             return
         info = read_json(os.path.join(self.storage, 'install.json'))
         if not info:
-            return self._warn('There is no finished build in %s: press Install first.' % self.storage)
+            return self._warn('There is no finished build in %s: build the game first.' % self.storage)
         exe = os.path.join(info.get('build', ''), 'work', 'ssbu_native')
         if not os.path.isfile(exe):
-            return self._warn('The game program is missing: press Install again (it continues where it stopped).')
+            return self._warn('The game program is missing: press Rebuild (it continues where it stopped).')
         log = os.path.join(self.storage, 'last_run.log')
         cmd = [sys.executable, os.path.join(REPO, 'scripts', 'run.py'), '--linux', '--build', info['build'],
                '--play', '--userdata', info.get('userdata') or os.path.join(self.storage, 'userdata'), '--log', log]
@@ -951,10 +986,9 @@ class Launcher:
     def _game_done(self, code):
         self.game_proc = None
         self.win.show_all()
-        self._show_step('ready')
-        self.play_btn.set_sensitive(True)
-        self.status.set_text('Game closed%s. Press Play to start it again.' % ('' if code == 0 else ' (code %d)' % code))
+        self._show_step('home')
         if code != 0:
+            self.home_play_sub.set_text('Game closed (code %d) — see last_run.log.' % code)
             self._log('game exited with code %d; the game log is %s\n' % (code, os.path.join(self.storage, 'last_run.log')))
 
     # -------------------------------------------------------------------------------------------------- misc

@@ -16,7 +16,9 @@ flatpak run --user io.github.Rsoto95.OpenSmashUltimate
 The app needs the `org.freedesktop.Sdk//25.08` runtime (from Flathub), about 611 MB to download. The app's own bundle
 adds clang and the launcher.
 
-The window is a wizard, one decision per page, like Fedora Media Writer:
+The window opens with two choices: **Play** a finished build, or **Build / Rebuild** the game from your own files.
+Play is greyed out with the storage path when no finished build is found. Rebuild opens a wizard, one decision per
+page, like Fedora Media Writer:
 
 1. **Source**: package files or an existing dump folder.
 2. **Game files**: base game (`.nsz`, `.nsp` or `.xci`), the 13.0.4 or 13.0.5 update and `prod.keys` — or the dump
@@ -28,7 +30,7 @@ The window is a wizard, one decision per page, like Fedora Media Writer:
 
 The **Progress** page shows a spinner, "Compiling 123/1162 — 14m elapsed", a progress bar and the live compile and
 script-module log; a slow file never looks like a freeze. **Stop** is always there. The **Ready** page has **Play**,
-**Open log** and **Install again**. The first start prepares the shaders (about 15 minutes); later starts go straight
+**Open log** and **Rebuild**. The first start prepares the shaders (about 15 minutes); later starts go straight
 to the game.
 
 Saves, the dump, the build, the shader cache and the logs are all in the storage folder. The game's output of the last
@@ -39,7 +41,7 @@ system dark/light setting through the desktop portal. The runtime stays `org.fre
 size stays about 2.3 GB (the theme adds 1.3 MB).
 
 DLC: only the add-on content ids in the file names are read and written to `build-linux/config/dlc.txt`; the DLC content
-itself is part of the game update. Removing a DLC from the list and pressing Install again removes it.
+itself is part of the game update. Removing a DLC from the list and pressing Rebuild removes it.
 
 ## Build the bundle
 
@@ -80,7 +82,7 @@ is disabled for now (`flatpak.yml.disabled`); the local script is the supported 
 - Rollback needs `userfaultfd` write protection (kernel 6.7+); the Flatpak allows it, but it is still Linux rollback and
   keeps the limits in `BUILDING_LINUX.md`.
 - Linux against Linux online play is not tested yet.
-- The app is pinned to the source in the bundle. A new Flatpak release is the update; pressing Install again rebuilds
+- The app is pinned to the source in the bundle. A new Flatpak release is the update; pressing Rebuild rebuilds
   what changed. There is no in-app source updater and no Flathub submission yet.
 - `--filesystem=home` is in the manifest so the app can read your packages, keys and a dump folder you choose. Remove it
   with `flatpak override --user --nofilesystem=home io.github.Rsoto95.OpenSmashUltimate` and use the app's own storage
