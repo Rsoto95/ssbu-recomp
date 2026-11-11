@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+"""Start the OpenSmash Ultimate launcher inside the Flatpak (packaging/flatpak/)."""
+import sys
+
+sys.path.insert(0, '/app/share/ssbu/scripts')
+
+from linux.launcher import main  # noqa: E402
+
+if __name__ == '__main__':
+    sys.exit(main())

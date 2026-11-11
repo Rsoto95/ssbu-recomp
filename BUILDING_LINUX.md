@@ -13,6 +13,30 @@ deps/venv/bin/python scripts/setup.py --target linux --dump <your dump folder>  
 ./play.sh                                                       # play
 ```
 
+## Flatpak (the app)
+
+A `.flatpak` bundle is on the repository's Releases page. It is the same native build, with clang, the runtime and the
+launcher included, so nothing has to be installed on the system except Flatpak and the freedesktop SDK runtime from
+Flathub. It does the whole flow in one window, as a wizard: **Source** (package files or an existing dump), **Game
+files** (base, update, `prod.keys` — or the dump folder), **Extras** (optional firmware and DLC), **Install location**
+and **Review**, then **Install**. The Progress page shows the live compile and script-module log, the current count and
+elapsed time, and a spinner, so a slow file never looks like a freeze; **Stop** is always available. The first build is
+the same 1.5–2.5 hours as above and needs about 30 GB free (45 GB while a `.nsz` is decompressed); it can be stopped and
+continued. The launcher uses the `adw-gtk3` GTK3 theme (libadwaita-like controls, system dark/light); it keeps the
+current freedesktop runtime, so the install size stays about 2.3 GB.
+
+- Install: `flatpak install --user ./OpenSmashUltimate.flatpak` (Flathub must be added; see
+  [packaging/flatpak/README.md](packaging/flatpak/README.md)). From a checkout, `./build_flatpak.sh` does the app
+  build for you: it installs the runtime if needed, builds and installs the app, writes the bundle and opens the
+  launcher (`--no-run` stops before opening it).
+- Everything writable is in `~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp`: `dump/`,
+  `build-linux/`, `userdata/`, the `.nsz` cache and the logs.
+- DLC: only the add-on content ids in the file names are read and written to `build-linux/config/dlc.txt`; the content
+  itself is in the update. The launcher's DLC list can be changed and Install run again.
+- Updates: a new Flatpak release. Press Install again after updating; the build folder is kept and only what changed is
+  rebuilt.
+- Build the bundle yourself, or see how CI does it: [packaging/flatpak/README.md](packaging/flatpak/README.md).
+
 ## Status
 
 Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDIA RTX 3080 (proprietary driver), Wayland.

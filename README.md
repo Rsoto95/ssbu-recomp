@@ -79,6 +79,12 @@ You need **your own game dump and keys**. That is all: the installer fetches eve
 
 Full guide, requirements and the same build done by hand: **[BUILDING.md](BUILDING.md)**.
 
+**Linux:** a Flatpak bundle on the Releases page does the same three steps in one window, as a wizard: Source →
+Game files → Extras → Install location → Review, then a progress page with the live compile log and a Ready page with
+**Play**. It needs your own dump and keys as on Windows; the first build takes about 1.5–2.5 hours. See
+**[BUILDING_LINUX.md](BUILDING_LINUX.md#flatpak-the-app)** and
+[packaging/flatpak](packaging/flatpak/README.md).
+
 ## Features
 
 Status key: **Done** = works and was tested on the development PC; **Experimental** = works, not widely tested or off
@@ -102,7 +108,7 @@ by default; **In progress**; **Planned**.
 | Freeze watchdog: a report with the stack of every thread | Done |
 | Fixed 60 fps in every mode | In progress |
 | Items and stages as source | Planned |
-| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); F1 menu works; online play works (Local Wireless Create Room and Battle Arenas, delay-based and rollback, against Windows over the internet and on the same LAN; Linux against Linux not yet tested); Linux rollback is experimental and still has the limits in BUILDING_LINUX.md; Steam Deck not tested | In progress |
+| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); F1 menu works; online play works (Local Wireless Create Room and Battle Arenas, delay-based and rollback, against Windows over the internet and on the same LAN; Linux against Linux not yet tested); Linux rollback is experimental and still has the limits in BUILDING_LINUX.md; a Flatpak bundle does the whole flow (dump, build, play) as a wizard with a live compile log ([packaging/flatpak](packaging/flatpak/README.md)); Steam Deck not tested | In progress |
 
 ### Game modes (measured on the development PC)
 
