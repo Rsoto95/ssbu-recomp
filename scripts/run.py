@@ -237,93 +237,160 @@ def dev_update(gini):
 
 
 def linux_update(gini):
-    """(2026-11-08, owner: "haz que linux se actualice solo") play.sh on Linux: a git clone built here (no prebuilt game
-    program). When GitHub's branch of this copy has newer commits: `git pull --ff-only`, then the game program is built
-    again (setup.py --target linux --only link: the runtime's changed sources; a few minutes). True when the code changed
-    (run.py starts again with it). Nothing when graphics.ini auto_update = off, after a restart (SSBU_PLAY_UPDATED), with
-    changes not committed, or without internet. play.sh itself is never changed by an update (bash reads it while it runs)."""
+    """Update Linux sources and rebuild a stale runtime. Return True when the launcher must restart."""
+    if ini_get(gini, 'auto_update') in ('off', '0', 'no', 'false'):
+        return False
+    if linux_source_update(gini):
+        # Load the updated launcher and build scripts before compiling the runtime.
+        return True
+    from linux import prepare_current_runtime as runtime
+    build = os.path.dirname(os.path.dirname(gini))
+    try:
+        current, reason = runtime.status(build)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        print('Linux runtime check failed: %s; playing the installed executable.' % e)
+        return False
+    if not current:
+        print('Linux runtime needs rebuilding: %s.' % reason, flush=True)
+        linux_rebuild(gini)
+    return False
+
+
+def linux_source_update(gini):
+    """Fast-forward the followed Linux branch. True restarts the launcher with the new build code.
+
+    linux_update() checks the executable separately, even when Git has no new commits.
+    This function only updates sources and respects the configured update policy.
+    """
     if os.environ.get('SSBU_PLAY_UPDATED') or ini_get(gini, 'auto_update') in ('off', '0', 'no', 'false'):
+        return False
+    if ini_get(gini, 'auto_update') == 'ask' and not globals().get('UPDATE_ASKED', False):
         return False
     if not os.path.exists(os.path.join(REPO, '.git')):
         return False
-    git = lambda *args, **k: subprocess.run(['git', '-C', REPO] + list(args), capture_output=True, text=True, **k)
+
+    def git(*arguments, **options):
+        return subprocess.run(
+            ['git', '-C', REPO] + list(arguments),
+            capture_output=True,
+            text=True,
+            **options,
+        )
+
     try:
         branch = git('rev-parse', '--abbrev-ref', 'HEAD', timeout=20).stdout.strip()
         if not branch or branch == 'HEAD':
             return False
-        # (2026-11-08) F1 > About > Version to follow (menu.cpp, Linux) wrote update_channel.txt: this clone switches to that
-        # branch now and the game program is built again below. The file is a one-time request here (removed once done),
-        # so a clone checked out by hand on another branch is not pulled back by an old choice.
+        # F1 writes a one-time branch request. Consume it so later manual checkouts stay on their chosen branch.
         import update
-        want = update.channel_branch() if os.path.exists(update.CHANNEL_FILE) else branch
-        if want != branch:
+        requested_branch = update.channel_branch() if os.path.exists(update.CHANNEL_FILE) else branch
+        if requested_branch != branch:
             if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
-                print('NOT switched to the version "%s" chosen in F1: files of the project have changes that are not committed.' % want)
+                print('NOT switched to the version "%s" chosen in F1: files of the project have changes that are not committed.' % requested_branch)
                 return False
-            f = git('fetch', '-q', 'origin', want, timeout=60)
-            if f.returncode or git('checkout', '-q', '-B', want, 'FETCH_HEAD').returncode:
-                print('NOT switched to the version "%s" chosen in F1 (git: %s): playing this version.' % (want, (f.stderr.strip().splitlines() or ['checkout failed'])[-1]))
+            fetch_result = git('fetch', '-q', 'origin', requested_branch, timeout=60)
+            if fetch_result.returncode or git('checkout', '-q', '-B', requested_branch, 'FETCH_HEAD').returncode:
+                reason = (fetch_result.stderr.strip().splitlines() or ['checkout failed'])[-1]
+                print('NOT switched to the version "%s" chosen in F1 (git: %s): playing this version.' % (requested_branch, reason))
                 return False
             try:
                 os.remove(update.CHANNEL_FILE)
             except OSError:
                 pass
             print('=' * 78)
-            print('Switched to the version "%s" chosen in F1 > About (was "%s"). Building the game program again (a few minutes; do not close this window).' % (want, branch), flush=True)
-            return linux_rebuild(gini)
+            print('Switched to the version "%s" chosen in F1 > About (was "%s"). Building the game program again (a few minutes; do not close this window).' % (requested_branch, branch), flush=True)
+            return True
         if os.path.exists(update.CHANNEL_FILE):
             try:
                 os.remove(update.CHANNEL_FILE)
             except OSError:
                 pass
-        f = git('fetch', '-q', 'origin', branch, timeout=60)
-        if f.returncode:
-            print('Update check skipped (git fetch: %s): playing this version.' % (f.stderr.strip().splitlines() or ['failed'])[-1])
+        fetch_result = git('fetch', '-q', 'origin', branch, timeout=60)
+        if fetch_result.returncode:
+            print('Update check skipped (git fetch: %s): playing this version.' % (fetch_result.stderr.strip().splitlines() or ['failed'])[-1])
             return False
-        head, theirs = git('rev-parse', 'HEAD').stdout.strip(), git('rev-parse', 'FETCH_HEAD').stdout.strip()
-        if not theirs or head == theirs or git('merge-base', '--is-ancestor', theirs, 'HEAD').returncode == 0:
+        local_commit = git('rev-parse', 'HEAD').stdout.strip()
+        remote_commit = git('rev-parse', 'FETCH_HEAD').stdout.strip()
+        if (
+            not remote_commit
+            or local_commit == remote_commit
+            or git('merge-base', '--is-ancestor', remote_commit, 'HEAD').returncode == 0
+        ):
             return False
     except (OSError, subprocess.SubprocessError) as e:
         print('Update check skipped (%s): playing this version.' % e)
         return False
     print('=' * 78)
-    print('A new version of the game is on GitHub (%s, branch %s): updating before the game starts.' % (theirs[:7], branch))
-    dirty = git('status', '--porcelain', '--untracked-files=no').stdout.strip()
-    if dirty:
+    print('A new version of the game is on GitHub (%s, branch %s): updating before the game starts.' % (remote_commit[:7], branch))
+    local_changes = git('status', '--porcelain', '--untracked-files=no').stdout.strip()
+    if local_changes:
         print('NOT updated: files of the project have changes that are not committed (commit or stash them first):')
-        print(dirty)
+        print(local_changes)
         print('=' * 78, flush=True)
         return False
-    rc = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only', 'origin', branch]).returncode
-    if rc:
-        print('NOT updated: git pull --ff-only failed (code %d): this copy has commits GitHub does not have.' % rc)
+    exit_code = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only', 'origin', branch]).returncode
+    if exit_code:
+        print('NOT updated: git pull --ff-only failed (code %d): this copy has commits GitHub does not have.' % exit_code)
         print('=' * 78, flush=True)
         return False
-    print('Code updated (%s -> %s). Building the game program again (a few minutes; do not close this window).' % (head[:7], git('rev-parse', 'HEAD').stdout.strip()[:7]), flush=True)
-    return linux_rebuild(gini)
+    print('Code updated (%s -> %s). Building the game program again (a few minutes; do not close this window).' % (local_commit[:7], git('rev-parse', 'HEAD').stdout.strip()[:7]), flush=True)
+    return True
+
+
+def linux_rebuild_command(build):
+    """Choose a runtime-only build or full game-code setup, using the saved dump paths."""
+    from linux import prepare_current_runtime as runtime
+
+    dump_options = []
+    try:
+        with open(os.path.join(build, 'state.json'), encoding='utf-8') as state_file:
+            dump_paths = json.load(state_file).get('dump') or {}
+        for name in ('exefs', 'romfs', 'sysdata'):
+            if dump_paths.get(name):
+                dump_options += ['--' + name, dump_paths[name]]
+    except (OSError, ValueError):
+        pass
+
+    command = [
+        sys.executable, '-u',
+        os.path.join(REPO, 'scripts/linux/prepare_current_runtime.py'),
+        '--build', build,
+    ]
+    if runtime.needs_game_setup(build):
+        print('Game-code inputs changed: running setup from tables, including generated code and modules.', flush=True)
+        command = [
+            sys.executable, '-u', os.path.join(REPO, 'scripts/setup.py'),
+            '--target', 'linux', '--build', build,
+        ] + dump_options + ['--from', 'tables']
+    return command
 
 
 def linux_rebuild(gini):
-    """The game program built again after linux_update changed the code (setup.py --target linux --only link). True."""
-    # (setup.py checks the dump at every run: the folders this build was made from, as its state.json keeps them)
-    dump = []
+    """Run the build, report its log and recovery command, and return whether it succeeded."""
+    build = os.path.dirname(os.path.dirname(gini))
+    command = linux_rebuild_command(build)
+    os.makedirs(os.path.join(build, 'logs'), exist_ok=True)
+    log_path = os.path.join(build, 'logs/linux_runtime_update.log')
+    print('Building before play; log: %s' % log_path, flush=True)
     try:
-        with open(os.path.join(os.path.dirname(os.path.dirname(gini)), 'state.json'), encoding='utf-8') as f:
-            d = json.load(f).get('dump') or {}
-        for k in ('exefs', 'romfs', 'sysdata'):
-            if d.get(k):
-                dump += ['--' + k, d[k]]
-    except (OSError, ValueError):
-        pass
-    cmd = [sys.executable, '-u', os.path.join(REPO, 'scripts', 'setup.py'), '--target', 'linux'] + dump + ['--only', 'link']
-    rc = subprocess.run(cmd, cwd=REPO).returncode
-    if rc:
-        print('\nThe game program was not built again (code %d): the game starts with the one built before. To finish it by hand:' % rc)
-        print('  ' + ' '.join(cmd))
+        with open(log_path, 'ab') as stream:
+            stream.write(('\n$ ' + subprocess.list2cmdline(command) + '\n').encode())
+            stream.flush()
+            exit_code = subprocess.run(
+                command, cwd=REPO, stdout=stream, stderr=subprocess.STDOUT,
+            ).returncode
+    except OSError as error:
+        print('Could not start Linux runtime build: %s' % error)
+        exit_code = 1
+
+    if exit_code:
+        print('\nThe game program was not built again (code %d): the game starts with the one built before. To finish it by hand:' % exit_code)
+        print('  ' + subprocess.list2cmdline(command))
+        print('Build log: %s. The next normal launch will retry.' % log_path)
     else:
         print('\nUpdate installed.')
     print('=' * 78, flush=True)
-    return True
+    return exit_code == 0
 
 
 def update_watch_wanted(gini):
@@ -694,8 +761,11 @@ def main():
     exe = os.path.join(work, a.exe)
     native = os.path.join(work, main_exe)
     if not os.path.exists(exe):
+        if a.linux and not os.path.exists(native):
+            print('Linux runtime is missing. See logs/linux_runtime_update.log or finish scripts/setup.py --target linux.')
+            return 1
         shutil.copy2(native, exe)
-    elif exe != native and os.path.getmtime(exe) < os.path.getmtime(native):
+    elif exe != native and os.path.exists(native) and os.path.getmtime(exe) < os.path.getmtime(native):
         # a copy made before the last link runs the old runtime; an exe linked on purpose with other sources
         # (RECOMP_EXE) is older too, so it is only replaced when asked
         if a.refresh:

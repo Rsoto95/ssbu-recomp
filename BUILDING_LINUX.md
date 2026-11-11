@@ -147,12 +147,29 @@ against every library, so a broken package shows there and not an hour later.
 It works from any folder (a symlink to it in `~/bin` is fine) and takes the options of `scripts/run.py` (`./play.sh --help`).
 The game's output shows in the terminal and is kept in `~/.local/share/ssbu-recomp/last_run.log`.
 
-**Updates (2026-11-08):** `play.sh` keeps the game up to date by itself. Before the game starts it asks GitHub whether the
-branch of this copy has newer commits; when it does, it runs `git pull --ff-only` and builds the game program again
-(`setup.py --target linux --only link`, with the dump folders this build was made from: a few minutes). Nothing is updated
-when files of the project have changes that are not committed, without internet, or with `auto_update = off` in
-`build-linux/config/graphics.ini`. If the build fails, the game starts with the program built before and the command to
-finish it is printed. (A change to the lifter or the build tools still needs `setup.py --target linux --from lift` by hand.)
+**Updates:** `./play.sh` checks your current Git branch for updates, pulls with `--ff-only`, and rebuilds the runtime
+when needed. It also detects a manual `git pull`, so you can pull first and then run `./play.sh` normally.
+Runtime updates reuse the generated game library. Known changes to game-code generation or shared interfaces trigger
+the required setup steps using your saved dump paths.
+
+Before installing a runtime, the builder runs the C++ exception self-test and saves the previous executable as
+`build-linux/work/ssbu_native_previous`. If a runtime build fails, the launcher reports the log and retry command,
+keeps the installed executable, and retries next launch. Build output is saved in
+`build-linux/logs/linux_runtime_update.log`. Rebuilding generated game code takes longer and uses setup's normal
+library replacement behavior.
+
+Uncommitted changes to tracked files prevent automatic pulls. Already-downloaded sources can still be built offline.
+In `build-linux/config/graphics.ini`, `auto_update = off` disables automatic updates and rebuilding;
+`auto_update = ask` requires F1 > Update and restart to download updates. Explicit `--exe` launches skip this updater.
+
+To rebuild the normal runtime manually without downloading updates or opening the game:
+
+```sh
+deps/venv/bin/python scripts/linux/prepare_current_runtime.py --jobs 4
+```
+
+Then launch with `./play.sh`. The helper also accepts `--build <folder>`, `--check` to check whether a rebuild is needed,
+and `--exe <name>` for a separate experimental executable. First-time installation still requires setup and your dump.
 
 - Saves go to `~/.local/share/ssbu-recomp/userdata` (`--userdata <folder>` for another one).
 - `scripts/linux/install_desktop.sh` adds **Super Smash Bros. Ultimate (recomp)** to your application menu; the game's
