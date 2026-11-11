@@ -575,8 +575,8 @@ typedef struct {
     uint32_t ip;
     char name[NAME_LEN + 1];
     uint64_t secret, since, last_ack, next_hello, acks_window;
-    int state, via, ncand, acks, rtt;
-    Cand cand[2];                                     /* through its router (as the lobby sees it), then on its own LAN */
+    int state, via, ncand, acks, rtt, nlobby;         /* nlobby: the candidates the lobby gave (1-2); ncand 3 = cand[2] learnt */
+    Cand cand[3];                                     /* through its router (as the lobby sees it), then on its own LAN, then as its punches came (learn_cand) */
 } Peer;
 static SRWLOCK g_peers_lock = SRWLOCK_INIT;
 static Peer g_peers[MAX_PEERS];
@@ -885,14 +885,16 @@ static void read_peers(const uint8_t *p, int n) {               /* PEERS body */
             q->cand[1].at.sin_port = htons(g16(a + 10));
             q->ncand = 2;
         }
+        q->nlobby = q->ncand;
         const Peer *old = NULL;
         for (int j = 0; j < g_npeers && !old; j++) if (g_peers[j].ip == q->ip && g_peers[j].secret == q->secret) old = &g_peers[j];
-        int same = old && old->ncand == q->ncand;
-        for (int c = 0; same && c < q->ncand; c++) same = same_at(&old->cand[c].at, &q->cand[c].at);
+        int same = old && old->nlobby == q->nlobby;
+        for (int c = 0; same && c < q->nlobby; c++) same = same_at(&old->cand[c].at, &q->cand[c].at);
         if (same) {
             q->state = old->state; q->via = old->via; q->since = old->since; q->last_ack = old->last_ack; q->rtt = old->rtt;
             q->next_hello = old->next_hello; q->acks = old->acks; q->acks_window = old->acks_window;
             memcpy(q->cand, old->cand, sizeof q->cand);
+            q->ncand = old->ncand;                    /* a learnt address (cand[2]) is kept */
         } else {
             char at[24];
             q->state = PS_PUNCHING;
@@ -947,6 +949,27 @@ static Peer *peer_at(uint64_t secret, const struct sockaddr_in *from, int *cand)
     }
     return NULL;
 }
+/* (2026-11-11, a Linux friend: 176 ms through the lobby, "straight to the opponent sent 16853, received 0") a router that
+ * gives every destination its own outside port (his game's UDP 39530 was 9454 toward the lobby): his punches reached the
+ * other game from ANOTHER port than the lobby had announced, and were dropped here (peer_at knew only the announced one), and
+ * the answers sent to the announced port never got through his router. Now a punch with the right secret, from the
+ * player's own address and the public IP the lobby gave, but from a new port, makes that port a candidate (cand[2]): it is
+ * answered there, and his router lets the answer in (it is the reply to his own packets). (peers lock held) */
+static Peer *learn_cand(uint64_t secret, uint32_t from_ip, uint32_t to_ip, const struct sockaddr_in *from, int *cand) {
+    for (int i = 0; i < g_npeers; i++) {
+        Peer *q = &g_peers[i];
+        if (q->secret != secret) continue;
+        if (q->ip != from_ip || to_ip != g_ip || q->cand[0].at.sin_addr.s_addr != from->sin_addr.s_addr) return NULL;
+        Cand *k = &q->cand[2];
+        if (q->ncand == 3 && q->state == PS_DIRECT && q->via == 2) return NULL;     /* a working learnt port is not replaced */
+        memset(k, 0, sizeof *k);
+        k->at = *from;
+        q->ncand = 3;
+        *cand = 2;
+        return q;
+    }
+    return NULL;
+}
 
 static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from) {
     uint64_t t = ms_now();
@@ -972,9 +995,13 @@ static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from)
     uint32_t from_ip = g32(p + 12), to_ip = g32(p + 16);
     int ack = p[20];
     uint64_t word = g64(p + 21);
-    char line[160] = "";
+    char line[160] = "", learnt[160] = "";
     AcquireSRWLockExclusive(&g_peers_lock);
     Peer *q = peer_at(secret, from, &c);
+    if (!q && (q = learn_cand(secret, from_ip, to_ip, from, &c)) != NULL) {
+        char at[24], was[24];
+        snprintf(learnt, sizeof learnt, "%s: its punches come from %s, not %s (its router changes the port per destination): answered there", q->name, at_text(from, at), at_text(&q->cand[0].at, was));
+    }
     if (q && q->ip == from_ip && to_ip == g_ip) {
         Cand *k = &q->cand[c];
         if (ack) {
@@ -987,7 +1014,7 @@ static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from)
                     char at[24];
                     q->state = PS_DIRECT;
                     q->via = c;
-                    snprintf(line, sizeof line, "%s: direct path via %s %s (%d ms)", q->name, c ? "LAN" : "public", at_text(&k->at, at), q->rtt);
+                    snprintf(line, sizeof line, "%s: direct path via %s %s (%d ms)", q->name, c == 1 ? "LAN" : c == 2 ? "learnt" : "public", at_text(&k->at, at), q->rtt);
                 }
             }
         } else {
@@ -999,6 +1026,7 @@ static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from)
         }
     }
     ReleaseSRWLockExclusive(&g_peers_lock);
+    if (learnt[0]) say("%s", learnt);
     if (line[0]) say("%s", line);
 }
 
