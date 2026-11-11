@@ -232,6 +232,17 @@ static void om_nsd_ResolveEx(Ctx *c) {
  * rollback of an arena's match (net_session.c): the opponent is looked for in the lobby with the arena as the key. 1 = asked
  * and answered (gid 0: in none); 0 = the Online menu is off or the server did not answer (3 tries, 300 ms each). */
 static int g_om_on;
+/* nnnet_c4a.inc so_sendto_player: 1 = openers for this address: the Online menu is on our servers and the address is a
+ * player's public one (not our servers', not a private, loopback, link-local, virtual 198.18/15 or multicast address) */
+static int om_openers_for(uint32_t be_ip) {
+    if (!g_om_on) return 0;
+    uint32_t ip = ntohl(be_ip), b0 = ip >> 24, b1 = ip >> 16 & 255;
+    if (b0 == 0 || b0 == 10 || b0 == 127 || b0 >= 224 || (b0 == 172 && b1 >= 16 && b1 < 32) || (b0 == 192 && b1 == 168) || (b0 == 169 && b1 == 254) || (b0 == 198 && (b1 & 0xfe) == 18)) return 0;
+    struct in_addr a;
+    if (InetPtonA(AF_INET, g_om_server, &a) == 1 && a.s_addr == be_ip) return 0;
+    if (InetPtonA(AF_INET, g_om_server2, &a) == 1 && a.s_addr == be_ip) return 0;
+    return 1;
+}
 /* (2026-11-02, F1 > Experimental) the server's state: "STATUS?" -> "STATUS!" + players online u16 + arenas u8 + per
  * arena code[5] + members u8 + most u8 (tools/net/nex_server.py). Asked every 3 s by a thread of its own while F1 shows it
  * (online_menu_status called in the last 2 s): the menu never waits for the network. */

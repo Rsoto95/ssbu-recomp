@@ -484,6 +484,60 @@ static void so_recv(Ctx *c, uint64_t addr, uint64_t lenp) {   /* (fd, buf, size,
 }
 static void socket_Recv(Ctx *c) { so_recv(c, 0, 0); }
 static void socket_RecvFrom(Ctx *c) { if (!A4 || !A5 || !M32(A5)) so_recv(c, 0, 0); else so_recv(c, A4, A5); }
+/* (2026-11-11, the owner and a Linux friend: the friend never got into the owner's Battle Arena, the owner always into
+ * his) OPENERS for the game's own player-to-player sockets (Pia, the Online menu on our servers). The host of an arena
+ * sends to the joiner first; a packet that reaches the joiner's router before the joiner has sent anything from that port
+ * is noted there as a connection of its own, the joiner's first packet then leaves from another port, and the host's
+ * router (which lets in only the address and port it sent to) drops it. So the datagrams a UDP socket sends to a NEW
+ * player address during its first SO_OPEN_MS go out with a time to live of SO_OPEN_TTL hops: they pass this side's own
+ * router(s), which note the way out, and die before the other side's router. Both games do it; after that every packet
+ * finds the way already noted on both sides. Pia sends its connection requests again for seconds, so the lost first ones
+ * only delay the connection by SO_OPEN_MS. Not for our servers' addresses, private or loopback ones (om_openers_for,
+ * online_menu.inc). SSBU_ARENA_OPENERS=0: off; SSBU_ARENA_OPENERS=<ms>: the time. */
+#define SO_OPEN_MS 1500
+#define SO_OPEN_TTL 4
+static int om_openers_for(uint32_t be_ip);                  /* online_menu.inc: 1 = a player's public address, the feature on */
+typedef struct { SOCKET s; uint32_t ip; uint16_t port; uint64_t t0, last; } SoOpener;      /* last: the latest datagram there (30 s of silence: the routers forgot the way, openers again) */
+static SoOpener g_so_opener[64];
+static unsigned g_so_opener_n;
+static SRWLOCK g_so_ttl_lock = SRWLOCK_INIT;             /* shared: a datagram with the normal time to live; exclusive: an opener */
+static volatile LONG64 g_so_openers_sent;
+static int so_opener_ms(void) { static int v = -1; if (v < 0) { const char *e = getenv("SSBU_ARENA_OPENERS"); v = e && *e ? atoi(e) : SO_OPEN_MS; if (v < 0 || v > 10000) v = SO_OPEN_MS; } return v; }
+static int so_opener_now(SOCKET s, const struct sockaddr_in *a) {      /* 1 = this datagram is an opener (g_so_ttl_lock held exclusively) */
+    uint64_t t = GetTickCount64();
+    for (unsigned i = 0; i < 64; i++)
+        if (g_so_opener[i].s == s && g_so_opener[i].ip == a->sin_addr.s_addr && g_so_opener[i].port == a->sin_port) {
+            if (t - g_so_opener[i].last > 30000) g_so_opener[i].t0 = t;
+            g_so_opener[i].last = t;
+            return t - g_so_opener[i].t0 < (uint64_t)so_opener_ms();
+        }
+    SoOpener *o = &g_so_opener[g_so_opener_n++ % 64];       /* a new player address of this socket (the oldest entry is replaced) */
+    o->s = s; o->ip = a->sin_addr.s_addr; o->port = a->sin_port; o->t0 = o->last = t;
+    {   char ip[32]; InetNtopA(AF_INET, &a->sin_addr, ip, sizeof ip);
+        printf("[online-menu] openers: the first %d ms of datagrams to %s:%u go out with a time to live of %d hops (this side's router notes the way; the other side's never sees them)\n", so_opener_ms(), ip, ntohs(a->sin_port), SO_OPEN_TTL); fflush(stdout); }
+    return 1;
+}
+/* the datagram, as an opener while its player address is new */
+static int so_sendto_player(SOCKET s, const char *buf, int len, int flags, const struct sockaddr_in *a) {
+    int n;
+    if (!so_opener_ms() || !om_openers_for(a->sin_addr.s_addr)) return sendto(s, buf, len, flags, (const struct sockaddr *)a, sizeof *a);
+    AcquireSRWLockExclusive(&g_so_ttl_lock);
+    if (so_opener_now(s, a)) {
+        int low = SO_OPEN_TTL, was = 0, wl = sizeof was;
+        if (getsockopt(s, IPPROTO_IP, IP_TTL, (char *)&was, &wl) || was <= 0) was = 64;
+        setsockopt(s, IPPROTO_IP, IP_TTL, (const char *)&low, sizeof low);
+        n = sendto(s, buf, len, flags, (const struct sockaddr *)a, sizeof *a);
+        setsockopt(s, IPPROTO_IP, IP_TTL, (const char *)&was, sizeof was);
+        InterlockedIncrement64(&g_so_openers_sent);
+        ReleaseSRWLockExclusive(&g_so_ttl_lock);
+        return n;
+    }
+    ReleaseSRWLockExclusive(&g_so_ttl_lock);
+    AcquireSRWLockShared(&g_so_ttl_lock);                 /* (not while another thread's opener has the socket's time to live short) */
+    n = sendto(s, buf, len, flags, (const struct sockaddr *)a, sizeof *a);
+    ReleaseSRWLockShared(&g_so_ttl_lock);
+    return n;
+}
 static void so_send(Ctx *c, uint64_t addr) {              /* (fd, buf, size, flags [, const sockaddr *, len]) */
     uint64_t buf = A1, size = A2;
     int gf = (int)A3, flags = 0;
@@ -499,7 +553,8 @@ static void so_send(Ctx *c, uint64_t addr) {              /* (fd, buf, size, fla
     else if (addr && !so_is_loopback(a.sin_addr.s_addr) && !so_open_net()) e = 101;   /* no network */
     else {
         if (temp) so_nonblock(o, 1);
-        if (addr) n = sendto(o->s, (const char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf) & MSG_OOB, (struct sockaddr *)&a, sizeof a);
+        if (addr && o->type == SOCK_DGRAM) n = so_sendto_player(o->s, (const char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf) & MSG_OOB, &a);
+        else if (addr) n = sendto(o->s, (const char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf) & MSG_OOB, (struct sockaddr *)&a, sizeof a);
         else n = send(o->s, (const char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf) & MSG_OOB);
         if (n < 0) e = so_wsa_errno(WSAGetLastError(), 1);
         if (temp) so_nonblock(o, 0);
