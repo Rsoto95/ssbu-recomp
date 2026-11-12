@@ -7,8 +7,8 @@
 
 The window is a Fedora Media Writer-style wizard: one decision per page. It starts
 scripts/linux/install_linux.py for the dump and the build, then scripts/run.py --linux --play for the game. Everything
-writable lives in one storage folder (default: $XDG_DATA_HOME/ssbu-recomp, in the Flatpak
-~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp).
+writable lives in one storage folder (default: $XDG_DATA_HOME/ssbu-recomp, and ~/.local/share/ssbu-recomp in the Flatpak:
+outside Flatpak's ~/.var/app, so an uninstall or --delete-data cannot remove the game).
 """
 import argparse
 import json
@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
@@ -40,8 +41,78 @@ PAGES = ['source', 'files', 'extras', 'location', 'review']
 
 
 def default_storage():
-    return os.environ.get('SSBU_DATA_DIR') or os.path.join(
-        os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'ssbu-recomp')
+    if os.environ.get('SSBU_DATA_DIR'):
+        return os.environ['SSBU_DATA_DIR']
+    if os.environ.get('FLATPAK_ID'):    # Flatpak's XDG_DATA_HOME is its own ~/.var/app, which an uninstall deletes
+        return os.path.expanduser('~/.local/share/ssbu-recomp')
+    return os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'ssbu-recomp')
+
+
+def migrate_flatpak_storage():
+    """(2026-11-11) Flatpak's ~/.var/app data is removed by `flatpak uninstall --delete-data` and by the software-store
+    uninstall, and the first Flatpak builds kept the whole game there. Move it once to ~/.local/share/ssbu-recomp (the
+    folder run.py already uses on Linux, outside Flatpak's data) with renames, and fix the absolute paths launcher.json
+    and install.json recorded. Both saves are kept: the newer userdata/ is the active one, the older is renamed beside it
+    as userdata.before-flatpak-<date>. Nothing happens while a game is running (it is writing last_run.log), when the
+    destination already holds a build, or when the two folders are on different filesystems."""
+    if not os.environ.get('FLATPAK_ID'):
+        return False
+    old = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'ssbu-recomp')
+    new = default_storage()
+    if os.path.abspath(old) == os.path.abspath(new) or not os.path.isdir(old) \
+            or os.path.exists(os.path.join(new, 'build-linux')):
+        return False
+    old_ud = os.path.join(old, 'userdata')
+    new_ud = os.path.join(new, 'userdata')
+    try:
+        for log in (os.path.join(old, 'last_run.log'), os.path.join(new, 'last_run.log')):
+            try:
+                if time.time() - os.path.getmtime(log) < 90:
+                    return False              # a game is running (it writes its log): move at the next start
+            except OSError:
+                pass
+        os.makedirs(new, exist_ok=True)
+        if os.stat(old).st_dev != os.stat(new).st_dev:
+            print('storage: %s and %s are on different filesystems: the game stays in %s' % (old, new, old))
+            return False
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+
+        def save_mtime(userdata):             # the file the game writes when it saves
+            try:
+                return os.path.getmtime(os.path.join(userdata, 'save', 'save_data', 'system_data.bin'))
+            except OSError:
+                return 0.0
+
+        if os.path.isdir(old_ud) and os.path.isdir(new_ud):
+            if save_mtime(old_ud) >= save_mtime(new_ud):
+                os.replace(new_ud, os.path.join(new, 'userdata.before-flatpak-' + stamp))
+                os.replace(old_ud, new_ud)
+            else:
+                os.replace(old_ud, os.path.join(new, 'userdata.before-flatpak-' + stamp))
+        for name in os.listdir(old):
+            dst = os.path.join(new, name)
+            if not os.path.exists(dst):       # launch.sh and last_run.log of a native run stay as they are
+                os.replace(os.path.join(old, name), dst)
+    except OSError as e:
+        print('storage: could not move %s to %s (%s): nothing was deleted; if the build is missing, choose %s in the '
+              'wizard' % (old, new, e, new))
+        return False
+    for path in (config_path(), os.path.join(new, 'install.json')):
+        info = read_json(path)
+        changed = False
+        if isinstance(info, dict):
+            for key, value in info.items():
+                if isinstance(value, str) and (value == old or value.startswith(old + os.sep)):
+                    info[key] = new + value[len(old):]
+                    changed = True
+        if changed:
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(info, f, indent=1)
+            except OSError:
+                pass
+    print('storage: %s moved to %s (outside Flatpak\'s ~/.var/app; an uninstall cannot remove it)' % (old, new))
+    return True
 
 
 def config_path():
@@ -117,6 +188,7 @@ def main(argv=None):
     ap.add_argument('--self-test', action='store_true', help='open the window and close it at once (CI)')
     ap.add_argument('--storage', help='the storage folder (default: %s)' % default_storage())
     a = ap.parse_args(argv)
+    migrate_flatpak_storage()
 
     if a.check_tools:
         cmd = [sys.executable, os.path.join(REPO, 'scripts', 'linux', 'install_linux.py'), '--check-tools',
@@ -197,12 +269,15 @@ class Launcher:
         box.set_margin_bottom(6)
         for text, cb in (('Open storage folder', self._open_storage),
                          ('Open install log', self._open_log),
+                         ('Open game log', self._open_game_log),
                          ('About OpenSmash Ultimate', self._about)):
             b = Gtk.Button(label=text)
             b.set_relief(Gtk.ReliefStyle.NONE)
+            b.set_alignment(0.0, 0.5)
             b.connect('clicked', lambda _b, f=cb: (pop.popdown(), f()))
             box.pack_start(b, False, False, 0)
         pop.add(box)
+        box.show_all()
         menu.set_popover(pop)
         header.pack_end(menu)
         self.win.set_titlebar(header)
@@ -485,8 +560,6 @@ class Launcher:
         Gtk = self.Gtk
         self.action_bar = Gtk.ActionBar()
         self.action_bar.get_style_context().add_class('action-bar')
-        self.about_btn = Gtk.Button(label='About')
-        self.about_btn.connect('clicked', self._about)
         self.back_btn = Gtk.Button(label='Previous')
         self.back_btn.connect('clicked', self._previous)
         self.next_btn = Gtk.Button(label='Next')
@@ -513,14 +586,13 @@ class Launcher:
         center.pack_start(self.step_label, False, False, 0)
         center.pack_start(self.help, False, False, 0)
         self.action_bar.set_center_widget(center)
-        self.action_bar.pack_start(self.about_btn)
         self.action_bar.pack_start(self.back_btn)
         self.action_bar.pack_end(self.next_btn)
         self.action_bar.pack_end(self.stop_btn)
         self.action_bar.pack_end(self.play_btn)
         self.action_bar.pack_end(self.open_log_btn)
         self.action_bar.pack_end(self.install_again_btn)
-        for b in (self.about_btn, self.back_btn, self.next_btn, self.stop_btn, self.play_btn,
+        for b in (self.back_btn, self.next_btn, self.stop_btn, self.play_btn,
                   self.open_log_btn, self.install_again_btn, self.step_label, self.help):
             b.set_no_show_all(True)
         outer.pack_end(self.action_bar, False, False, 0)
@@ -639,7 +711,6 @@ class Launcher:
             self.step_label.set_text('Step %d of %d' % (self.step + 1, len(PAGES)))
             self.next_btn.set_label('Install' if name == 'review' else 'Next')
             self.next_btn.set_sensitive(self._validate())
-        self.about_btn.set_visible(name in ('home', 'source'))
         self.back_btn.set_visible((setup and self.step > 0) or name == 'source' or
                                   (name == 'progress' and self.proc is None))
         self.back_btn.set_label('Back to review' if name == 'progress' else
@@ -1007,6 +1078,9 @@ class Launcher:
 
     def _open_log(self):
         self._open_path(os.path.join(self.storage, 'install.log'))
+
+    def _open_game_log(self):
+        self._open_path(os.path.join(self.storage, 'last_run.log'))
 
     def _open_install_log(self):
         self._open_log()

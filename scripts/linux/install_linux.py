@@ -69,8 +69,11 @@ def free_gb(path):
 
 
 def default_storage():
-    return os.environ.get('SSBU_DATA_DIR') or os.path.join(
-        os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'ssbu-recomp')
+    if os.environ.get('SSBU_DATA_DIR'):
+        return os.environ['SSBU_DATA_DIR']
+    if os.environ.get('FLATPAK_ID'):    # Flatpak's XDG_DATA_HOME is its own ~/.var/app, which an uninstall deletes
+        return os.path.expanduser('~/.local/share/ssbu-recomp')
+    return os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'ssbu-recomp')
 
 
 def tool_root(name, probe):

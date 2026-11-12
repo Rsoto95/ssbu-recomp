@@ -30,8 +30,10 @@ current freedesktop runtime, so the install size stays about 2.3 GB.
   [packaging/flatpak/README.md](packaging/flatpak/README.md)). From a checkout, `./build_flatpak.sh` does the app
   build for you: it installs the runtime if needed, builds and installs the app, writes the bundle and opens the
   launcher (`--no-run` stops before opening it).
-- Everything writable is in `~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp`: `dump/`,
-  `build-linux/`, `userdata/`, the `.nsz` cache and the logs.
+- Everything writable is in `~/.local/share/ssbu-recomp`, outside Flatpak's own `~/.var/app` data, so rebuilding or
+  uninstalling the app never removes it: `dump/`, `build-linux/`, `userdata/`, the `.nsz` cache and the logs. An older
+  Flatpak storage in `~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp` is moved there once at the next
+  start; the newer of the two saves stays active and the other is kept as `userdata.before-flatpak-<date>`.
 - DLC: only the add-on content ids in the file names are read and written to `build-linux/config/dlc.txt`; the content
   itself is in the update. The launcher's DLC list can be changed and Rebuild run again.
 - Updates: a new Flatpak release. Press Rebuild after updating; the build folder is kept and only what changed is

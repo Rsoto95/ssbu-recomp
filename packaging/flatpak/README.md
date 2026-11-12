@@ -24,8 +24,8 @@ page, like Fedora Media Writer:
 2. **Game files**: base game (`.nsz`, `.nsp` or `.xci`), the 13.0.4 or 13.0.5 update and `prod.keys` — or the dump
    folder. **Next** stays disabled until the choice is valid.
 3. **Extras**: optional DLC packages and a firmware folder (its own fonts).
-4. **Install location**: storage folder (default
-   `~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp`), compiler jobs and free space.
+4. **Install location**: storage folder (default `~/.local/share/ssbu-recomp`, outside Flatpak's `~/.var/app`),
+   compiler jobs and free space.
 5. **Review**: the summary and **Install**. It can be stopped and continued.
 
 The **Progress** page shows a spinner, "Compiling 123/1162 — 14m elapsed", a progress bar and the live compile and
@@ -33,8 +33,11 @@ script-module log; a slow file never looks like a freeze. **Stop** is always the
 **Open log** and **Rebuild**. The first start prepares the shaders (about 15 minutes); later starts go straight
 to the game.
 
-Saves, the dump, the build, the shader cache and the logs are all in the storage folder. The game's output of the last
-start is `last_run.log` there; F1 > Log shows the current game log.
+Saves, the dump, the build, the shader cache and the logs are all in the storage folder, outside Flatpak's own
+`~/.var/app` data: rebuilding or uninstalling the app never touches them. An older Flatpak storage in
+`~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp` is moved there once at the next start (the newer of
+the two saves stays active; the other is kept beside it as `userdata.before-flatpak-<date>`). The game's output of the
+last start is `last_run.log` there; F1 > Log shows the current game log.
 
 The look is **adw-gtk3 v6.4** (LGPL-2.1): a GTK3 theme with the libadwaita colors and control shapes, following the
 system dark/light setting through the desktop portal. The runtime stays `org.freedesktop.Sdk//25.08`, so the install
