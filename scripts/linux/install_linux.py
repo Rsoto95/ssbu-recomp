@@ -160,6 +160,9 @@ def tail_log(log_path, stop, step):
     while not stop.is_set():
         try:
             size = os.path.getsize(log_path)
+            if size < offset:                          # truncated or rotated: follow the new file
+                offset = 0
+                buf = ''
             if size > offset:
                 with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
                     f.seek(offset)

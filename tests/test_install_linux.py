@@ -60,6 +60,9 @@ def test_tail_log():
                 f.write('  c_03f7.c         78s  helpers not inlined\n')
                 f.write('compiled: 1162   failed: 0   elapsed: 90s\n')
             time.sleep(1.0)
+            with open(path, 'w', encoding='utf-8') as f:       # a retry truncated the log
+                f.write('new run\n')
+            time.sleep(1.0)
             stop.set()
             t.join(timeout=2)
         d.PROGRESS = False
@@ -69,6 +72,7 @@ def test_tail_log():
         assert '"done": 10' in text, text
         assert '"last": "c_03f7.c"' in text, text
         assert '"done": 1162' in text, text
+        assert 'new run' in text, text
 
 
 def test_dry_run():
