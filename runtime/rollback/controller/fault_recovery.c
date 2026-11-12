@@ -23,6 +23,7 @@ static volatile LONG64 g_fr_total, g_fr_recoveries, g_fr_giveups, g_fr_not_absor
 static volatile LONG g_fr_depth;                        /* consecutive recoveries: how far back the next one goes */
 static long long g_fr_tainted_pass = -1;               /* the pass whose faults started the walk back */
 static volatile LONG g_fr_off;                          /* the net let go: faults end the game again */
+static volatile LONG g_fr_contain;                      /* the online match is being left: faults are absorbed, not fatal */
 static volatile LONG g_fr_lines;
 static int g_fr_enabled = -1;
 
@@ -33,7 +34,7 @@ static int g_fr_enabled = -1;
 
 static int fr_enabled(void) {
     if (g_fr_enabled < 0) { const char *e = getenv("SSBU_RB_RECOVER"); g_fr_enabled = !(e && e[0] == '0'); }
-    return g_fr_enabled && !g_fr_off && g_rg_ready && ra_fight_on();
+    return g_fr_enabled && g_rg_ready && ra_fight_on() && (g_fr_contain || !g_fr_off);
 }
 
 /* The marks of an absorbed fault, shared by both ways in (a leaf helper and a bad indirect call). Returns 0 when the net must not absorb this one. */
@@ -239,6 +240,16 @@ int rb_fault_recover(long long i, Ctx *c, long long *best_out) {
 /* The net lets go for the rest of the run (no state to go back to): the pending mark is dropped and faults end the game as before. */
 void rb_fault_give_up(void) { InterlockedExchange(&g_fr_pending, 0); InterlockedExchange(&g_fr_off, 1); InterlockedIncrement64(&g_fr_giveups); }
 
+/* The online match is being left (rollback_controller.c): keep absorbing the bad calls until player 1 walks off, instead of ending the process. */
+void rb_fault_contain(void) { InterlockedExchange(&g_fr_contain, 1); }
+void rb_fault_contain_off(void) { InterlockedExchange(&g_fr_contain, 0); }
+
+/* A new match: the ring was rebased, so the safety net starts fresh too (a give-up in one match must not end the next one). */
+void rb_fault_match_start(void) {
+    InterlockedExchange(&g_fr_contain, 0); InterlockedExchange(&g_fr_off, 0); InterlockedExchange(&g_fr_depth, 0);
+    InterlockedExchange(&g_fr_in_pass, 0); InterlockedExchange(&g_fr_pending, 0); g_fr_tainted_pass = -1;
+}
+
 /* A pass ended with no fault: the walk back starts from the newest state again next time. */
 /* A pass `i` ended with no fault. The walk back (how far the next recovery goes) starts from the newest state again only once the pass that FAULTED has come through clean: a clean pass before
  * it is not news (a dense run, 2026-10-28: the walk went 1 back, 2 back, 1 back... 400 times at the same pass, because the clean pass in between reset it, and never reached an older state). */
@@ -250,7 +261,7 @@ void rb_fault_pass_clean(long long i) {
 void rb_fault_report(void) {
     rg_quiet_report();
     if (g_fr_total || g_fr_not_absorbable || g_fr_giveups)
-        LOG("r1: FAULT RECOVERY so far: %lld faults absorbed, %lld recoveries, %lld not absorbable, %lld times the net let go%s\n", (long long)g_fr_total, (long long)g_fr_recoveries, (long long)g_fr_not_absorbable, (long long)g_fr_giveups, g_fr_off ? " (OFF now)" : "");
+        LOG("r1: FAULT RECOVERY so far: %lld faults absorbed, %lld recoveries, %lld not absorbable, %lld times the net let go%s\n", (long long)g_fr_total, (long long)g_fr_recoveries, (long long)g_fr_not_absorbable, (long long)g_fr_giveups, g_fr_contain ? " (contained until the match ends)" : g_fr_off ? " (OFF now)" : "");
 }
 
 /* SSBU_RB_FAULT_TEST: a leaf read of an address that is not mapped, the same shape as the lifted code's rd8. */

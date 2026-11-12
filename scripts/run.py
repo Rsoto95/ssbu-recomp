@@ -809,13 +809,15 @@ def main():
     if a.linux and (rollback or env.get('SSBU_RB_NET') or env.get('SSBU_RB_SIM')):
         # (2026-11-03) the audio threads' host side is not part of the snapshot: a load rewinds their guest memory while the
         # device keeps its own state, which crashed after ~200 rollbacks (docs/ROLLBACK_LINUX_FINDINGS.md). Windows'
-        # Play SSBU.bat sets SSBU_RB_AUDIO_OFF=1 too; here it is the default for every Linux rollback run. --env ...=0
-        # keeps the old behavior for a diagnosis (it will crash).
+        # Play SSBU.bat sets SSBU_RB_AUDIO_OFF=1 too; here it is the default for every Linux rollback run. The game's
+        # fight_sound (on by default) wins while it is on: turn it off in F1 / graphics.ini for the held-audio path.
+        # --env ...=0 keeps the old behavior for a diagnosis (it can desync or crash).
         if 'SSBU_RB_AUDIO_OFF' not in env:
             env['SSBU_RB_AUDIO_OFF'] = '1'
-            print('Rollback on Linux: audio threads held for the fight (SSBU_RB_AUDIO_OFF=1; sound in rollback fights is not supported yet).')
+            print('Rollback on Linux: audio threads are held only while graphics.ini fight_sound = off (SSBU_RB_AUDIO_OFF=1; the graphics option wins when on).')
+            print('Sound in rollback fights is experimental: a desync leaves the match (player 1 walks off) instead of closing the game.')
         elif env.get('SSBU_RB_AUDIO_OFF', '')[:1] == '0':
-            print('WARNING: rollback on Linux with SSBU_RB_AUDIO_OFF=0: a load can crash the audio threads (known limit).')
+            print('WARNING: rollback on Linux with SSBU_RB_AUDIO_OFF=0: the audio threads run in the fight (sound on is experimental; a desync leaves the match).')
     if a.linux and (rollback or env.get('SSBU_RB_NET') or env.get('SSBU_RB_SIM')) and not env.get('SSBU_NO_WRITEWATCH'):
         uffd_warn()
     if a.play and os.name == 'nt' and not (a.linux or a.mac) and env.get('SSBU_ONLINE', '') not in ('off', '0', 'no', 'false'):

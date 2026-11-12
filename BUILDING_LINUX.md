@@ -54,7 +54,7 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
 | Keyboard | works (tested); controllers through SDL3 are the same code as on Windows but **not tested with a real pad on Linux** |
 | Album movie recording (the game's video capture to the album) | **not implemented** on Linux; the 7 self-test cases for it are accepted as known failures |
 | OpenGL renderer | not on Linux: Vulkan only |
-| Online play (experimental, `SSBU_ONLINE`) | Works: tested 2026-11-04 against a Windows player, over the internet and on the same LAN, in Local Wireless Create Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches, no desync or crash (this was Linux against Windows; Linux against Linux is not yet tested); rollback remains experimental and keeps the limits below. UPnP is a stub on Linux (forward the UDP port by hand); rollback fights are silent by default (the audio threads are held). See [Rollback and online play](#rollback-and-online-play-linux) |
+| Online play (experimental, `SSBU_ONLINE`) | Works: tested 2026-11-04 against a Windows player, over the internet and on the same LAN, in Local Wireless Create Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches, no desync or crash (this was Linux against Windows; Linux against Linux is not yet tested); rollback remains experimental and keeps the limits below. UPnP is a stub on Linux (forward the UDP port by hand); rollback fights have sound on by default (`fight_sound = on`); set it off (F1 > Gameplay) for silent, reliable rollback fights — sound on can desync a match, which the safety net then leaves (player 1 walks off) instead of ending the process. See [Rollback and online play](#rollback-and-online-play-linux) |
 | Other distributions, AMD / Intel GPUs, X11, Steam Deck | not tested. The package lists for Debian/Ubuntu and Fedora in `install_deps.sh` are best guesses; `setup.py` checks every library and says which one is missing |
 
 ## What you need
@@ -294,10 +294,16 @@ run has not been repeated.
 Another risk is a load that restores a state whose guest object names a job fiber/object that the load did not bring
 back (the fiber moved to another host fiber between the capture and the load). The re-run then faults in a cascade.
 The signal handler absorbs the first plain moves, but the cascade has no `nro_catch_call` frame on the current host
-stack to cut it back to, so after 4,096 faults the net lets go and the process ends. A catch record on another
+stack to cut it back to, so after 4,096 faults the net lets go and the process ends. When the ring itself has no older
+healthy state (the same fault comes back from every saved state), an online match is left instead: player 1 walks off
+the stage and the game returns to the character select, with the failed state logged; offline that case still ends the
+process. A catch record on another
 fiber's stack cannot be used: a cross-stack `longjmp` is exactly what the port must not do. A throw can also still
 fail with `f_720052e2f0 handled an exception but was not entered through nro_catch_call` when its record is on another
 fiber. These are the port's known limits, not something to work around with signals or a rewritten safe point.
+Sound in a rollback fight (`fight_sound = on`, the default) is its own risk: the audio thread runs beside the ring and
+the host released-buffer queue is not part of the snapshot, so a match can desync; the walk-off above is then used.
+`fight_sound = off` (F1 > Gameplay) holds the audio threads and is the reliable path.
 Offline play is unaffected. If a long match does fail, fall back to delay-based online play
 (`SSBU_RB_NET_NOROLLBACK=1`), or turn Rollback off in F1; the ring is then never made.
 (2026-11-03: after the load-admission fix, the offline ring simulation completed 84 loads with k 1..7, no refused

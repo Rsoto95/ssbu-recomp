@@ -174,6 +174,9 @@ newest ring value in every capture and copied back whole in every load (the cost
 The audio row is my reading of `nnaudio.c` (the list of released buffers, `g_released`, is host state). A game thread
 (`nus3::audio update`) that never reached a wait again after many forced rollbacks with a real audio device, and did not
 with `SSBU_AUDIO_MUTE=1`, was seen once each (PR #102); that this row is the cause is a guess, not shown.
+With the sound of online fights on (`fight_sound = on`, the default), the audio thread runs beside the ring and a
+rollback can desync (seen on Linux, 2026-11-11); the safety net then leaves the match (player 1 walks off) instead of
+ending the process. `fight_sound = off` holds the audio threads and is the reliable path.
 
 ## 6. Reading order
 
@@ -281,6 +284,8 @@ Linux-against-Linux two-instance retest has not been repeated. Another risk is a
 guest object names a job fiber/object that was not brought back (the fiber moved to another host fiber between the
 capture and the load). The re-run then
 faults in a cascade; the signal handler absorbs the plain moves, but no `nro_catch_call` frame is on the current host
-stack to cut it back to, so after 4,096 faults the net lets go. A catch record on another fiber's stack cannot be used
+stack to cut it back to, so after 4,096 faults the net lets go. When the ring itself has no older healthy state (the
+same fault comes back from every saved state), an online match is left (player 1 walks off) instead of ending the
+process; offline that case still ends it. A catch record on another fiber's stack cannot be used
 (cross-stack `longjmp`). These are the port's known limits; the fallback is delay-based online play
 (`SSBU_RB_NET_NOROLLBACK=1`) or Rollback off in F1.
