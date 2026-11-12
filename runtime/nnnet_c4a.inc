@@ -327,12 +327,35 @@ static void socket_Finalize(Ctx *c) {
 static void socket_GetLastErrno2(Ctx *c) { if (!g_so_init) RETI(22); else RETI(*so_errno_ptr(c)); }
 static void socket_SetLastErrno2(Ctx *c) { int e = (int)A0; so_set_errno(c, e); }
 
+/* (2026-11-11, a friend's Battle Arena connection ended with error 2618-0006 right at the first openers, both as host and
+ * as joiner; the same friend connected on the versions before the openers) Windows hands an ICMP answer to a datagram
+ * this socket SENT to the socket's next RECEIVE as an error: "port unreachable" as WSAECONNRESET, "time to live exceeded"
+ * as WSAENETRESET. The openers (so_sendto_player) die on the way on purpose, so on a network that answers them the game's
+ * receive failed with errno 102 and Pia gave the connection up. A Switch's UDP socket reports neither: both are turned
+ * off on the socket, and so_recv passes over one that still arrives. */
+#ifdef _WIN32
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+#ifndef SIO_UDP_NETRESET
+#define SIO_UDP_NETRESET _WSAIOW(IOC_VENDOR, 15)
+#endif
+static void so_udp_no_icmp(SOCKET s) {
+    BOOL off = FALSE; DWORD bytes = 0;
+    WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
+    WSAIoctl(s, SIO_UDP_NETRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
+}
+#else
+static void so_udp_no_icmp(SOCKET s) { (void)s; }
+#endif
+static volatile LONG g_so_icmp_passed;                    /* receives of a UDP socket that failed with an ICMP answer (logged once, counted) */
 static void socket_Socket(Ctx *c) {                       /* (domain, type, protocol) */
     int domain = (int)(A0 & 0xff), type = (int)A1, protocol = (int)A2;
     so_need_init(c, "nn::socket::Socket");
     if (domain != 2) { so_fail(c, 97); return; }
     SOCKET s = socket(AF_INET, type, protocol);
     if (s == INVALID_SOCKET) { so_fail(c, so_wsa_errno(WSAGetLastError(), 0)); return; }
+    if (type == SOCK_DGRAM) so_udp_no_icmp(s);
     SoObj *o = calloc(1, sizeof *o);
     o->s = s; o->type = type;
     int fd = so_install(o, 0);
@@ -467,12 +490,20 @@ static void so_recv(Ctx *c, uint64_t addr, uint64_t lenp) {   /* (fd, buf, size,
     int want = (int)(size > (1u << 20) ? (1u << 20) : size);       /* (at most 1 MB per call: a stream gives the rest next time) */
     char *tmp = so_bounce((size_t)want);
     if (!tmp) { tmp = (char *)(uintptr_t)buf; want = (int)(size > 0x7fffffff ? 0x7fffffff : size); }
-    if (addr) n = recvfrom(o->s, tmp, want, so_host_flags(gf), (struct sockaddr *)&a, &alen);
-    else n = recv(o->s, tmp, want, so_host_flags(gf));
-    if (n < 0) {
+    for (int icmp = 0; ; icmp++) {
+        alen = sizeof a;
+        if (addr) n = recvfrom(o->s, tmp, want, so_host_flags(gf), (struct sockaddr *)&a, &alen);
+        else n = recv(o->s, tmp, want, so_host_flags(gf));
+        if (n >= 0) break;
         int w = WSAGetLastError();
-        if (w == WSAEMSGSIZE) n = want;                   /* datagram longer than the buffer: BSD truncates silently */
-        else e = so_wsa_errno(w, 0);
+        if (w == WSAEMSGSIZE) { n = want; break; }        /* datagram longer than the buffer: BSD truncates silently */
+        if (o->type == SOCK_DGRAM && (w == WSAENETRESET || w == WSAECONNRESET)) {      /* an ICMP answer to a datagram sent (so_udp_no_icmp): not a receive */
+            if (InterlockedIncrement(&g_so_icmp_passed) == 1) { printf("[online-menu] a UDP receive failed with an ICMP answer to a datagram sent (Winsock error %d): passed over, the next datagram is read (logged once)\n", w); fflush(stdout); }
+            if (icmp < 32) continue;                      /* each failure uses up one answer; the next call reads a datagram or waits */
+            w = WSAEWOULDBLOCK;
+        }
+        e = so_wsa_errno(w, 0);
+        break;
     }
     if (n > 0 && tmp != (char *)(uintptr_t)buf) memcpy((void *)(uintptr_t)buf, tmp, (size_t)n);
     if (temp) so_nonblock(o, 0);
