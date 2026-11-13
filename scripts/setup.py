@@ -611,7 +611,7 @@ def deps_linux(cx):
     if missing:
         raise Fail('missing Python packages: %s (run setup.py with deps/venv/bin/python)%s' % (', '.join(missing), LINUX_HINT))
     say('  python packages: numpy lz4 zstandard Pillow unicorn: ok')
-    clang = os.path.join(a.llvm, 'bin', 'clang') if a.llvm else shutil.which('clang')
+    clang = os.path.join(a.llvm, 'bin', 'clang') if a.llvm else (shutil.which('clang-19') or shutil.which('clang'))
     if not clang or not os.path.exists(clang):
         raise Fail('clang not found (install clang, or --llvm <folder with bin/clang>)' + LINUX_HINT)
     ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]
@@ -623,6 +623,11 @@ def deps_linux(cx):
     if major and major < 19:
         raise Fail('clang %d is too old: the Linux build needs clang 19 or newer (C23 typeof_unqual)' % major)
     cx.tools['clang'] = clang
+    local_pc = os.path.expanduser('~/.local/lib/pkgconfig')
+    if os.path.isdir(local_pc):
+        path = os.pathsep.join(p for p in (local_pc, os.environ.get('PKG_CONFIG_PATH', '')) if p)
+        os.environ['PKG_CONFIG_PATH'] = path
+        cx.tools['pkg_config_path'] = path
     if not shutil.which('pkg-config'):
         raise Fail('pkg-config not found' + LINUX_HINT)
     for pc, name in LINUX_PKGS:
@@ -646,7 +651,10 @@ def deps_linux(cx):
                 '    puts("ok");\n    return 0;\n}\n')
     flags = subprocess.run(['pkg-config', '--cflags', '--libs'] + [p for p, _ in LINUX_PKGS], capture_output=True, text=True).stdout.split()
     err = ''
+    cxx_lib = subprocess.run([clang, '-print-file-name=libstdc++.so'], capture_output=True, text=True).stdout.strip()
     for libs in GLSLANG_LIBS:
+        if cxx_lib == 'libstdc++.so':
+            libs = ['-l:libstdc++.so.6' if flag == '-lstdc++' else flag for flag in libs]
         r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p')] + flags + libs + ['-lGL', '-lm'], capture_output=True, text=True)
         if not r.returncode:
             cx.tools['glslang_libs'] = libs
@@ -1125,7 +1133,18 @@ def step_link(cx):
 
 def link_linux(cx):
     cx.run('link', [cx.tools['clang'], '-O2', '-shared', '-fPIC', 'vk_glslang_shim.c', '-o', 'ssbu_glslang.so'] + cx.tools.get('glslang_libs', GLSLANG_LIBS[0]))
-    cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=LINUX_EXE))
+    env = build_env(cx)
+    # The compile step already linked the game library; only the runtime remains to build.
+    cmd = [
+        sys.executable, '-u', os.path.join(REPO, 'scripts/linux/prepare_current_runtime.py'),
+        '--build', cx.build,
+        '--exe', LINUX_EXE,
+        '--jobs', str(min(cx.jobs, 4)),
+        '--clang', cx.tools['clang'],
+    ]
+    if all(s in cx.state.get('done', {}) for s in ('compile', 'nro')):
+        cmd.append('--setup-complete')
+    cx.run('link', cmd, env=env)
     for f in (LINUX_EXE, 'ssbu_glslang.so', game_lib(cx)):
         if not os.path.exists(os.path.join(cx.work, f)):
             raise Fail('%s was not produced' % f)
