@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Rsoto95.OpenSmashUltimate</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>OpenSmash Ultimate</name>
+  <summary>Build and play Super Smash Bros. Ultimate from your own dump</summary>
+  <description>
+    <p>
+      OpenSmash Ultimate is a native PC port of Super Smash Bros. Ultimate made by static recompilation. The game's
+      AArch64 code is translated to C and compiled for your PC on first install, from your own legally obtained dump.
+    </p>
+    <p>
+      This package contains the project's toolchain and runtime only: no game code, assets, keys or firmware. Choose
+      your base game and update packages (or an existing dump), your prod.keys and optionally DLC packages; the app
+      creates the dump, builds the game and starts it.
+    </p>
+    <p>
+      The first build takes about 1.5 to 2.5 hours and needs about 30 GB of free disk space. The build can be stopped
+      and continued. Saves live in the app's data folder.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.Rsoto95.OpenSmashUltimate.desktop</launchable>
+  <url type="homepage">https://denkishi.github.io/opensmash-site/</url>
+  <developer id="io.github.rsoto95">
+    <name>OpenSmash Ultimate contributors</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-11"/>
+  </releases>
+</component>

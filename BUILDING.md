@@ -295,8 +295,9 @@ the build still works, and F1 only writes a log line saying why there is no menu
 When the game asks for text (a name, for example) a Switch-style keyboard is drawn over the picture (Vulkan renderer).
 Controller: d-pad or left stick move, **A** types the key, **B** deletes, **Y** space, **X** symbols page, **L / R** move the
 text cursor, **ZL** or the left stick button = shift, **+** confirms, **-** cancels. The PC keyboard works too: type,
-Backspace/Delete, Left/Right/Home/End, Enter confirms, Esc cancels. `SSBU_SWKBD=dialog` uses the old Windows dialog
-instead (the OpenGL path always does).
+Backspace/Delete, Left/Right/Home/End, Enter confirms, Esc cancels. On Linux and macOS the same keyboard is drawn by the
+settings menu's Dear ImGui layer over the Vulkan picture. `SSBU_SWKBD=dialog` uses the old Windows dialog instead (the
+OpenGL path always does).
 
 ## Third-party code
 

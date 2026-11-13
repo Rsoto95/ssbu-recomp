@@ -70,6 +70,11 @@ deps/
 build_release/
 dist/
 
+# packaging/flatpak: flatpak-builder's work folder and the app bundle (a Release asset, never committed)
+.flatpak-builder/
+build-flatpak/
+*.flatpak
+
 # local configuration (build_location.txt: the install location chosen in the installer window, scripts/build_location.py)
 config/
 build_location.txt

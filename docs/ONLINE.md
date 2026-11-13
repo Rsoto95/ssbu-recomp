@@ -22,9 +22,10 @@ Online play is experimental and ON by default: the game joins the project's publ
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).
 
-**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller"; on Linux, "Type in a
-dialog"). It is the name the game and the other players see (`player_name` in `config\graphics.ini`); empty = your
-login name (the Windows user name on Windows). Used from the next start.
+**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller": the in-game keyboard on
+Windows, Linux and macOS). If it cannot be drawn, the desktop's text dialog is used. It is the name the game and the
+other players see (`player_name` in `config\graphics.ini`); empty = your login name (the Windows user name on Windows).
+Used from the next start.
 
 ## The easy way: the F1 menu
 
@@ -187,11 +188,14 @@ or more of a fight's frames with more than 16.7 ms of work) turns the sound of o
 session, with a message (F1 -> Gameplay turns it on again; a player's own choice there is never overridden;
 `SSBU_AUTO_SOUND_OFF=0`: never). The game runs at above-normal Windows priority (`SSBU_PRIORITY=normal`: off).
 
-**Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
-because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**
-brings the sound back (graphics.ini `fight_sound = on`), at the cost of some stutter and, rarely, a crash. It is each
-player's own choice and is used from the next match. On Linux the same switch exists; the launcher holds the audio
-threads by default, and turning sound on has the same risk.
+**Sound:** the sound of online fights is ON by default since 2026-11-05 (`graphics.ini fight_sound = on`; each player's
+own choice, used from the next match). In a rollback match that keeps the game's audio thread (`nus3::audio update`)
+running beside the ring: it mixes while the main thread simulates, and the host released-buffer queue is not part of
+the snapshot. A match can therefore desync (seen on Linux, 2026-11-11, after a rollback), and the safety net then leaves
+the match (player 1 walks off) instead of closing the game. **F1 -> Gameplay -> Sound in online fights: OFF**
+(`fight_sound = off`) is the reliable choice for rollback: it holds the audio threads for the fight (the launcher sets
+`SSBU_RB_AUDIO_OFF=1` for this; the graphics option wins over the variable when it is on), and the main thread runs the
+sound engine's queue step at the ring's safe points.
 
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping).
 Rollback works on Windows (tested between two Windows PCs) and experimentally on Linux (tested against Windows over
@@ -199,6 +203,44 @@ the internet and on the same LAN, 2026-11-04; Linux against Linux is not yet tes
 Windows PC with simulated 150 ms ping and loss (0 desyncs). The Linux port still has the known limits in
 [BUILDING_LINUX.md](../BUILDING_LINUX.md); if a long match fails, use the delay-based fallback
 (`SSBU_RB_NET_NOROLLBACK=1`). Please report how it feels.
+
+### Replays (2026-11-07, Brix)
+
+**A replay plays without rollback.** A replay starts its fight without the select screens' set-up, so no handshake runs
+for it. Before this change the controller took the start-up default ("agreed") or the last match's answer, started a
+rollback match against nobody (`[rbnet] match 1 (id 00000000) ... round trip -1.0 ms`) and the game froze, waiting for
+the other player's pad. Now a fight with no set-up since the previous fight is played like a Local Wireless room fight:
+no rollback, pads untouched; the log says `r1: RB NET: a fight with no set-up of its own (a replay): no rollback`
+(`rbn_setup_round()` in `net_session.c`, the check at the top of `rbg_step_body` in `rollback_controller.c`).
+Tested on 13.0.5 (Windows, RTX 5070 Ti): one replay played back 3 times in one session, rollback on: each time the log line
+above, no freeze. Every real online match in the logs of that day had its own set-up, so an online match is not
+affected; a Local Wireless room's match was not tested after the change.
+
+**Known issue: a replay saved from a rollback fight goes wrong partway.** Replays of local fights play to the end
+(tested). The replay of a Battle Arena match (172 s, 10,311 frames, `mispredictions 2`, `DESYNCS 0`: the match itself was
+right on both PCs) ran 105 s on playback and then no longer followed the match. Both rollbacks of that match were early:
+```
+r1: RB NET: rollback 1 at frame 25: wrong guess at 21, state of frame 20 loaded in 1.238 ms, 5 frames again
+r1: RB NET: rollback 2 at frame 29: wrong guess at 27, state of frame 26 loaded in 1.493 ms, 3 frames again
+r1: RB NET: match start, base state = frame 0 (fight frame 217); pacing 60 Hz; re-run skip mask 49, lite mask 123 (the last re-run pass too)
+```
+Two likely causes, not yet told apart (an inference from the logs, not measured):
+1. **Re-run frames recorded twice.** The game adds each frame's inputs to its replay recording; if the memory holding the
+   recording is not restored by `r1_ring_load`, the 5 + 3 re-run frames are added a second time and every input after
+   frame ~21 lands 8 frames late on playback.
+2. **The guesses stay in the replay.** Re-run passes are "lite" (skip mask 49, lite mask 123, the last one included); if
+   the game's replay recorder is in a skipped part, the corrected pads never reach the recording and frames 21 and 27
+   keep the guessed ones.
+
+How to tell them apart: force rollbacks in a local fight with the *same* pads (`SSBU_RB_SIM`), save the replay and play
+it. It breaks: cause 1 (`SSBU_RB_AUDIT=60`, `rollback/debug/ring_audit.c`, should then show the recording's block among
+the pages the ring did not take). It plays to the end: cause 2 (a run with every re-run pass full should then give a good
+replay).
+
+**Error 2214-0101 after a replay** (seen once, at the end of a replay's playback): `0xcad6` is the album's "any other
+failure" (`nnalbum.c`). Most likely (an inference: the caller was not traced) it is the video maker, which has no frame
+source yet, so `PrecheckToStartMovieMaker` reports a failure on purpose instead of recording a video without pictures.
+It is not a damaged replay. Since 2026-11-07 the error code is written to the log before the error box opens.
 
 
 ## Credit

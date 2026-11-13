@@ -618,12 +618,13 @@ double now_ms(void);                               /* rollback/model/game_state.
 /* Audio threads that are running guest code though AUDIO_OFF is on, because they hold a game mutex and parking them with it held would freeze a sim thread that needs it (seen: the game's
  * thread waiting 20 s for a mutex owned by a parked audio thread). The ring waits for this count to reach 0 before it loads a state (rb_audio_wait_parked), so no audio thread is in guest
  * code while the ring rewinds the memory under it (the reads of 0x5 / 0xffffffffffffffff after a load). An audio thread holding no mutex parks for good at the gate, in host code touching no
- * guest memory, safe across any number of loads. g_audio_gen is bumped at fight over so a thread's "running" mark from a past fight does not leak into the next. */
+ * guest memory, safe across any number of loads. g_audio_gen is bumped at fight over so a thread's "running" mark from a past fight does not leak into the next.
+ * (sound-safe loads) The same count is kept with the sound of online fights ON: then the gate does not park the thread, it only marks it while it runs with a mutex, and the ring's load
+ * refuses when one is still in guest code (the loads no longer run under a sound thread, which is what crashed). */
 static volatile LONG g_audio_running, g_audio_gen;
 int rb_audio_running(void) { return g_audio_running; }
 void rb_audio_fight_over(void) { InterlockedExchange(&g_audio_running, 0); InterlockedIncrement(&g_audio_gen); }   /* ring_simulation.c, where g_rb_audio_off is cleared */
 int rb_audio_wait_parked(double max_ms) {           /* snapshot_ring.c, before a load: 1 = no audio thread is in guest code now, 0 = one still is after max_ms */
-    if (!g_rb_audio_off) return 1;
     for (double t0 = now_ms(); g_audio_running > 0; ) { if (now_ms() - t0 > max_ms) return 0; YieldProcessor(); }
     return 1;
 }
@@ -694,7 +695,7 @@ void host_import(Ctx *c, int sym) {
 static void host_import_real(Ctx *c, int sym) {
     static volatile LONG order_count;
     if (g_guest_frozen) guest_freeze_wait();
-    if (g_rb_audio_off) rb_audio_off_gate(c);
+    rb_audio_off_gate(c);
     if (!g_import_count_all && g_import_calls[sym] >= 3 && g_handlers[sym]) {
         const char *saved_name = c->in_import;
         uint64_t saved_from = c->import_from;
@@ -706,7 +707,7 @@ static void host_import_real(Ctx *c, int sym) {
         c->in_import = saved_name;
         c->import_from = saved_from;
         if (g_guest_frozen) guest_freeze_wait();
-        if (g_rb_audio_off) rb_audio_off_gate(c);
+        rb_audio_off_gate(c);
         return;
     }
     unsigned long long n = (unsigned long long)InterlockedIncrement64((volatile LONG64 *)&g_import_calls[sym]);
@@ -740,7 +741,7 @@ static void host_import_real(Ctx *c, int sym) {
     c->in_import = saved_name;
     c->import_from = saved_from;
     if (g_guest_frozen) guest_freeze_wait();
-    if (g_rb_audio_off) rb_audio_off_gate(c);
+    rb_audio_off_gate(c);
 }
 
 void print_import_summary(FILE *out) {

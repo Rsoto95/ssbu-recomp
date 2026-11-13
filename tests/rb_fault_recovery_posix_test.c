@@ -73,6 +73,17 @@ int main(int argc, char **argv) {
         rb_fault_give_up();
         u.uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)mov;
         assert(!rb_fault_try_absorb(&u, (void *)8));
+        rb_fault_contain();                                  /* the online match is being left: the same fault is absorbed, not fatal */
+        u.uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)mov;
+        assert(rb_fault_try_absorb(&u, (void *)8));
+        assert(u.uc_mcontext.gregs[REG_RIP] == (greg_t)(uintptr_t)(mov + 4));
+        rb_fault_contain_off();
+        rb_fault_give_up();
+        u.uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)mov;
+        assert(!rb_fault_try_absorb(&u, (void *)8));
+        rb_fault_match_start();                              /* a fresh match: the safety net is on again */
+        u.uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)mov;
+        assert(rb_fault_try_absorb(&u, (void *)8));
     }
     puts("POSIX network fault recovery: ok");
     return 0;

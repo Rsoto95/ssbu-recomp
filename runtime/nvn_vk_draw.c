@@ -3604,7 +3604,10 @@ static void ovl_text(uint32_t index, int x, int y, int dot, const char *s) {
 /* The on-screen keyboard (osk.c): its picture, drawn there with GDI, copied over the presented frame (inside the
  * picture's 16:9 rectangle). Three staging buffers in turn, so that a new picture is never written into one a frame
  * still in flight reads. The image takes the swapchain's format (UNORM or SRGB) so the blit keeps the values. */
-int osk_active(void); int osk_take(uint32_t *dst, LONG *seen); void osk_size(int *w, int *h);      /* osk.c */
+int osk_active(void);                                                                             /* osk.c */
+#ifdef _WIN32
+int osk_take(uint32_t *dst, LONG *seen); void osk_size(int *w, int *h);      /* osk.c: the GDI picture */
+#endif
 static struct { VkImage img; VMem mem; VkFormat fmt; int made, w, h, cur; LONG seen; VkBuffer buf[3]; VMem bmem[3]; } g_osk;
 static PresentJob g_osk_job;                       /* the last real present: shown again under the keyboard */
 static int g_osk_job_ok;
@@ -3612,6 +3615,9 @@ long long nvn_vk_presents(void) { return (long long)g_vk_frames; }
 static void vk_present2(void *arg, int progress);
 void nvn_vk_osk_redraw_job(void *arg) { (void)arg; if (V.alive && g_osk_job_ok) vk_present2(&g_osk_job, 1); }
 static void osk_draw(uint32_t index) {
+#ifndef _WIN32
+    (void)index;                                    /* Linux / macOS: menu.cpp draws the keyboard with ImGui over the frame */
+#else
     if (!osk_active()) return;
     VkFormat fmt = V.format.format;
     if (!g_osk.buf[0]) {
@@ -3652,6 +3658,7 @@ static void osk_draw(uint32_t index) {
     b.srcOffsets[1].x = g_osk.w; b.srcOffsets[1].y = g_osk.h; b.srcOffsets[1].z = 1;
     b.dstOffsets[0].x = d4[0]; b.dstOffsets[0].y = d4[1]; b.dstOffsets[1].x = d4[0] + d4[2]; b.dstOffsets[1].y = d4[1] + d4[3]; b.dstOffsets[1].z = 1;
     vkCmdBlitImage(R.cmd, g_osk.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+#endif
 }
 static void menu_vk_draw(uint32_t index);          /* U1: the settings menu (nvn_vk_menu.c, included below) */
 /* graphics.ini sharpening = 1..100 (0 = off, the default): the picture is sharpened on its way to the window. The present

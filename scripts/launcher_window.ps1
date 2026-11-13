@@ -662,7 +662,7 @@ foreach ($t in @(@('Saves folder', { Open-Path $P.Saves }), @('Screenshots', { O
 # a quick switch for the most asked-for setting; it moves Display > Window mode, and follows it
 function Get-SettingControl([string]$key) { foreach ($c in $controls) { if ($c.Def.K -eq $key -and $c.Def.F -eq 'G') { return $c.Ctl } }; return $null }
 $chkFull = New-Object System.Windows.Forms.CheckBox
-$chkFull.Text = 'Play in full screen (Display > Window mode; F11 switches while you play)'; $chkFull.AutoSize = $true; $chkFull.ForeColor = $cFg; $chkFull.BackColor = $cCard
+$chkFull.Text = 'Play in full screen (Display > Window mode; Alt+Enter switches while you play)'; $chkFull.AutoSize = $true; $chkFull.ForeColor = $cFg; $chkFull.BackColor = $cCard
 $chkFull.Margin = New-Object System.Windows.Forms.Padding(0, (S 8), 0, (S 2))
 [void]$toolCard.Controls.Add($chkFull); $toolCard.Controls.SetChildIndex($chkFull, 1)
 $winCtl = Get-SettingControl 'window'

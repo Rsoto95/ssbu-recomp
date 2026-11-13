@@ -226,6 +226,11 @@ if TARGET_POSIX:
     CXX_FLAGS = CXX_FLAGS + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat')] + pkg('--cflags')
     if HAVE_IMGUI:
         LIBS += ['-lc++'] if TARGET_MACOS else ['-lstdc++']
+        if TARGET_LINUX:
+            # Some runtime-only distributions have libstdc++.so.6 but no development linker symlink.
+            cxx_lib = subprocess.run([CLANG, '-print-file-name=libstdc++.so'], capture_output=True, text=True).stdout.strip()
+            if cxx_lib == 'libstdc++.so':
+                LIBS[-1] = '-l:libstdc++.so.6'
 
 
 def debug_link_flags(out):
@@ -357,7 +362,9 @@ def compile_host(job):
 
 
 def cmd_link(host_only=False):
-    if not host_only and build_game_dll():
+    # Runtime updates link the existing game library. The `host` command only checks compilation and linking.
+    reuse_game = TARGET_LINUX and os.environ.get('RECOMP_REUSE_GAME_DLL') == '1'
+    if not host_only and not reuse_game and build_game_dll():
         return 1
     exe = os.environ.get('RECOMP_EXE', 'ssbu_native.exe')      # parallel work: one exe name per worker
     out = os.path.join(HERE, exe)
@@ -387,7 +394,8 @@ def cmd_link(host_only=False):
         if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), dep):
             jobs.append((src, obj))
     failed = 0
-    with concurrent.futures.ThreadPoolExecutor(16) as pool:
+    workers = max(1, int(os.environ.get('RECOMP_HOST_JOBS', '16'))) if TARGET_LINUX else 16
+    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
         for src, code, err in pool.map(compile_host, jobs):
             if code:
                 failed += 1

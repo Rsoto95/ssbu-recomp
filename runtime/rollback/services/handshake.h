@@ -27,6 +27,7 @@ typedef struct {
 } RbhMatch;
 #pragma pack(pop)
 int rbn_handshake_wanted(void);                         /* SSBU_RB_NET=net (not loop) and SSBU_RB_NET_HANDSHAKE not 0: env only */
+long rbn_setup_round(void);                             /* (2026-11-07) the match set-ups so far: a fight with none of its own (a replay) is local */
 /* main thread, at the match set-up (player 1's record): `mine` = this game's own choice in chara[0] / colour[0] /
  * layout[0] (+ the stage / rule fields: used from the host only). Blocks until both games agree (or the wait limit);
  * 1 = *out is the agreed match, 0 = not agreed (each game plays its own choice: the match will differ) */

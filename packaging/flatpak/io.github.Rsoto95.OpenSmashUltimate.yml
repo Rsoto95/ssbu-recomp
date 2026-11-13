@@ -1,0 +1,154 @@
+app-id: io.github.Rsoto95.OpenSmashUltimate
+runtime: org.freedesktop.Sdk
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.llvm20
+command: ssbu-launcher
+build-options:
+  # pip (the Python packages) and the two Eden reference files are fetched during the build. Self-hosted bundle; no
+  # Flathub submission, so a network build is acceptable.
+  build-args:
+    - --share=network
+  env:
+    PKG_CONFIG_PATH: /app/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --device=all
+  - --filesystem=home
+  - --filesystem=/run/media
+  - --filesystem=/media
+  - --env=GI_TYPELIB_PATH=/app/lib/girepository-1.0:/usr/lib/x86_64-linux-gnu/girepository-1.0
+  - --env=PYTHONPATH=/app/lib/python3.13/site-packages
+  - --env=PKG_CONFIG_PATH=/app/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+modules:
+  # clang 20, from the freedesktop SDK extension: the game is compiled on this PC from the user's dump, so the app
+  # carries the compiler it needs. Copy it into the app: the extension is a build-time dependency only.
+  - name: llvm20
+    buildsystem: simple
+    build-options:
+      strip: false
+    build-commands:
+      - mkdir -p /app/llvm20
+      - cp -a /usr/lib/sdk/llvm20/. /app/llvm20/
+
+  # Dear ImGui v1.91.9b: the in-game F1 menu. Not in the repo (deps/ is ignored); the same tag as scripts/linux/install_deps.sh.
+  - name: imgui
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/share/ssbu/imgui
+      - cp -a . /app/share/ssbu/imgui/
+    sources:
+      - type: archive
+        url: https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b.tar.gz
+        sha256: 8e1bbc76c71d74fef2fb85db7e7ca8eba13d6a86623c54992b60162db554ffdb
+
+  # The two Eden Mii service source files the SDK self-test reads (public reference data; no game data). Pinned to the
+  # commit scripts/linux/install_deps.sh checks out. Downloaded in the build rather than with a `file` source: the Eden
+  # server refuses flatpak-builder's user agent (403) but allows Python's.
+  - name: suyu-mii
+    buildsystem: simple
+    build-commands:
+      - |
+        python3 - <<'EOF'
+        import hashlib, urllib.request
+        base = 'https://git.eden-emu.dev/eden-emu/eden/raw/5df599128d6828fa0e42968909da848c255d22b1/src/core/hle/service/mii/'
+        for name, want in (('types/raw_data.cpp', '0f5b10dcde4038024fffd6079d75cd4bad8d72486efcf1ffa06e6c779803c486'),
+                           ('mii_types.h', '362dbb32e663816270822b6c45a85e482ae9aaf8bca731688f223c27d04a9877')):
+            data = urllib.request.urlopen(base + name, timeout=120).read()
+            assert hashlib.sha256(data).hexdigest() == want, name + ' changed'
+            open(name.replace('/', '_'), 'wb').write(data)
+        EOF
+      - install -d /app/share/ssbu/suyu/src/core/hle/service/mii/types
+      - install -m644 types_raw_data.cpp /app/share/ssbu/suyu/src/core/hle/service/mii/types/raw_data.cpp
+      - install -m644 mii_types.h /app/share/ssbu/suyu/src/core/hle/service/mii/mii_types.h
+
+  # adw-gtk3 v6.4 (the GNOME 49 release): a GTK3 theme that looks like libadwaita, so the launcher's buttons, header
+  # bar, lists and entries match the Bottles/Fedora Media Writer look without the GTK4/GNOME runtime. LGPL-2.1.
+  - name: adw-gtk3
+    buildsystem: simple
+    build-commands:
+      - install -d /app/share/themes
+      - cp -a adw-gtk3 adw-gtk3-dark /app/share/themes/
+      - install -Dm644 LICENSE /app/share/licenses/adw-gtk3/LICENSE
+    sources:
+      - type: archive
+        url: https://github.com/lassekongo83/adw-gtk3/releases/download/v6.4/adw-gtk3v6.4.tar.xz
+        sha256: c396e4f0df3eea081186ae13321345f21b9934691b4b4d75b4956f00cbd033d1
+        strip-components: 0
+      - type: file
+        url: https://raw.githubusercontent.com/lassekongo83/adw-gtk3/v6.4/LICENSE
+        sha256: 20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331
+
+  # SDL 3.4.14: the SDK 25.08 has 3.2.30, which lacks SDL_GAMEPAD_TYPE_GAMECUBE (and other newer gamepad bits the port
+  # uses). The port is tested with 3.4.x; the game links to this copy through /app/lib.
+  - name: sdl3
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DSDL_TESTS=OFF
+      - -DSDL_EXAMPLES=OFF
+      - -DSDL_X11_XTEST=OFF
+      - -DSDL_UNIX_CONSOLE_BUILD=ON
+    sources:
+      - type: archive
+        url: https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.14.tar.gz
+        sha256: 9d57b178fb297e121ef2605275937b7afaa7cd24d99ce1f95953e69e7a2535d6
+
+  # The build tools' Python packages (the versions of requirements.txt) and PyGObject for the launcher.
+  - name: python-packages
+    buildsystem: simple
+    build-commands:
+      - python3 -m pip install --no-cache-dir --prefix=/app --break-system-packages -r requirements.txt
+      - python3 -m pip install --no-cache-dir --prefix=/app --break-system-packages
+        --config-settings=setup-args=-Dpycairo=disabled PyGObject==3.58.1
+    sources:
+      - type: file
+        path: ../../requirements.txt
+
+  - name: ssbu
+    buildsystem: simple
+    build-commands:
+      - install -d /app/share/ssbu
+      - cp -a . /app/share/ssbu/
+      - install -d /app/bin
+      - install -m755 packaging/flatpak/ssbu-launcher /app/bin/ssbu-launcher
+      - install -Dm644 packaging/flatpak/io.github.Rsoto95.OpenSmashUltimate.desktop
+        /app/share/applications/io.github.Rsoto95.OpenSmashUltimate.desktop
+      - install -Dm644 packaging/flatpak/io.github.Rsoto95.OpenSmashUltimate.metainfo.xml
+        /app/share/metainfo/io.github.Rsoto95.OpenSmashUltimate.metainfo.xml
+      - install -Dm644 media/opensmash_icon_512.png
+        /app/share/icons/hicolor/512x512/apps/io.github.Rsoto95.OpenSmashUltimate.png
+      - install -Dm644 LICENSE /app/share/licenses/io.github.Rsoto95.OpenSmashUltimate/LICENSE
+      # A build-time check of the toolchain the user will run: clang, pkg-config, the Python packages and the headers.
+      - PYTHONPATH=/app/lib/python3.13/site-packages python3 /app/share/ssbu/scripts/linux/install_linux.py
+        --check-tools --storage /tmp/ssbu-check
+      # The host runtime compiles and links (no game data): catches a library/API mismatch in this runtime before release.
+      - PYTHONPATH=/app/lib/python3.13/site-packages python3 /app/share/ssbu/scripts/macos/host_check.py
+        --target linux --clang /app/llvm20/bin/clang --vulkan-headers /usr
+        --suyu /app/share/ssbu/suyu --imgui /app/share/ssbu/imgui --work /tmp/ssbu-host-check
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .github
+          - .flatpak-builder
+          - build
+          - build-*
+          - dump
+          - dump-*
+          - deps
+          - worktrees
+          - plan
+          - tests/logs
+          - '**/__pycache__'
+          - '*.flatpak'
+          - media/menus.webp
+          - media/og-image.png

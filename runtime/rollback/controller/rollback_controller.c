@@ -64,6 +64,7 @@ void input_mark(const char *what);
 void rbn_put_mismatch(int m);
 int rb_maybe_rebase(long long i, Ctx *c);      /* snapshot_ring.c (OPTION 1) */
 #include "../rollback.h"
+int rbn_handshake_wanted(void); long rbn_setup_round(void);      /* (2026-11-07) net_session.c: a fight with no set-up of its own (a replay) is local */
 int rbn_on(void); void rbn_init(void); void rbn_start(long long f0); int rbn_started(void); int rbn_local_player(void); int rbn_ahead(void);
 void rbn_local_pad(long long f, RbPad now); RbPad rbn_pad(int player, long long f);
 void rbn_drain(long long cur); int rbn_take_mismatch(void); long long rbn_confirmed(void); int rbn_peer_gone(void);
@@ -141,6 +142,7 @@ void input_mark(const char *what);                      /* nnhid.c: the input se
 /* (hs12) matches in one session: 0 = between matches, 1 = an online match runs (its base state made), 2 = a match that was
  * not agreed (handshake failed / given up) runs locally (Final Destination, one stock): no ring, and rbg_pad walks player 1 off the stage */
 static int g_rbg_in_match, g_rbg_rebase; static double g_rbg_quit_t0;
+static long g_rbg_round_last; static int g_rbg_round_checked;      /* the set-up the last fight came from; this fight checked (rbg_step_body) */
 int rbg_in_online_match(void) { return g_rbg_in_match != 0; }
 /* (2026-11-07) menu.cpp's score over an online fight: this game's player (0 / 1) while an agreed rollback match's fight is on
  * and this game fights in it (not a Battle Arena's spectator), else -1 */
@@ -258,6 +260,15 @@ static void rbg_step_body(Ctx *c) {
         e = getenv("SSBU_RB_NET_RECAP"); g_rbg_recap = e ? atoi(e) : 6; e = getenv("SSBU_RB_NET_KEEP"); g_rbg_keep = e ? atoi(e) : 2; }
     if (g_rbg_wdfix) g_ra_wd_pause = 1;                 /* (until H2 lets the workers go: r1_state.c ra_kick2) */
     if (g_rbg_wd_before != g_ra_wd_fired) { if (g_rg_ready) LOG("r1: RB NET: the task-worker watchdog let them go before the safe point of frame %lld (%lld times so far)\n", i, g_ra_wd_fired); g_rbg_wd_before = g_ra_wd_fired; }
+    /* (2026-11-07) a replay starts a fight without the select screens' set-up, so no handshake ran for it and the last one's
+     * answer (or the start-up default: "agreed") was taken: a match started against nobody and the game waited for the other
+     * player's pad for ever. A fight with no set-up since the last fight is played as a room fight: no rollback, pads untouched. */
+    if (!g_rbg_in_match && !g_rbg_round_checked && rbn_handshake_wanted()) {
+        long r = rbn_setup_round();
+        g_rbg_round_checked = 1;
+        if (r == g_rbg_round_last) { g_rbg_in_match = 3; LOG("r1: RB NET: a fight with no set-up of its own (a replay): no rollback\n"); return; }
+        g_rbg_round_last = r;
+    }
     if (g_rbg_in_match == 3) return;                    /* (R3 lwr, run lwr2: both games crashed here) a room fight already running stays one until its fight-off:
                                                          * the room's match is set up (handshake, rbn_match_cancelled() 0 again) while the waiting-stage fight still runs */
     if (rbn_match_cancelled() == 2) {                   /* (R3 pub2) a Local Wireless room fight: the game's own netcode, no ring, pads untouched */
@@ -279,6 +290,7 @@ static void rbg_step_body(Ctx *c) {
         return;
     }
     if (!g_rbg_in_match) {                              /* the base state: r1's full save (one hitch); (hs12) from the second match on: the ring's base made again */
+        rb_fault_match_start();                         /* the ring is rebuilt for this match: the fault recovery starts fresh (a give-up must not end the next match) */
         if (g_rbg_basefix < 0) { const char *e = getenv("SSBU_RB_NET_BASEFIX"); g_rbg_basefix = !(e && e[0] == '0'); }
         if (g_rbg_ff_first < 0) g_rbg_ff_first = g_session.fight_frame;
         {   static int tl = -1; if (tl < 0) { const char *e = getenv("SSBU_RB_NET_TEST_LATEBASE"); tl = e ? atoi(e) : 0; }     /* (net3, TEST ONLY) the base made n passes late */
@@ -353,6 +365,14 @@ static void rbg_step_body(Ctx *c) {
             int k = (int)(i - best);
             g_rbg_pend = 0; g_rbg_recap_first = -1; g_rbg_t_pass0 = now_ms();
             g_rgs_left = k; g_rgs_next = best + 1; g_ra_phase = 2; g_rbg_cur_k = k;
+            return;
+        }
+        if (rbn_on() && rbn_started() && !rbn_spectating()) {   /* the match is lost already: leave it, do not end the process */
+            void rbn_give_up(const char *why);
+            rbn_give_up("the rollback state could not be repaired");
+            rb_fault_contain();                            /* absorb the bad calls until player 1 has walked off (rb_fault_contain_off at the fight-off) */
+            g_rbg_in_match = 2; g_rbg_quit_t0 = now_ms();
+            LOG("r1: FAULT RECOVERY: no healthy state in the ring: leaving the online match instead of ending the process (player 1 walks off)\n");
             return;
         }
         rb_fault_give_up();                             /* no ring to go back to (or none older): faults end the game again */
@@ -805,8 +825,10 @@ static void rb_mem_report(const char *when) {
 /* (hs12) r1_ring.c rgs_step, every safe point while no fight is on: the end of a match (once): its report, the ring
  * emptied, the session reset for the next match (whose first safe point makes the ring's base again: r1_ring_rebase) */
 void rbg_fight_off(void) {
+    g_rbg_round_checked = 0;
     if (!g_rbg_in_match) return;
     rb_fault_report();                                  /* once per match: the safety net and the quiet states (fault_recovery.c, snapshot_ring.c) */
+    rb_fault_contain_off();                             /* a match left over a fault: the next match gets the safety net again */
     { void wp_report(void); if (g_rbg_in_match == 1) wp_report(); }                 /* (winprobe, SSBU_WIN_PROBE=1 only) the changes by the end */
     { void ladder_fight_off(void); if (g_rbg_in_match == 1) ladder_fight_off(); }   /* (lobby 1.5) an agreed rollback match: its result to the ladder (ladder_report.c) */
     if (g_rbg_in_match == 1) {                          /* (2026-11-05) a PC at its limit: the sound off from the next fight (never over a choice in F1) */
@@ -828,8 +850,9 @@ void rbg_fight_off(void) {
     else g_padlog_n = 0;
     { void nnpad_stick_report(const char *when); char w[32]; snprintf(w, sizeof w, "up to the end of match %d", rbn_match_number()); nnpad_stick_report(w); }     /* (2026-11-07) the sticks as SDL gave them in the match (nnpad_sdl.c) */
     if (g_rbg_in_match == 1) { rbg_report(); r1_ring_let_go(); if (g_rg_ready) r1_ring_release(); g_rbg_rebase = 1; rbg_after_begin(); }
-    else if (g_rbg_in_match == 3) LOG("r1: RB NET: the Local Wireless room fight is over\n");
-    else LOG("r1: RB NET: the match that was not agreed is over after %.1f s (player 1 walked off)\n", (now_ms() - g_rbg_quit_t0) / 1000.0);
+    else if (g_rbg_in_match == 3) LOG("r1: RB NET: the fight without rollback (Local Wireless room or replay) is over\n");
+    else { r1_ring_let_go(); if (g_rg_ready) r1_ring_release(); g_rbg_rebase = 1;   /* a match left over a fault had the ring made: let it go and free it */
+           LOG("r1: RB NET: the match that was not agreed (or was left over a fault) is over after %.1f s (player 1 walked off)\n", (now_ms() - g_rbg_quit_t0) / 1000.0); }
     if (g_rg_nomem == 1) g_rg_nomem = 0;                /* (hs13) nothing was kept: the next match tries the ring again */
     g_rbg_noring = 0;
     LOG("r1: RB NET: match %d over: ring emptied, session reset for the next match\n", rbn_match_number());

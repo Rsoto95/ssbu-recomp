@@ -52,4 +52,5 @@ void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NE
 /* Linux / macOS (display.c's SDL window thread): nothing to take from the window without the menu */
 void menu_sdl_attach(void *window) { (void)window; }
 void menu_sdl_service(void) {}
+int menu_osk_ready(void) { return 0; }      /* osk.c: without ImGui the keyboard keeps its system-dialog fallback */
 #endif

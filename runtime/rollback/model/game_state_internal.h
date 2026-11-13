@@ -93,7 +93,7 @@ void osobj_capture(long long frame);        /* model/os_objects_state.c (SSBU_ST
 void osobj_load(long long frame);           /* ... and put them back at the load of that capture */
 int os_r1_obj_set(uint64_t key, int signaled, int count);      /* os_threads.c: set one object's signalled flag / count, wake its waiters */
 /* controller/fault_recovery.c: the safety net (absorb a fault in a leaf helper, reload the last healthy state at the end of the pass) */
-int rb_fault_pending(void); int rb_fault_recover(long long i, Ctx *c, long long *best_out); void rb_fault_pass_clean(long long i); void rb_fault_give_up(void); void rb_fault_report(void); void rb_fault_test_tick(void);
+int rb_fault_pending(void); int rb_fault_recover(long long i, Ctx *c, long long *best_out); void rb_fault_pass_clean(long long i); void rb_fault_give_up(void); void rb_fault_contain(void); void rb_fault_contain_off(void); void rb_fault_match_start(void); void rb_fault_report(void); void rb_fault_test_tick(void);
 void nnsdk_tls_save(uint64_t *out); void nnsdk_tls_load(const uint64_t *in);      /* nnsdk.c */
 void call_trace_poll(void);                 /* debug/call_trace.c: retries the SSBU_TRACE_BADLR hook until its module is loaded (called each pass) */
 void call_trace_init(void);                 /* debug/call_trace.c (SSBU_TRACE_CALL=<function>,<call site>): log the calls of one guest function from one call site */
