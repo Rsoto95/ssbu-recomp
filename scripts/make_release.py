@@ -300,6 +300,15 @@ def main():
     for f in PACKAGE_FILES:
         if not os.path.exists(os.path.join(work, f)):
             sys.exit('%s was not produced' % f)
+    # (2026-11-12) the package must not need the player's Visual C++ Redistributable: a friend's PC with an MSVCP140.dll
+    # older than 14.40 crashed at the first shader (access violation in MSVCP140.dll called from ssbu_glslang.dll)
+    with open(os.path.join(work, 'ssbu_glslang.dll'), 'rb') as f:
+        dll = f.read().lower()
+    needs = [n for n in ('msvcp140', 'vcruntime140') if n.encode() + b'.dll' in dll or n.encode() + b'_1.dll' in dll]
+    if needs:
+        sys.exit('ssbu_glslang.dll imports the Visual C++ runtime DLLs (%s): the glslang libraries in use are /MD. Run '
+                 'scripts\\build_glslang_static.bat once (it makes deps\\glslang-mt, which build_glslang.bat then takes) '
+                 'and make the release again.' % ', '.join(needs))
 
     # 4. the package folder
     pkg = os.path.join(build, 'package')
