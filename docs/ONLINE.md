@@ -22,9 +22,10 @@ Online play is experimental and ON by default: the game joins the project's publ
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).
 
-**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller"; on Linux, "Type in a
-dialog"). It is the name the game and the other players see (`player_name` in `config\graphics.ini`); empty = your
-login name (the Windows user name on Windows). Used from the next start.
+**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller": the in-game keyboard on
+Windows, Linux and macOS). If it cannot be drawn, the desktop's text dialog is used. It is the name the game and the
+other players see (`player_name` in `config\graphics.ini`); empty = your login name (the Windows user name on Windows).
+Used from the next start.
 
 ## The easy way: the F1 menu
 
@@ -187,11 +188,14 @@ or more of a fight's frames with more than 16.7 ms of work) turns the sound of o
 session, with a message (F1 -> Gameplay turns it on again; a player's own choice there is never overridden;
 `SSBU_AUTO_SOUND_OFF=0`: never). The game runs at above-normal Windows priority (`SSBU_PRIORITY=normal`: off).
 
-**Sound:** rollback fights are silent by default (music and effects): the game's audio threads are held for the fight,
-because running beside the rollback's state loads made them crash or stutter. **F1 -> Gameplay -> Sound in online fights: ON**
-brings the sound back (graphics.ini `fight_sound = on`), at the cost of some stutter and, rarely, a crash. It is each
-player's own choice and is used from the next match. On Linux the same switch exists; the launcher holds the audio
-threads by default, and turning sound on has the same risk.
+**Sound:** the sound of online fights is ON by default since 2026-11-05 (`graphics.ini fight_sound = on`; each player's
+own choice, used from the next match). In a rollback match that keeps the game's audio thread (`nus3::audio update`)
+running beside the ring: it mixes while the main thread simulates, and the host released-buffer queue is not part of
+the snapshot. A match can therefore desync (seen on Linux, 2026-11-11, after a rollback), and the safety net then leaves
+the match (player 1 walks off) instead of closing the game. **F1 -> Gameplay -> Sound in online fights: OFF**
+(`fight_sound = off`) is the reliable choice for rollback: it holds the audio threads for the fight (the launcher sets
+`SSBU_RB_AUDIO_OFF=1` for this; the graphics option wins over the variable when it is on), and the main thread runs the
+sound engine's queue step at the ring's safe points.
 
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping).
 Rollback works on Windows (tested between two Windows PCs) and experimentally on Linux (tested against Windows over

@@ -79,6 +79,12 @@ You need **your own game dump and keys**. That is all: the installer fetches eve
 
 Full guide, requirements and the same build done by hand: **[BUILDING.md](BUILDING.md)**.
 
+**Linux:** a Flatpak bundle on the Releases page does the same three steps in one window, as a wizard: Source →
+Game files → Extras → Install location → Review, then a progress page with the live compile log and a Ready page with
+**Play**. It needs your own dump and keys as on Windows; the first build takes about 1.5–2.5 hours. See
+**[BUILDING_LINUX.md](BUILDING_LINUX.md#flatpak-the-app)** and
+[packaging/flatpak](packaging/flatpak/README.md).
+
 ## Features
 
 Status key: **Done** = works and was tested on the development PC; **Experimental** = works, not widely tested or off
@@ -90,7 +96,7 @@ by default; **In progress**; **Planned**.
 | One-click installer: private Python, PC check, finds keys and games in emulator folders, update + DLC, prebuilt runtime (no Visual Studio), no firmware needed, shortcuts, self-update, resume | Done |
 | Vulkan renderer (OpenGL fallback), shaders loaded at start, 16:9 window, F11 borderless | Done |
 | In-game settings menu (F1, controller Home, or − and + held 1 s; on by default): graphics, window / fullscreen / borderless, volume, full key and button remapping for keyboard and controllers per player, log viewer and export, F2 stats overlay | Done |
-| On-screen keyboard for controllers (no Windows dialogs) | Done |
+| On-screen keyboard for controllers (drawn in the game, no system dialogs) | Done |
 | Any controller through SDL3 (hot-plug, up to 8 players, rumble, gyro) | Done in automated tests with virtual devices; physical pads not yet confirmed |
 | Online play through the game's Local Wireless over a LAN, a room code or a lobby server ([docs/ONLINE.md](docs/ONLINE.md)) | Experimental |
 | Rollback netcode: input queues, wire format, time sync and a ring of game-state snapshots (up to 7 frames) are done; frames that run only the game logic come next | In progress |
@@ -102,7 +108,7 @@ by default; **In progress**; **Planned**.
 | Freeze watchdog: a report with the stack of every thread | Done |
 | Fixed 60 fps in every mode | In progress |
 | Items and stages as source | Planned |
-| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); F1 menu works; online play works (Local Wireless Create Room and Battle Arenas, delay-based and rollback, against Windows over the internet and on the same LAN; Linux against Linux not yet tested); Linux rollback is experimental and still has the limits in BUILDING_LINUX.md; Steam Deck not tested | In progress |
+| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); F1 menu works; online play works (Local Wireless Create Room and Battle Arenas, delay-based and rollback, against Windows over the internet and on the same LAN; Linux against Linux not yet tested); Linux rollback is experimental and still has the limits in BUILDING_LINUX.md; a Flatpak bundle does the whole flow (dump, build, play) as a wizard with a live compile log ([packaging/flatpak](packaging/flatpak/README.md)); Steam Deck not tested | In progress |
 
 ### Game modes (measured on the development PC)
 

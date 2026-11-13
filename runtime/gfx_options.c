@@ -226,8 +226,10 @@ GFX_VSYNC_AUTO_MARK
 "; input_delay: no longer used (2026-11-05): the input delay of online fights is always automatic, from the ping.\r\n"
 "\r\n"
 "; fight_sound = on | off      (on by default)\r\n"
-";   Music and sound effects in online rollback fights (F1 > Gameplay). on: the sound plays. off: silent fights (the\r\n"
-";   game's audio threads are held for the fight). Only this game. Used from the next match.\r\n"
+";   Music and sound effects in online rollback fights (F1 > Gameplay). on: the sound plays, but the audio threads run\r\n"
+";   beside the ring's state saves and can desync a match; the fallback then leaves the match (player 1 walks off)\r\n"
+";   instead of closing the game. off: silent fights (the audio threads are held; the reliable choice). Only this game.\r\n"
+";   Used from the next match. SSBU_RB_AUDIO_OFF=1 holds the audio threads only while this key is off (this key wins).\r\n"
 GFX_FIGHT_SOUND_MARK
 "fight_sound = on\r\n"
 "\r\n"

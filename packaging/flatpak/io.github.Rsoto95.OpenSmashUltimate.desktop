@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OpenSmash Ultimate
+Comment=Super Smash Bros. Ultimate, recompiled for PC from your own dump
+Exec=ssbu-launcher
+Icon=io.github.Rsoto95.OpenSmashUltimate
+Terminal=false
+Categories=Game;
+Keywords=smash;ssbu;nintendo;recomp;
+StartupNotify=true

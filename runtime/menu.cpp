@@ -33,7 +33,7 @@
 /* U2 (plan\phases\U2_menu_linux.md): Linux and macOS. The window is SDL's (display.c): its events reach the menu through
  * an SDL event watch (menu_sdl_attach) instead of window messages, and the few calls SDL wants on the window's thread
  * (text input on / off, the clipboard) are made by that thread (menu_sdl_service). The drawing is the same Vulkan pass
- * (nvn_vk_menu.c). Text boxes for a controller player: the desktop's own prompt (kdialog / zenity; osascript on a Mac). */
+ * (nvn_vk_menu.c). Text boxes for a controller player: the in-game keyboard (osk.c); the desktop's prompt is the fallback. */
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -68,6 +68,7 @@ int nnpad_kb_vk(int idx); void nnpad_kb_bind(int idx, int vk); void nnpad_kb_pla
 const char *nnpad_kb_label(int idx); void nnpad_vk_name(int vk, char *o, int n); int nnpad_describe(char *out, int n); const char *nnpad_config_path(void);
 int nnaoc_owned(const int **list);                                   /* nnmisc.c */
 long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c */
+void display_fit(int sw, int sh, int dw, int dh, int out[4]);        /* display.c: the picture's rectangle in the window */
 const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
 const char *ssbu_version(void);                                      /* boot.c */
 int osk_active(void);                                               /* osk.c */
@@ -244,19 +245,39 @@ static int sdl_vk(SDL_Scancode sc) {                 /* the Windows key code of 
     default: return 0;
     }
 }
+static void osk_sdl_text(const char *text) {         /* SDL's UTF-8: one WM_CHAR per character (a code point) */
+    const unsigned char *s = (const unsigned char *)text;
+    while (s && *s) {
+        unsigned c = *s++, more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0 ? 1 : 0;
+        if (more) c &= 0x3f >> more;
+        for (; more && (*s & 0xc0) == 0x80; more--) c = c << 6 | (*s++ & 0x3f);
+        if (!more) osk_key(WM_CHAR, (WPARAM)c);
+    }
+}
 static bool SDLCALL menu_sdl_watch(void *user, SDL_Event *e) {
     (void)user;
+    if (osk_active()) {                              /* the on-screen keyboard takes the PC keyboard while it is open */
+        if (e->type == SDL_EVENT_KEY_DOWN) {
+            if (e->key.repeat && (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER || e->key.scancode == SDL_SCANCODE_ESCAPE)) return true;
+            int vk = sdl_vk(e->key.scancode);
+            if (vk == VK_BACK) osk_key(WM_CHAR, 8);
+            else if (vk == VK_RETURN) osk_key(WM_CHAR, 13);
+            else if (vk == VK_ESCAPE) osk_key(WM_CHAR, 27);
+            else if (vk) osk_key(WM_KEYDOWN, (WPARAM)vk);
+        } else if (e->type == SDL_EVENT_TEXT_INPUT && e->text.text) osk_sdl_text(e->text.text);
+        return true;
+    }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         int down = e->type == SDL_EVENT_KEY_DOWN;
-        if (down && e->key.scancode == SDL_SCANCODE_F1) { if (!e->key.repeat) menu_request_toggle(); return true; }
-        if (down && e->key.scancode == SDL_SCANCODE_F2) { if (!e->key.repeat) InterlockedIncrement(&g_stats_req); return true; }      /* the stats overlay */
-        if (!g_open || osk_active()) return true;
+        if (down && e->key.scancode == SDL_SCANCODE_F1) { if (!e->key.repeat && menu_enabled()) menu_request_toggle(); return true; }
+        if (down && e->key.scancode == SDL_SCANCODE_F2) { if (!e->key.repeat && menu_enabled()) InterlockedIncrement(&g_stats_req); return true; }      /* the stats overlay */
+        if (!g_open) return true;
         int vk = sdl_vk(e->key.scancode);
         if (vk) q_push(EV_KEY, vk, down);
         return true; }
     case SDL_EVENT_TEXT_INPUT: {                     /* UTF-8: one EV_CHAR per character (a code point, not UTF-16 as on Windows) */
-        if (!g_open || osk_active() || !e->text.text) return true;
+        if (!g_open || !e->text.text) return true;
         const unsigned char *s = (const unsigned char *)e->text.text;
         while (*s) {
             unsigned c = *s++, more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0 ? 1 : 0;
@@ -281,18 +302,43 @@ static bool SDLCALL menu_sdl_watch(void *user, SDL_Event *e) {
 }
 /* display.c (Linux / macOS), window thread: the window is made / once per turn of its event loop (at least every 8 ms) */
 extern "C" void menu_sdl_attach(void *window) {
-    if (!menu_enabled() || !window) return;
+    if (!window) return;
     g_sdl_win = (SDL_Window *)window;
     float d = SDL_GetWindowPixelDensity(g_sdl_win);
     if (d > 0.0f) g_sdl_density = d;
-    SDL_AddEventWatch(menu_sdl_watch, NULL);
+    SDL_AddEventWatch(menu_sdl_watch, NULL);         /* also when the menu is off: the on-screen keyboard needs it */
 }
 extern "C" void menu_sdl_service(void) {
     if (!g_sdl_win) return;
     float d = SDL_GetWindowPixelDensity(g_sdl_win);
     if (d > 0.0f) g_sdl_density = d;
-    LONG want = g_text_want;
-    if (want != g_text_on) {                         /* text input only while a text box is active (on a Steam Deck SDL may show Steam's keyboard) */
+    int osk = osk_active();
+    static int osk_was;
+    static char kb_hint[16] = "auto", steam_hint[16] = "1";
+    if (osk != osk_was) {                            /* the keyboard draws the text itself: no system / Steam keyboard over it */
+        if (osk) {
+            const char *h = SDL_GetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD);
+            if (h && *h) snprintf(kb_hint, sizeof kb_hint, "%s", h);
+#ifdef SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD
+            h = SDL_GetHint(SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD);
+            if (h && *h) snprintf(steam_hint, sizeof steam_hint, "%s", h);
+#endif
+            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
+#ifdef SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD
+            SDL_SetHintWithPriority(SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD, "0", SDL_HINT_OVERRIDE);
+#endif
+            if (g_text_on) { SDL_StopTextInput(g_sdl_win); g_text_on = 0; }      /* hide one a menu text box opened */
+            printf("menu: on-screen keyboard: SDL text input on, the system keyboard off\n"); fflush(stdout);
+        } else {
+            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, kb_hint);
+#ifdef SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD
+            SDL_SetHintWithPriority(SDL_HINT_ENABLE_STEAM_SCREEN_KEYBOARD, steam_hint, SDL_HINT_OVERRIDE);
+#endif
+        }
+        osk_was = osk;
+    }
+    LONG want = g_text_want || osk;
+    if (want != g_text_on) {                         /* text input only while a text box or the on-screen keyboard is active */
         if (want) SDL_StartTextInput(g_sdl_win); else SDL_StopTextInput(g_sdl_win);
         g_text_on = want;
     }
@@ -489,6 +535,9 @@ static int g_im_ready, g_section, g_section_req = -1, g_capture = -1;
 static float g_base_h;
 static unsigned char *g_font_px;
 static ImFont *g_font_score;                          /* (the score) digits, big; NULL: the main font scaled */
+#ifndef _WIN32
+static ImFont *g_font_osk;                            /* the on-screen keyboard, big: the header, the text field, the keys */
+#endif
 static int g_font_w, g_font_h;
 static ImVector<ImDrawVert> g_vtx;
 static ImVector<ImDrawIdx> g_idx;
@@ -541,9 +590,10 @@ static void im_init(int h) {
 #else
     /* a sans-serif font of the system (Debian / Ubuntu, Fedora, Arch / SteamOS, macOS), else ImGui's own */
     static const char *const fonts[] = {"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf", "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf"};
     char font[MAX_PATH] = "";
     ImFont *f = NULL;
@@ -563,6 +613,7 @@ static void im_init(int h) {
 #else
         const char *const bolds[] = {"/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", "/usr/share/fonts/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf", font};
 #endif
         for (size_t i = 0; i < sizeof bolds / sizeof bolds[0] && !g_font_score; i++) {
@@ -570,6 +621,15 @@ static void im_init(int h) {
             if (t) { fclose(t); g_font_score = io.Fonts->AddFontFromFileTTF(bolds[i], px * 2.6f, NULL, digits); }
         }
     }
+#ifndef _WIN32
+    {   /* the on-screen keyboard (osk.c): the same sans font, big, with the symbols its keys and typed text use */
+        static const ImWchar osk_ranges[] = {0x20, 0x17f, 0x2000, 0x20cf, 0x2190, 0x21ff, 0x2300, 0x23ff, 0x2460, 0x24ff, 0};
+        float opx = px * 2.4f;
+        if (opx < 30.0f) opx = 30.0f;
+        if (f) g_font_osk = io.Fonts->AddFontFromFileTTF(font, opx, NULL, osk_ranges);
+        if (!g_font_osk) { ImFontConfig c; c.SizePixels = opx; g_font_osk = io.Fonts->AddFontDefault(&c); }
+    }
+#endif
     st.ScaleAllSizes(px / 15.0f);
     int bpp = 0;
     io.Fonts->GetTexDataAsRGBA32(&g_font_px, &g_font_w, &g_font_h, &bpp);
@@ -1020,20 +1080,38 @@ static int ra_build(void) {
     return g_ra_build;
 }
 #else
-static DWORD WINAPI osk_code_thread(LPVOID) {             /* the room code from the desktop's text prompt (it blocks: not on the render thread) */
+static DWORD WINAPI osk_code_thread(LPVOID) {             /* the room code: the in-game keyboard, else the desktop's prompt */
+    wchar_t init[64], win[64] = L"";
     char out[256] = "";
-    int r = text_prompt("Room code (SSBU native)", "The code the host's game shows (like 1A2B3-C4D5E)", O.join, out, sizeof out);
-    if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_text, sizeof g_osk_text, "%s", out); }
+    int r = -1;
+    if (menu_osk_ready()) {
+        MultiByteToWideChar(CP_UTF8, 0, O.join, -1, init, 64);
+        r = osk_run(L"Room code", L"The code the host's game shows (like 1A2B3-C4D5E)", init, 32, 0, 0, win);
+        if (r == 1) { WideCharToMultiByte(CP_UTF8, 0, win, -1, out, sizeof out, NULL, NULL); utf8_cut(out, 32); snprintf(g_osk_text, sizeof g_osk_text, "%s", out); }
+    }
+    if (r < 0) {
+        r = text_prompt("Room code (SSBU native)", "The code the host's game shows (like 1A2B3-C4D5E)", O.join, out, sizeof out);
+        if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_text, sizeof g_osk_text, "%s", out); }
+    }
     InterlockedExchange(&g_osk_done, r == 1 ? 1 : 2);
     InterlockedExchange(&g_osk_busy, 0);
     return 0;
 }
 static char g_osk_name[64];
 static volatile LONG g_osk_name_done;
-static DWORD WINAPI osk_name_thread(LPVOID arg) {          /* the player's name from the desktop's text prompt */
+static DWORD WINAPI osk_name_thread(LPVOID arg) {          /* the player's name: the in-game keyboard, else the desktop's prompt */
+    wchar_t init[64], win[64] = L"";
     char out[256] = "";
-    int r = text_prompt("Your name (SSBU native)", "The name other players see", (const char *)arg, out, sizeof out);
-    if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_name, sizeof g_osk_name, "%s", out); }
+    int r = -1;
+    if (menu_osk_ready()) {
+        MultiByteToWideChar(CP_UTF8, 0, (const char *)arg, -1, init, 64);
+        r = osk_run(L"Your name", L"The name other players see", init, 32, 0, 0, win);
+        if (r == 1) { WideCharToMultiByte(CP_UTF8, 0, win, -1, out, sizeof out, NULL, NULL); utf8_cut(out, 32); snprintf(g_osk_name, sizeof g_osk_name, "%s", out); }
+    }
+    if (r < 0) {
+        r = text_prompt("Your name (SSBU native)", "The name other players see", (const char *)arg, out, sizeof out);
+        if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_name, sizeof g_osk_name, "%s", out); }
+    }
     InterlockedExchange(&g_osk_name_done, r == 1 ? 1 : 2);
     InterlockedExchange(&g_osk_busy, 0);
     return 0;
@@ -1120,7 +1198,7 @@ static void sec_experimental(void) {
 #ifdef _WIN32
     if (ImGui::Button("Type with the controller##name")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_name_thread, pname, 0, NULL); }
 #else
-    if (ImGui::Button("Type in a dialog##name")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_name_thread, pname, 0, NULL); }
+    if (ImGui::Button("Type with the controller##name")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_name_thread, pname, 0, NULL); }
 #endif
     if (dis_6) ImGui::EndDisabled();
 #ifdef _WIN32
@@ -1271,7 +1349,7 @@ static void sec_online(void) {
 #ifdef _WIN32
         if (ImGui::Button("Type with the controller")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_code_thread, NULL, 0, NULL); }
 #else
-        if (ImGui::Button("Type in a dialog")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_code_thread, NULL, 0, NULL); }
+        if (ImGui::Button("Type with the controller")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_code_thread, NULL, 0, NULL); }
 #endif
         if (dis_7) ImGui::EndDisabled();
         if (O0.mode == 3 && net_room_code()[0]) ImGui::TextDisabled("Your own code (only if the host's router blocks you; the host sets it as online_peer): %s", net_room_code());
@@ -1298,6 +1376,7 @@ static int online_differs(void) {
 /* Gameplay: the input delay of online fights (graphics.ini input_delay; net_session.c reads it at each match's handshake, both
  * games take the larger of the two players' values) and every fighter and stage unlocked (unlock_all, unlock_all.c; read at start) */
 extern "C" int rbn_delay(void);
+extern "C" int rbn_on(void);
 extern "C" void gfx_fight_sound_chosen(void); extern "C" int gfx_fight_sound_was_auto_off(void);
 static void sec_gameplay(void) {
     /* (2026-11-05, owner) Auto at every start (graphics.ini is not read or written for it); a player may pick a number for
@@ -1333,8 +1412,11 @@ static void sec_gameplay(void) {
     }
     ImGui::SameLine(); ImGui::Text("Sound in online fights (music and effects)");
     if (gfx_fight_sound_was_auto_off()) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Turned OFF by the game for this session: your PC was at its limit in a fight. Press the button to turn it on again.");
+    if (fs && rbn_on() && !gfx_rb_delay_only()) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1), "Rollback matches: sound on is experimental; it can desync a match. The fallback then leaves the match (player 1 walks off) instead of closing the game. Turn this OFF for reliable online play.");
     help("ON (the default): you hear the music and the sound effects in online rollback fights. OFF: the fights are silent "
-         "(try it if a fight stutters on your PC). Only your game: the other player can choose differently. "
+         "(the audio threads are held; the reliable choice for rollback). ON keeps the audio thread running beside the ring "
+         "and can desync a match; the fallback then leaves the match (player 1 walks off) instead of closing the game. "
+         "Only your game: the other player can choose differently. "
          "Used from your next match. Music and effects volume apart: the game's own Options > Sound.");
     ImGui::Separator();
     if (onoff("unlock", S.unlock != 0, true)) { S.unlock = !S.unlock; ini("unlock_all", k_onoff[S.unlock]); printf("menu: unlock all fighters and stages: %s (at the next start)\n", k_onoff[S.unlock]); fflush(stdout); }
@@ -2474,9 +2556,133 @@ extern "C" void menu_shot_done(const char *path, int w, int h, int ok) {
     if (g_test_step == 3 || g_test_step == 6 || g_test_step == 9 || g_test_step == 15 || g_test_step == 21) g_test_step++;
 }
 
+#ifndef _WIN32
+/* The on-screen keyboard, drawn over the game's 16:9 rectangle with the same 1920x1080 layout as the Windows GDI one
+ * (osk.c render): the state comes from osk_view; the keys, the text field and the game's text-check messages are ImGui
+ * draw-list primitives, so there is no font rasterizer of our own and no system dialog. */
+enum { OSK_F_SHIFT, OSK_F_SYM, OSK_F_SPACE, OSK_F_DEL, OSK_F_OK, OSK_F_N };
+static const int k_osk_span[OSK_F_N] = {2, 2, 4, 2, 1};
+
+static void osk_wtext(char *out, size_t n, const wchar_t *s) {
+    if (!n) return;
+    if (!s) { out[0] = 0; return; }
+    WideCharToMultiByte(CP_UTF8, 0, s, -1, out, (int)n, NULL, NULL);
+}
+static void osk_text(ImDrawList *dl, ImFont *f, float size, ImU32 col, float x, float y, float w, float h, const wchar_t *s, int align) {
+    char b[4096];
+    osk_wtext(b, sizeof b, s ? s : L"");
+    ImVec2 sz = f->CalcTextSizeA(size, FLT_MAX, 0.0f, b);
+    float tx = align == 1 ? x + (w - sz.x) * 0.5f : align == 2 ? x + w - sz.x : x;
+    float ty = y + (h - sz.y) * 0.5f;
+    dl->AddText(f, size, ImVec2(tx, ty), col, b);
+}
+static void osk_draw_ui(int width, int height) {
+    OskView v;
+    if (!osk_view(&v)) return;
+    int d4[4];
+    display_fit(16, 9, width, height, d4);
+    if (d4[2] <= 0 || d4[3] <= 0) return;
+    const float S = (float)d4[3] / 1080.0f;
+    auto X = [&](float x) { return (float)d4[0] + x * S; };
+    auto Y = [&](float y) { return (float)d4[1] + y * S; };
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    ImFont *of = g_font_osk ? g_font_osk : ImGui::GetFont();
+    const ImU32 bg = IM_COL32(40, 40, 46, 255), panel = IM_COL32(28, 28, 32, 255), keyc = IM_COL32(70, 70, 80, 255),
+                keyf = IM_COL32(0, 190, 220, 255), white = IM_COL32(240, 240, 245, 255), grey = IM_COL32(160, 160, 170, 255),
+                field = IM_COL32(250, 250, 252, 255), dark = IM_COL32(20, 20, 24, 255);
+    dl->AddRectFilled(ImVec2(X(0), Y(0)), ImVec2(X(1920), Y(1080)), bg);
+    if (v.is_message) {                                  /* the game's text check: A = OK / Yes, B = No */
+        float px = X(260), py = Y(260), pw = 1400 * S, ph = 560 * S, fs = 52 * S;
+        dl->AddRectFilled(ImVec2(px, py), ImVec2(px + pw, py + ph), panel, 30 * S);
+        dl->AddRect(ImVec2(px, py), ImVec2(px + pw, py + ph), keyf, 30 * S, 0, 4 * S);
+        char mb[4096];
+        osk_wtext(mb, sizeof mb, v.message);
+        float wrap = pw - 80 * S;
+        ImVec2 sz = of->CalcTextSizeA(fs, FLT_MAX, wrap, mb);
+        float tx = px + (pw - sz.x) * 0.5f;
+        if (tx < px + 40 * S) tx = px + 40 * S;
+        float ty = py + (ph - sz.y) * 0.5f - 25 * S;
+        dl->AddText(of, fs, ImVec2(tx, ty), white, mb, NULL, px + pw - 40 * S - tx);
+        osk_text(dl, of, 34 * S, grey, px, py + ph - 80 * S, pw, 50 * S, v.question ? L"A Yes      B No" : L"A OK", 1);
+        return;
+    }
+    /* header and text field */
+    dl->PushClipRect(ImVec2(X(160), Y(70)), ImVec2(X(160) + 1600 * S, Y(70) + 80 * S), true);
+    osk_text(dl, of, 56 * S, white, X(160), Y(70), 1600 * S, 80 * S, v.header[0] ? v.header : L"Enter text", 0);
+    dl->PopClipRect();
+    float fx = X(160), fy = Y(170), fw = 1600 * S, fh = 110 * S;
+    dl->AddRectFilled(ImVec2(fx, fy), ImVec2(fx + fw, fy + fh), field, 24 * S);
+    dl->AddRect(ImVec2(fx, fy), ImVec2(fx + fw, fy + fh), keyf, 24 * S, 0, 4 * S);
+    wchar_t shown[OSK_TEXT_MAX + 2];
+    for (int i = 0; i < v.len; i++) shown[i] = v.password ? L'*' : v.text[i];
+    shown[v.len] = 0;
+    float tfs = 60 * S;
+    if (!v.len && v.guide[0]) osk_text(dl, of, tfs, grey, X(190), fy, fw - 30 * S, fh, v.guide, 0);
+    else {
+        int start = 0;
+        wchar_t pre[OSK_TEXT_MAX + 2];
+        char tmp[4096];
+        for (;;) {                                     /* scroll so that the cursor stays inside the field */
+            int n = v.cur - start;
+            if (n < 0) n = 0;
+            memcpy(pre, shown + start, (size_t)n * sizeof(wchar_t)); pre[n] = 0;
+            osk_wtext(tmp, sizeof tmp, pre);
+            if (of->CalcTextSizeA(tfs, FLT_MAX, 0.0f, tmp).x <= fw - 30 * S || start >= v.cur) break;
+            start++;
+        }
+        dl->PushClipRect(ImVec2(fx + 10 * S, fy), ImVec2(fx + fw - 10 * S, fy + fh), true);
+        osk_text(dl, of, tfs, dark, X(190), fy, fw - 30 * S, fh, shown + start, 0);
+        int n = v.cur - start;
+        if (n < 0) n = 0;
+        memcpy(pre, shown + start, (size_t)n * sizeof(wchar_t)); pre[n] = 0;
+        osk_wtext(tmp, sizeof tmp, pre);
+        float cx = of->CalcTextSizeA(tfs, FLT_MAX, 0.0f, tmp).x;
+        dl->AddRectFilled(ImVec2(X(190) + cx + 1 * S, Y(195)), ImVec2(X(190) + cx + 5 * S, Y(255)), IM_COL32(0, 150, 200, 255));
+        dl->PopClipRect();
+    }
+    char count[64];
+    snprintf(count, sizeof count, "%d / %d", v.len, v.max_len);
+    wchar_t wcount[64];
+    MultiByteToWideChar(CP_UTF8, 0, count, -1, wcount, 64);
+    osk_text(dl, of, 34 * S, grey, X(1400), Y(290), 360 * S, 40 * S, wcount, 2);
+    if (v.note[0]) osk_text(dl, of, 34 * S, IM_COL32(255, 120, 110, 255), X(160), Y(290), 1220 * S, 40 * S, v.note, 0);
+    /* the keys */
+    const int kw = (1920 - 320) / OSK_COLS, kh = 120, gap = 10;
+    dl->AddRectFilled(ImVec2(X(0), Y(350)), ImVec2(X(1920), Y(1080)), panel);
+    for (int r = 0; r < OSK_ROWS; r++)
+        for (int c = 0; c < OSK_COLS; c++) {
+            int on = v.row == r && v.col == c;
+            float x = X(160 + c * kw), y = Y(380 + r * (kh + gap));
+            dl->AddRectFilled(ImVec2(x + gap * 0.5f * S, y), ImVec2(x + (kw - gap * 0.5f) * S, y + kh * S), on ? keyf : keyc, 18 * S);
+            dl->AddRect(ImVec2(x + gap * 0.5f * S, y), ImVec2(x + (kw - gap * 0.5f) * S, y + kh * S), on ? white : keyc, 18 * S, 0, (on ? 4 : 1) * S);
+            wchar_t ch[2] = {v.keys[r][c], 0};
+            osk_text(dl, of, 52 * S, on ? dark : white, x, y, kw * S, kh * S, ch, 1);
+        }
+    static const wchar_t *const fname[OSK_F_N] = {L"Shift", L"#+=", L"Space", L"Del", L"OK"};
+    float xd = 160, yd = 380 + OSK_ROWS * (120 + 10);
+    for (int f = 0; f < OSK_F_N; f++) {
+        int on = v.row == OSK_ROWS && v.col == f;
+        int lit = (f == OSK_F_SHIFT && (v.page == 1 || v.shift_once)) || (f == OSK_F_SYM && v.page == 2);
+        float w = k_osk_span[f] * kw, x = X(xd), y = Y(yd);
+        ImU32 c = on ? keyf : f == OSK_F_OK ? IM_COL32(0, 140, 170, 255) : lit ? IM_COL32(110, 110, 125, 255) : keyc;
+        dl->AddRectFilled(ImVec2(x + 5 * S, y), ImVec2(x + (w - 5) * S, y + 120 * S), c, 18 * S);
+        dl->AddRect(ImVec2(x + 5 * S, y), ImVec2(x + (w - 5) * S, y + 120 * S), on ? white : c, 18 * S, 0, (on ? 4 : 1) * S);
+        osk_text(dl, of, 52 * S, on ? dark : white, x, y, w * S, 120 * S, f == OSK_F_SYM && v.page == 2 ? L"abc" : fname[f], 1);
+        xd += w;
+    }
+    osk_text(dl, of, 34 * S, grey, X(160), Y(1020), 1600 * S, 50 * S,
+             L"A type   B delete   Y space   X symbols   L / R cursor   ZL shift   + OK   - cancel", 1);
+}
+extern "C" int menu_osk_ready(void) { return 1; }
+#endif
+
 /* ------------------------------------------------------------------ once per presented frame (render thread) */
 extern "C" int menu_frame(int width, int height, MenuDraw *out) {
+#ifdef _WIN32
     if (!menu_enabled() || width <= 0 || height <= 0) return 0;
+#else
+    if ((!menu_enabled() && !osk_active()) || width <= 0 || height <= 0) return 0;      /* the keyboard draws without the menu */
+#endif
     long long fr = nvn_front_presents();
     int fresh = fr != g_frame;
     g_frame = fr;
@@ -2489,21 +2695,23 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     rooms_test_tick();
     uint64_t b = nnhid_menu_buttons(), down = b & ~g_pad_prev;
     g_pad_prev = b;
-    {   /* U2: - and + held together for 1 s open the menu too: a controller whose Home / Guide button is taken (the Steam
-         * button of a Steam Deck) or that has none. The game sees the two buttons until the menu opens (+ may pause a match). */
-        static ULONGLONG combo_t0;
-        static int combo_done;
-        const uint64_t combo = BIT(B_MINUS) | BIT(B_PLUS);
-        if ((b & combo) == combo && !g_open && !combo_done) {
-            ULONGLONG now = GetTickCount64();
-            if (!combo_t0) combo_t0 = now;
-            else if (now - combo_t0 >= 1000) { combo_done = 1; menu_request_toggle(); printf("menu: - and + held for 1 s\n"); fflush(stdout); }
-        } else if ((b & combo) != combo) { combo_t0 = 0; combo_done = 0; }
-    }
-    if (g_open && capturing()) { if (g_pcap < 0 && (down & (BIT(B_HOME) | BIT(B_CAPTURE)))) capture_cancel("Home / Capture"); }      /* Home cancels a rebinding instead of closing */
-    else {
-        if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
-        if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
+    if (!osk_active()) {
+        {   /* U2: - and + held together for 1 s open the menu too: a controller whose Home / Guide button is taken (the Steam
+             * button of a Steam Deck) or that has none. The game sees the two buttons until the menu opens (+ may pause a match). */
+            static ULONGLONG combo_t0;
+            static int combo_done;
+            const uint64_t combo = BIT(B_MINUS) | BIT(B_PLUS);
+            if ((b & combo) == combo && !g_open && !combo_done) {
+                ULONGLONG now = GetTickCount64();
+                if (!combo_t0) combo_t0 = now;
+                else if (now - combo_t0 >= 1000) { combo_done = 1; menu_request_toggle(); printf("menu: - and + held for 1 s\n"); fflush(stdout); }
+            } else if ((b & combo) != combo) { combo_t0 = 0; combo_done = 0; }
+        }
+        if (g_open && capturing()) { if (g_pcap < 0 && (down & (BIT(B_HOME) | BIT(B_CAPTURE)))) capture_cancel("Home / Capture"); }      /* Home cancels a rebinding instead of closing */
+        else {
+            if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
+            if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
+        }
     }
     if (g_open) capture_tick(down);
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
@@ -2517,7 +2725,11 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
     NetLadder score_ld;
+#ifdef _WIN32
     if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld)) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+#else
+    if (!g_open && !osk_active() && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld)) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+#endif
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -2603,6 +2815,9 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::End();
     }
     if (g_open && !osk_active()) draw_menu(width, height);
+#ifndef _WIN32
+    if (osk_active()) osk_draw_ui(width, height);          /* over the menu and the notices, while the game waits for text */
+#endif
     ImGui::Render();
 #ifndef _WIN32
     InterlockedExchange(&g_text_want, g_open && io.WantTextInput ? 1 : 0);      /* a text box is active: SDL's text input on (window thread) */

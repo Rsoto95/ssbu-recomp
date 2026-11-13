@@ -258,7 +258,10 @@ static void ra_release_save(void) {
         g_guest_threads.table[i].held = 0;
     }
 }
-/* restore: each thread at the SAME wait as at the save where it can get there; a thread whose wait moved is taken as it is (same = 0) */
+/* restore: each thread at the SAME wait as at the save where it can get there; a thread whose wait moved is taken as it is (same = 0).
+ * (sound-safe loads) The sound threads are the exception: with the sound of online fights on, a load never runs under one that is not at
+ * its saved wait -- its stack and the sound engine's state are put back under it and it crashed there (c0000005 in its memcpy). The load
+ * is refused instead and tried again next tick (8 ms of retries at most). */
 void ra_hold_restore(void) {
     g_guest_threads.mismatch = 0; g_guest_threads.running = 0;
 #ifndef _WIN32
@@ -278,14 +281,18 @@ void ra_hold_restore(void) {
         if (!t->parked || ra_free(t->name)) continue;
         for (;;) {
             int st = rb_park_parked(t->c);
+            int audio = ra_audio(t->name);
 #ifdef __linux__
             /* Network/worker/presentation state stays current: do not run a parked thread just to revisit an old wait.
              * The first two are external side channels; every other thread whose wait moved is a service/presentation
              * thread too (VSync count, render dispatch, module manager, file loaders ...). Take it as it is after 5 ms:
-             * it is stopped at the gate or blocked in a wait, and same stays 0 so its registers are not restored. */
+             * it is stopped at the gate or blocked in a wait, and same stays 0 so its registers are not restored.
+             * (sound-safe loads) NOT the sound threads: with the sound on, one taken at another wait is exactly the crash
+             * (its stack and the sound engine's state are rewound under it). They must reach their saved wait or the load
+             * is refused (the audio timeout below). */
             int netw = nw && os_thread_is_network_name(t->name);
             int workw = ww && t->name && strstr(t->name, "TaskWorker");
-            int otherw = aw && !netw && !workw;
+            int otherw = aw && !netw && !workw && !audio;
             if ((netw || workw || otherw) &&
                 (st == RB_PARK_HELD || (waiting_import(t->c->in_import) && os_mutexes_held_by(t->c) == 0)) &&
                 (t->c->import_from != t->from || t->c->in_import != t->imp)) {
@@ -301,17 +308,20 @@ void ra_hold_restore(void) {
                 continue;
             }
 #endif
+            int same_wait = t->c->import_from == t->from && t->c->in_import == t->imp;
             if (st == RB_PARK_HELD) {
-                if (t->c->import_from == t->from && t->c->in_import == t->imp) { t->held = 1; t->same = 1; t->cok = 1; break; }
+                if (same_wait) { t->held = 1; t->same = 1; t->cok = 1; break; }
                 rb_park_let_go(t->c);                    /* another wait: let it go round once more */
-            } else if (waiting_import(t->c->in_import) && os_mutexes_held_by(t->c) == 0) {
+            } else if (waiting_import(t->c->in_import) && os_mutexes_held_by(t->c) == 0 && (!audio || same_wait)) {
                 t->held = 1; t->cok = 1;
-                if (t->c->import_from == t->from && t->c->in_import == t->imp) t->same = 1; else g_guest_threads.mismatch++;
+                if (same_wait) t->same = 1; else g_guest_threads.mismatch++;
                 break;                                   /* already blocked in a wait: it cannot come to the gate */
             }
-            if (now_ms() - t0 > (g_guest_threads.park_ms > 500 ? g_guest_threads.park_ms : 500)) {
+            double lim = audio ? 8.0 : (g_guest_threads.park_ms > 500 ? g_guest_threads.park_ms : 500);   /* (a sound thread gets one loop of its own) */
+            if (now_ms() - t0 > lim) {
                 t->held = 1; g_guest_threads.mismatch++;
-                if (!(waiting_import(t->c->in_import))) g_guest_threads.running++;
+                if (audio || !(waiting_import(t->c->in_import))) g_guest_threads.running++;
+                if (audio) { static int said; if (said++ < 20) LOG("r1: hold for a load: sound thread %s not at its wait after %.1f ms: the load is refused (sound-safe loads)\n", t->name ? t->name : "?", now_ms() - t0); }
                 break;
             }
             SwitchToThread();
@@ -331,9 +341,10 @@ void ra_hold_restore(void) {
             /* (R3 hs11) the sound thread sindou::update alternates SleepThread / WaitEvent; at a ring load it sometimes waits for an
              * event no held thread signals, and this loop waited the whole 500 ms (a half-second freeze, 2 in 10 normal-speed runs).
              * An audio thread blocked at another waiting import after 5 ms is taken as it is (what the 500 ms limit did anyway).
-             * SSBU_RB_AUDIO_WAIT=0: the old way. */
+             * SSBU_RB_AUDIO_WAIT=0: the old way. Only with the sound off (g_rb_audio_off: the threads are parked at a fake wait and
+             * never get here): with the sound on this is the crash (sound-safe loads, the timeout below). */
             {   static int aw = -1; if (aw < 0) { const char *e = getenv("SSBU_RB_AUDIO_WAIT"); aw = !(e && e[0] == '0'); }
-                if (aw && rgs_wanted() && ra_audio(t->name) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; g_guest_threads.audio_other++;
+                if (aw && g_rb_audio_off && rgs_wanted() && ra_audio(t->name) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; g_guest_threads.audio_other++;
                     { static int said_a; if (said_a++ < 200) LOG("r1: hold for a load: sound thread %s taken at ANOTHER wait after %.1f ms: saved at %s @%llx, now %s @%llx (loads like this so far: %lld)\n", t->name ? t->name : "?",
                         now_ms() - t0, t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, g_guest_threads.audio_other); }
                     break; } }
@@ -347,7 +358,14 @@ void ra_hold_restore(void) {
                     { static int said_n; if (said_n++ < 50) LOG("r1: hold for a load: network thread %s taken at ANOTHER wait after %.1f ms: saved at %s @%llx, now %s @%llx\n", t->name,
                         now_ms() - t0, t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from); }
                     break; } }
-            if (now_ms() - t0 > 500) { t->held = 1; g_guest_threads.mismatch++; if (!(waiting_import(t->c->in_import) && th_blocked(t->h))) g_guest_threads.running++;
+            /* (sound-safe loads) with the sound of online fights on (g_rb_audio_off clear), a sound thread must reach its saved
+             * wait: taken at another one, its stack and the sound engine's state are rewound under it (c0000005 in its memcpy).
+             * Refused instead, and tried again next tick. */
+            if (!g_rb_audio_off && ra_audio(t->name) && now_ms() - t0 > 8) {
+                t->held = 1; g_guest_threads.mismatch++; g_guest_threads.running++;
+                { static int said_s; if (said_s++ < 20) LOG("r1: hold for a load: sound thread %s not at its wait after %.1f ms: the load is refused (sound-safe loads)\n", t->name ? t->name : "?", now_ms() - t0); }
+                break; }
+            if (now_ms() - t0 > 500) { t->held = 1; g_guest_threads.mismatch++; if (ra_audio(t->name) || !(waiting_import(t->c->in_import) && th_blocked(t->h))) g_guest_threads.running++;
                 static int said; if (said++ < 20) LOG("r1: hold for a load: thread %s not back at its wait after 500 ms: held at %s @%llx then, now %s @%llx, blocked %d\n", t->name ? t->name : "?",
                     t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, th_blocked(t->h));
                 break; }

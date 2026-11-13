@@ -13,6 +13,33 @@ deps/venv/bin/python scripts/setup.py --target linux --dump <your dump folder>  
 ./play.sh                                                       # play
 ```
 
+## Flatpak (the app)
+
+A `.flatpak` bundle is on the repository's Releases page. It is the same native build, with clang, the runtime and the
+launcher included, so nothing has to be installed on the system except Flatpak and the freedesktop SDK runtime from
+Flathub. It opens with two choices: **Play** a finished build, or **Build / Rebuild** it from your own files. Rebuild
+opens a wizard: **Source** (package files or an existing dump), **Game files** (base, update, `prod.keys` — or the dump
+folder), **Extras** (optional firmware and DLC), **Install location** and **Review**, then **Install**. The Progress
+page shows the live compile and script-module log, the current count and
+elapsed time, and a spinner, so a slow file never looks like a freeze; **Stop** is always available. The first build is
+the same 1.5–2.5 hours as above and needs about 30 GB free (45 GB while a `.nsz` is decompressed); it can be stopped and
+continued. The launcher uses the `adw-gtk3` GTK3 theme (libadwaita-like controls, system dark/light); it keeps the
+current freedesktop runtime, so the install size stays about 2.3 GB.
+
+- Install: `flatpak install --user ./OpenSmashUltimate.flatpak` (Flathub must be added; see
+  [packaging/flatpak/README.md](packaging/flatpak/README.md)). From a checkout, `./build_flatpak.sh` does the app
+  build for you: it installs the runtime if needed, builds and installs the app, writes the bundle and opens the
+  launcher (`--no-run` stops before opening it).
+- Everything writable is in `~/.local/share/ssbu-recomp`, outside Flatpak's own `~/.var/app` data, so rebuilding or
+  uninstalling the app never removes it: `dump/`, `build-linux/`, `userdata/`, the `.nsz` cache and the logs. An older
+  Flatpak storage in `~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp` is moved there once at the next
+  start; the newer of the two saves stays active and the other is kept as `userdata.before-flatpak-<date>`.
+- DLC: only the add-on content ids in the file names are read and written to `build-linux/config/dlc.txt`; the content
+  itself is in the update. The launcher's DLC list can be changed and Rebuild run again.
+- Updates: a new Flatpak release. Press Rebuild after updating; the build folder is kept and only what changed is
+  rebuilt.
+- Build the bundle yourself, or see how CI does it: [packaging/flatpak/README.md](packaging/flatpak/README.md).
+
 ## Status
 
 Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDIA RTX 3080 (proprietary driver), Wayland.
@@ -22,12 +49,12 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
 | Build from the dump | works: game library, 98 script modules, executable; `check` step passes (SDK self-test, pad self-test 56/56, C++ runtime self-test 145/145, differential test 32,043 / 32,043; it runs only with `--full-check`) |
 | Opening movie, title, menus, character and stage select | work |
 | F1 settings menu | built and drawn as on Windows (Dear ImGui over the Vulkan picture; keyboard, mouse and controller), see [Settings menu (F1)](#settings-menu-f1). **Tested on the porter's Linux desktop; not yet tried on a Steam Deck** |
-| On-screen keyboard | not on Linux (it draws with Windows APIs). Text input, for example naming a Mii, opens a zenity or kdialog dialog instead |
+| On-screen keyboard | works: the same Switch-style keyboard as on Windows, drawn by the settings menu's Dear ImGui layer over the Vulkan picture. Text input (naming a Mii, an arena, ...) no longer opens zenity / kdialog; `SSBU_SWKBD=dialog` keeps the old prompt |
 | A whole Smash match (scripted input, 1v1 vs CPU) | works: steady 60 fps, sound, no audio underruns |
 | Keyboard | works (tested); controllers through SDL3 are the same code as on Windows but **not tested with a real pad on Linux** |
 | Album movie recording (the game's video capture to the album) | **not implemented** on Linux; the 7 self-test cases for it are accepted as known failures |
 | OpenGL renderer | not on Linux: Vulkan only |
-| Online play (experimental, `SSBU_ONLINE`) | Works: tested 2026-11-04 against a Windows player, over the internet and on the same LAN, in Local Wireless Create Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches, no desync or crash (this was Linux against Windows; Linux against Linux is not yet tested); rollback remains experimental and keeps the limits below. UPnP is a stub on Linux (forward the UDP port by hand); rollback fights are silent by default (the audio threads are held). See [Rollback and online play](#rollback-and-online-play-linux) |
+| Online play (experimental, `SSBU_ONLINE`) | Works: tested 2026-11-04 against a Windows player, over the internet and on the same LAN, in Local Wireless Create Room and the game's Online > Battle Arenas, with the normal delay-based netcode and with rollback; several matches, no desync or crash (this was Linux against Windows; Linux against Linux is not yet tested); rollback remains experimental and keeps the limits below. UPnP is a stub on Linux (forward the UDP port by hand); rollback fights have sound on by default (`fight_sound = on`); set it off (F1 > Gameplay) for silent, reliable rollback fights — sound on can desync a match, which the safety net then leaves (player 1 walks off) instead of ending the process. See [Rollback and online play](#rollback-and-online-play-linux) |
 | Other distributions, AMD / Intel GPUs, X11, Steam Deck | not tested. The package lists for Debian/Ubuntu and Fedora in `install_deps.sh` are best guesses; `setup.py` checks every library and says which one is missing |
 
 ## What you need
@@ -105,8 +132,8 @@ roughly 2 to 2.5 hours instead of 4.5 (an estimate from the job counts, not meas
 The FFmpeg must be able to decode VP9 and Vorbis (the game's movies). Every distribution's normal FFmpeg can;
 `setup.py` checks it.
 
-Optional: `zenity` or `kdialog`. The game's on-screen keyboard (naming a Mii, a ruleset, ...) and the settings menu's
-"Type in a dialog" buttons (your name, a room code) open a dialog with one of them.
+Optional: `zenity` or `kdialog`, only for the fallback text dialog (`SSBU_SWKBD=dialog`, or a build without Dear ImGui).
+The game's own on-screen keyboard (naming a Mii, an arena, ...) is drawn in the game's window.
 
 `install_deps.sh` also fetches Dear ImGui v1.91.9b (MIT) into `deps/imgui`: the in-game settings menu (F1). Without it the
 game builds without the menu (`setup.py` says so; `--imgui <folder>` or `IMGUI_ROOT` point to another copy).
@@ -218,9 +245,9 @@ Inside: d-pad / left stick move, A selects, B goes back, L / R switch pages; mou
 **Steam Deck:** the Steam button and the "..." button belong to Steam, so use **View + Menu held for 1 s**. While you hold
 them the game sees − and + (a match may pause) until the menu opens; after that the game gets no input until you
 release every button. Another way: in the game's Steam Input layout, bind a back button (L4 / R4 / L5 / R5) to the
-keyboard key F1. Text boxes: in Desktop Mode use the keyboard or "Type in a dialog" (zenity / kdialog); in Game Mode,
-Steam's on-screen keyboard (Steam + X) types into the active box (SDL may also open it by itself when a box is
-selected; not verified).
+keyboard key F1. Text boxes: use the keyboard, or the "Type with the controller" buttons (the in-game keyboard). In Game
+Mode, Steam's on-screen keyboard (Steam + X) can still type into an F1 text box; it is turned off while the in-game
+keyboard is open.
 
 **Online play** from the F1 page works on Linux; its settings are saved and used from the next start, as on Windows. The
 Log page shows the log only when the game's output goes to a file (`play.sh` does that).
@@ -284,10 +311,16 @@ run has not been repeated.
 Another risk is a load that restores a state whose guest object names a job fiber/object that the load did not bring
 back (the fiber moved to another host fiber between the capture and the load). The re-run then faults in a cascade.
 The signal handler absorbs the first plain moves, but the cascade has no `nro_catch_call` frame on the current host
-stack to cut it back to, so after 4,096 faults the net lets go and the process ends. A catch record on another
+stack to cut it back to, so after 4,096 faults the net lets go and the process ends. When the ring itself has no older
+healthy state (the same fault comes back from every saved state), an online match is left instead: player 1 walks off
+the stage and the game returns to the character select, with the failed state logged; offline that case still ends the
+process. A catch record on another
 fiber's stack cannot be used: a cross-stack `longjmp` is exactly what the port must not do. A throw can also still
 fail with `f_720052e2f0 handled an exception but was not entered through nro_catch_call` when its record is on another
 fiber. These are the port's known limits, not something to work around with signals or a rewritten safe point.
+Sound in a rollback fight (`fight_sound = on`, the default) is its own risk: the audio thread runs beside the ring and
+the host released-buffer queue is not part of the snapshot, so a match can desync; the walk-off above is then used.
+`fight_sound = off` (F1 > Gameplay) holds the audio threads and is the reliable path.
 Offline play is unaffected. If a long match does fail, fall back to delay-based online play
 (`SSBU_RB_NET_NOROLLBACK=1`), or turn Rollback off in F1; the ring is then never made.
 (2026-11-03: after the load-admission fix, the offline ring simulation completed 84 loads with k 1..7, no refused

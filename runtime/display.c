@@ -574,7 +574,7 @@ static void window_mode_service(SDL_Window *w) {
         fflush(stdout);
     }
 }
-void menu_sdl_attach(void *window); void menu_sdl_service(void);      /* menu.cpp (or menu_stub.c): the settings menu's input */
+void menu_sdl_attach(void *window); void menu_sdl_service(void);      /* menu.cpp (or menu_stub.c): the settings menu's and the on-screen keyboard's input */
 static DWORD WINAPI window_thread(LPVOID arg) {
     (void)arg;
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
