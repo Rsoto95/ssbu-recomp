@@ -44,7 +44,7 @@ compiled for your PC. There is no CPU interpreter and no JIT while you play. The
 API, audio, video, input and file system are re-implemented by this project's own runtime, and the picture is drawn
 with **Vulkan**.
 
-It starts like any PC game, runs in a 16:9 window (F11 for borderless fullscreen), takes any controller, loads its
+It starts like any PC game, runs in a 16:9 window (Alt+Enter for fullscreen, F11 for borderless), takes any controller, loads its
 shaders at start, and its fighters can be read and changed as C++ source.
 
 ## Why it is different
