@@ -13,6 +13,14 @@ if "%VSDIR%"=="" ( echo build_glslang: no Visual Studio / Build Tools with the C
 set "PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%"
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 1
+rem (2026-11-12) Static C / C++ runtime when the glslang libraries were built with it: "<GLSLANG_ROOT>-mt" (deps\glslang-mt,
+rem made by scripts\build_glslang_static.bat) is taken when it is there. The official release libraries are /MD: the DLL then
+rem needs the player's MSVCP140.dll, and one older than 14.40 crashes at the first shader. scripts\make_release.py refuses
+rem to package such a DLL.
+if exist "%GL%-mt\lib\glslang.lib" set GL=%GL%-mt
+set CRT=/MD
+dumpbin /nologo /directives "%GL%\lib\glslang.lib" | findstr /C:"RuntimeLibrary=MT_StaticRelease" >nul && set CRT=/MT
+echo build_glslang: %GL% (%CRT%)
 if not exist obj_host mkdir obj_host
-cl /nologo /MD /O2 /W3 /LD /I "%GL%\include" vk_glslang_shim.c /Fo:obj_host\vk_glslang_shim.obj /Fe:ssbu_glslang.dll /link /LIBPATH:"%GL%\lib" glslang.lib glslang-default-resource-limits.lib SPIRV-Tools-opt.lib SPIRV-Tools.lib
+cl /nologo %CRT% /O2 /W3 /LD /I "%GL%\include" vk_glslang_shim.c /Fo:obj_host\vk_glslang_shim.obj /Fe:ssbu_glslang.dll /link /LIBPATH:"%GL%\lib" glslang.lib glslang-default-resource-limits.lib SPIRV-Tools-opt.lib SPIRV-Tools.lib
 exit /b %errorlevel%
