@@ -28,8 +28,8 @@ current freedesktop runtime, so the install size stays about 2.3 GB.
 
 - Install: `flatpak install --user ./OpenSmashUltimate.flatpak` (Flathub must be added; see
   [packaging/flatpak/README.md](packaging/flatpak/README.md)). From a checkout, `./build_flatpak.sh` does the app
-  build for you: it installs the runtime if needed, builds and installs the app, writes the bundle and opens the
-  launcher (`--no-run` stops before opening it).
+  build for you: it installs the runtime if needed, builds and installs the app, and opens the launcher (`--no-run`
+  stops before opening it; `--bundle` also writes `OpenSmashUltimate.flatpak`).
 - Everything writable is in `~/.local/share/ssbu-recomp`, outside Flatpak's own `~/.var/app` data, so rebuilding or
   uninstalling the app never removes it: `dump/`, `build-linux/`, `userdata/`, the `.nsz` cache and the logs. An older
   Flatpak storage in `~/.var/app/io.github.Rsoto95.OpenSmashUltimate/data/ssbu-recomp` is moved there once at the next
