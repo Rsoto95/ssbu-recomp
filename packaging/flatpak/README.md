@@ -52,12 +52,14 @@ The quick way, from the repository root:
 
 ```sh
 ./build_flatpak.sh                 # build, install, open the launcher
-./build_flatpak.sh --no-run        # build and write OpenSmashUltimate.flatpak, do not open it
+./build_flatpak.sh --bundle        # also write OpenSmashUltimate.flatpak
+./build_flatpak.sh --no-run        # build and install, do not open it
 ./build_flatpak.sh --self-test     # build, install, run the launcher's self-test
 ```
 
 It adds the user Flathub remote, installs the freedesktop SDK runtime and the LLVM20 extension if they are missing,
-builds and installs the app, writes `OpenSmashUltimate.flatpak`, then starts the launcher.
+builds and installs the app, then starts the launcher. `--bundle` also writes `OpenSmashUltimate.flatpak` (a few
+minutes; the command prints nothing while it compresses).
 
 Or step by step:
 

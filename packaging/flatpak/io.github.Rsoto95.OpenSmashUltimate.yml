@@ -127,28 +127,48 @@ modules:
         /app/share/icons/hicolor/512x512/apps/io.github.Rsoto95.OpenSmashUltimate.png
       - install -Dm644 LICENSE /app/share/licenses/io.github.Rsoto95.OpenSmashUltimate/LICENSE
       # A build-time check of the toolchain the user will run: clang, pkg-config, the Python packages and the headers.
-      - PYTHONPATH=/app/lib/python3.13/site-packages python3 /app/share/ssbu/scripts/linux/install_linux.py
-        --check-tools --storage /tmp/ssbu-check
+      - PYTHONPATH=/app/lib/python3.13/site-packages PYTHONDONTWRITEBYTECODE=1 python3
+        /app/share/ssbu/scripts/linux/install_linux.py --check-tools --storage /tmp/ssbu-check
       # The host runtime compiles and links (no game data): catches a library/API mismatch in this runtime before release.
-      - PYTHONPATH=/app/lib/python3.13/site-packages python3 /app/share/ssbu/scripts/macos/host_check.py
+      - PYTHONPATH=/app/lib/python3.13/site-packages PYTHONDONTWRITEBYTECODE=1 python3
+        /app/share/ssbu/scripts/macos/host_check.py
         --target linux --clang /app/llvm20/bin/clang --vulkan-headers /usr
         --suyu /app/share/ssbu/suyu --imgui /app/share/ssbu/imgui --work /tmp/ssbu-host-check
     sources:
+      # Only the folders the launcher and the game build read. The repo's dump/ and build folders are never listed,
+      # so they cannot be copied into the app by accident.
       - type: dir
-        path: ../..
+        path: ../../scripts
+        dest: scripts
         skip:
-          - .git
-          - .github
-          - .flatpak-builder
-          - build
-          - build-*
-          - dump
-          - dump-*
-          - deps
-          - worktrees
-          - plan
-          - tests/logs
-          - '**/__pycache__'
-          - '*.flatpak'
-          - media/menus.webp
-          - media/og-image.png
+          - __pycache__
+      - type: dir
+        path: ../../runtime
+        dest: runtime
+      - type: dir
+        path: ../../fighter_sdk
+        dest: fighter_sdk
+      - type: dir
+        path: ../../tools
+        dest: tools
+        skip:
+          - extract/__pycache__
+      - type: dir
+        path: ../../tests
+        dest: tests
+        skip:
+          - logs
+      - type: dir
+        path: ../../mods
+        dest: mods
+      - type: dir
+        path: ../../media
+        dest: media
+        skip:
+          - menus.webp
+          - og-image.png
+      - type: dir
+        path: ../../packaging/flatpak
+        dest: packaging/flatpak
+      - type: file
+        path: ../../LICENSE
