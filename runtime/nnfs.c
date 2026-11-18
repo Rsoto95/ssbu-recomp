@@ -1205,6 +1205,8 @@ static volatile LONG g_acc_user_open;                    /* the one local user {
 int account_user_is_open(uint64_t lo, uint64_t hi) { return g_acc_user_open && lo == 1 && hi == 0; }
 static void acc_TryOpenPreselectedUser(Ctx *c) { wr64(A0, 1); wr64(A0 + 8, 0); wr64(A0 + 16, 0); InterlockedExchange(&g_acc_user_open, 1); RET(1); }
 static void acc_GetUserId(Ctx *c) { wr64(A0, 1); wr64(A0 + 8, 0); RET(0); }
+/* GetLastOpenedUser(Uid *): only Skyline plugins import it (the Training Modpack names its files after the user). */
+static void acc_GetLastOpenedUser(Ctx *c) { wr64(A0, 1); wr64(A0 + 8, 0); RET(0); }
 /* CloseUser(const UserHandle &): only ARCropolis imports it, for the handle of its own TryOpenPreselectedUser; the game
  * keeps its own open, so the user stays open here (the console counts opens per handle). */
 static void acc_CloseUser(Ctx *c) { (void)c; }
@@ -1307,7 +1309,7 @@ static const ImportDef fs_imports[] = {
     {FS("26DeleteDirectoryRecursivelyEPKc"), fs_DeleteDirectoryRecursively},
     {FS("3fsa8RegisterEPKcONSt3__110unique_ptrINS1_11IFileSystemENS4_14default_deleteIS6_EEEE"), fs_fsa_Register},
     {FS("6detail14CheckMountNameEPKc"), fs_CheckMountName}, {FS("6detail8AllocateEm"), fs_detail_Allocate},
-    {FS("6detail10DeallocateEPvm"), fs_detail_Deallocate}, {AC("9CloseUserERKNS0_10UserHandleE"), acc_CloseUser},
+    {FS("6detail10DeallocateEPvm"), fs_detail_Deallocate}, {AC("9CloseUserERKNS0_10UserHandleE"), acc_CloseUser}, {AC("17GetLastOpenedUserEPNS0_3UidE"), acc_GetLastOpenedUser},
     {AC("10InitializeEv"), fs_ok}, {AC("12ListAllUsersEPiPNS0_3UidEi"), acc_ListAllUsers},
     {AC("22TryOpenPreselectedUserEPNS0_10UserHandleE"), acc_TryOpenPreselectedUser},
     {AC("9GetUserIdEPNS0_3UidERKNS0_10UserHandleE"), acc_GetUserId}, {AC("11GetNicknameEPNS0_8NicknameERKNS0_3UidE"), acc_GetNickname},

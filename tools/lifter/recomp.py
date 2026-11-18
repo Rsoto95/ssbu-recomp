@@ -692,6 +692,10 @@ class Fn:
                 if op:
                     v16 ^= 0xffff
                 val = v16 * 0x0001000100010001
+            elif cmode in (1, 3, 5, 7, 9, 11):           # orr / bic (op) vector immediate: 32-bit (cmode 0xx1) or 16-bit (10x1) elements
+                val = (imm8 << (8 * (cmode >> 1))) * 0x100000001 if cmode < 8 else (imm8 << (8 * ((cmode >> 1) & 1))) * 0x0001000100010001
+                how = '&= ~' if op else '|= '
+                return '{ c->v[%d].d[0] %s0x%xULL; c->v[%d].d[1] %s; }' % (rd, how, val, rd, ('%s0x%xULL' % (how, val)) if q else '= 0')
             else:
                 raise Unimpl('simd-imm')
             return '{ c->v[%d].d[0] = 0x%xULL; c->v[%d].d[1] = %s; }' % (rd, val, rd, ('0x%xULL' % val) if q else '0')

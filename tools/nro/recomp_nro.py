@@ -697,6 +697,10 @@ class Fn:
                 if op:
                     v16 ^= 0xffff
                 val = v16 * 0x0001000100010001
+            elif cmode in (1, 3, 5, 7, 9, 11):           # orr / bic (op) vector immediate: 32-bit (cmode 0xx1) or 16-bit (10x1) elements
+                val = (imm8 << (8 * (cmode >> 1))) * 0x100000001 if cmode < 8 else (imm8 << (8 * ((cmode >> 1) & 1))) * 0x0001000100010001
+                how = '&= ~' if op else '|= '
+                return '{ c->v[%d].d[0] %s0x%xULL; c->v[%d].d[1] %s; }' % (rd, how, val, rd, ('%s0x%xULL' % (how, val)) if q else '= 0')
             else:
                 raise Unimpl('simd-imm')
             return '{ c->v[%d].d[0] = 0x%xULL; c->v[%d].d[1] = %s; }' % (rd, val, rd, ('0x%xULL' % val) if q else '0')
@@ -750,6 +754,10 @@ class Fn:
                     return 'v_i3x(%s, %s, %s, %s, %d, %d);' % (V(rd), V(rn), V(rm), opx, size, icount(size))
                 op = {(0, 0x10): 'I_ADD', (1, 0x10): 'I_SUB', (0, 0x13): 'I_MUL', (1, 0x11): 'I_CMEQ', (0, 0x11): 'I_CMTST',
                       (0, 0x06): 'I_CMGT', (1, 0x06): 'I_CMHI', (0, 0x07): 'I_CMGE', (1, 0x07): 'I_CMHS'}.get((u, opc))
+                if op is None and opc == 0x12 and not scalar and size < 3:      # mla / mls (u): d +- n * m per lane, the rest of d zero
+                    return ('{ V128 a = c->v[%d], b = c->v[%d], t = c->v[%d]; if (!%d) t.d[1] = 0; for (int i = 0; i < %d; i++) '
+                            'vset(&t, %d, i, vget(&t, %d, i) %s vget(&a, %d, i) * vget(&b, %d, i)); c->v[%d] = t; }'
+                            % (rn, rm, rd, q, icount(size), size, size, '-' if u else '+', size, size, rd))
                 if op is None:
                     raise Unimpl('simd-i3')
                 return 'v_i3v(%s, %s, %s, %s, %d, %d);' % (V(rd), V(rn), V(rm), op, size, icount(size))
@@ -774,6 +782,11 @@ class Fn:
                     return 'v_%s(%s, %s, %d, %d);' % ('fcvtl' if opc == 0x17 else 'fcvtn', V(rd), V(rn), sz, q)
                 op = {(1, 0x05): 'I1_NOT', (0, 0x05): 'I1_CNT', (1, 0x0b): 'I1_NEG', (0, 0x0b): 'I1_ABS',
                       (0, 0x09): 'I1_CMEQ0', (0, 0x00): 'I1_REV64'}.get((u, opc))
+                if op is None and not scalar and ((u, opc) == (0, 0x01) and size == 0 or (u, opc) == (1, 0x00) and size < 2):
+                    grp = 2 if not u else 4 >> size                  # rev16 (bytes in halfwords) / rev32 (bytes or halfwords in words)
+                    return ('{ V128 a = c->v[%d], t; t.d[0] = t.d[1] = 0; for (int i = 0; i < %d; i++) '
+                            'vset(&t, %d, i, vget(&a, %d, (i / %d) * %d + %d - 1 - i %% %d)); c->v[%d] = t; }'
+                            % (rn, icount(size), size, size, grp, grp, grp, grp, rd))
                 if op is None or (op in ('I1_NOT', 'I1_CNT') and size):
                     raise Unimpl('simd-misc')
                 return 'v_i1v(%s, %s, %s, %d, %d);' % (V(rd), V(rn), op, size, icount(size))
@@ -791,6 +804,19 @@ class Fn:
             if scalar and u and bits(w, 20, 17) == 8 and bits(w, 16, 12) == 0x0d and bits(w, 11, 10) == 2:
                 f, ft = ('df', 'double') if sz else ('f', 'float')   # faddp scalar
                 return '{ %s t = c->v[%d].%s[0] + c->v[%d].%s[1]; vzero(%s); c->v[%d].%s[0] = t; }' % (ft, rn, f, rn, f, V(rd), rd, f)
+            if bits(w, 11, 10) == 0 and not scalar and size < 3:
+                # three registers, different sizes: the result lanes are twice as wide; the "2" forms (q) read the upper halves
+                opc = bits(w, 15, 12)
+                how = {0: ('l', '+'), 2: ('l', '-'), 1: ('w', '+'), 3: ('w', '-'), 8: ('acc', '+'), 10: ('acc', '-'), 12: ('mul', '')}.get(opc)
+                if how:
+                    n, off, wide = 8 >> size, (8 >> size) if q else 0, size + 1
+                    ext = (lambda e: e) if u else (lambda e: '(uint64_t)vsext(%s, %d)' % (e, size))
+                    y = ext('vget(&b, %d, i + %d)' % (size, off))
+                    x = 'vget(&a, %d, i)' % wide if how[0] == 'w' else ext('vget(&a, %d, i + %d)' % (size, off))
+                    expr = {'l': '%s %s %s' % (x, how[1], y), 'w': '%s %s %s' % (x, how[1], y),
+                            'acc': 'vget(&t, %d, i) %s %s * %s' % (wide, how[1], x, y), 'mul': '%s * %s' % (x, y)}[how[0]]
+                    return ('{ V128 a = c->v[%d], b = c->v[%d], t = c->v[%d]; for (int i = 0; i < %d; i++) vset(&t, %d, i, %s); c->v[%d] = t; }'
+                            % (rn, rm, rd, n, wide, expr, rd))
             raise Unimpl('simd-e')
         if bits(w, 27, 24) == 0xe:
             if bits(w, 15, 15) == 0 and bits(w, 10, 10) == 1:    # copy: dup / ins / umov / smov
@@ -824,6 +850,24 @@ class Fn:
                 return 'v_perm(%s, %s, %s, %d, %d, %d);' % (V(rd), V(rn), V(rm), bits(w, 14, 12), size, icount(size))
             raise Unimpl('simd-e')
         if bits(w, 10, 10) == 0:                          # by element
+            iop = {(1, 0): 'mla', (1, 4): 'mls', (0, 8): 'mul', (0, 12): 'sqdmulh', (0, 13): 'sqrdmulh'}.get((u, bits(w, 15, 12)))
+            if iop and size in (1, 2) and (not scalar or iop.startswith('sq')):
+                if size == 1:
+                    idx, em = (bits(w, 11, 11) << 2) | bits(w, 21, 20), bits(w, 19, 16)
+                else:
+                    idx, em = (bits(w, 11, 11) << 1) | bits(w, 21, 21), bits(w, 20, 16)
+                n, eb = (1 if scalar else icount(size)), 8 << size
+                if iop.startswith('sq'):                 # (2 * x * y [+ rounding]) >> lane bits, saturated: only min * min overflows
+                    rnd = ' + (1ll << %d)' % (eb - 1) if iop == 'sqrdmulh' else ''
+                    val = ('(uint64_t)(x == -(1ll << %d) && y == x ? (1ll << %d) - 1 : (2 * x * y%s) >> %d)' % (eb - 1, eb - 1, rnd, eb))
+                    body = '{ int64_t x = vsext(vget(&a, %d, i), %d); vset(&t, %d, i, %s); }' % (size, size, size, val)
+                    pre = 'int64_t y = vsext(vget(&b, %d, %d), %d); t.d[0] = t.d[1] = 0;' % (size, idx, size)
+                else:
+                    acc = {'mla': 'vget(&t, %d, i) + ' % size, 'mls': 'vget(&t, %d, i) - ' % size, 'mul': ''}[iop]
+                    body = 'vset(&t, %d, i, %svget(&a, %d, i) * y);' % (size, acc, size)
+                    pre = 'uint64_t y = vget(&b, %d, %d); %s' % (size, idx, 't.d[0] = t.d[1] = 0;' if iop == 'mul' else ('' if q else 't.d[1] = 0;'))
+                return ('{ V128 a = c->v[%d], b = c->v[%d], t = c->v[%d]; %s for (int i = 0; i < %d; i++) %s c->v[%d] = t; }'
+                        % (rn, em, rd, pre, n, body, rd))
             op = {9: 'F_MUL', 1: 'F_MLA', 5: 'F_MLS'}.get(bits(w, 15, 12))
             if op is None or u or not a:
                 raise Unimpl('simd-elem')

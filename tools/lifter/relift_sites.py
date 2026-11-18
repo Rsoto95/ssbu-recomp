@@ -398,8 +398,10 @@ class Compiler:
     def command(self, name, new_funcs):
         src, obj = os.path.join(self.gen, name), os.path.join(self.obj, name[:-2] + '.obj')
         how = self.per_file.get(name)
+        import build                                  # NOCRT_FLAGS / PLAT_FLAGS: RECOMP_NOCRT (the base set of an install without MSVC)
+        plat = build.NOCRT_FLAGS + build.PLAT_FLAGS
         if how == 'O0':
-            return [self.clang, '-c', '-O0'] + self.extra + ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', self.gen, src, '-o', obj], 'whole file -O0 (as the base set)'
+            return [self.clang, '-c', '-O0'] + self.extra + ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', self.gen] + plat + [src, '-o', obj], 'whole file -O0 (as the base set)'
         names = optnone_names(os.path.join(self.base_obj, name[:-2] + '.optnone.h'))
         limit = how or self.build_opt.OPTNONE_LINES
         have = set(n for n, _ in names)
@@ -407,7 +409,7 @@ class Compiler:
             if fname not in have and n > limit and int(fname[2:], 16) in new_funcs:
                 names.append((fname, params))
         hdr = obj[:-4] + '.optnone.h'
-        cmd = [self.clang, '-c', self.opt] + self.extra + ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', self.gen]
+        cmd = [self.clang, '-c', self.opt] + self.extra + ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', self.gen] + plat
         if names:
             with open(hdr, 'w') as f:
                 f.write('/* relift_sites.py: the functions the base set compiled unoptimised (+ new ones over %d statements) */\n#include "runtime.h"\n' % limit)
@@ -493,16 +495,18 @@ class Compiler:
 def pe_fn_table_check(dll, mapfile, wanted, table_sym='fn_table'):
     """read fn_table out of the linked DLL (address from the link map) and check that each wanted guest address is
     there and points at f_<addr>. Returns {addr: ok?}."""
-    sym = {}
-    for line in open(mapfile, errors='replace'):
-        t = line.split()
-        if len(t) >= 3 and re.match(r'^[0-9a-fA-F]{16}$', t[2] if len(t) > 2 else ''):
-            sym[t[1]] = int(t[2], 16)
     data = open(dll, 'rb').read()
     pe = struct.unpack_from('<I', data, 0x3c)[0]
     nsec = struct.unpack_from('<H', data, pe + 6)[0]
     opt = pe + 24
     image_base = struct.unpack_from('<Q', data, opt + 24)[0]
+    sym = {}
+    for line in open(mapfile, errors='replace'):
+        t = line.split()
+        if len(t) >= 3 and re.match(r'^[0-9a-fA-F]{16}$', t[2] if len(t) > 2 else ''):
+            sym[t[1]] = int(t[2], 16)                    # link.exe: <section:offset> <name> <address> ...
+        elif len(t) == 4 and t[2] == '0' and re.match(r'^[0-9a-fA-F]{8}$', t[0]) and re.match(r'^[0-9a-fA-F]{8}$', t[1]):
+            sym.setdefault(t[3], image_base + int(t[0], 16))     # lld-link /lldmap: <rva> <size> <align> <name>
     secs = []
     so = opt + struct.unpack_from('<H', data, pe + 20)[0]
     for i in range(nsec):
@@ -915,9 +919,32 @@ def main():
         shim = os.path.join(HERE, os.environ.get('RECOMP_SHIM', 'game_shim_eh.c'))
         cmd_head, cmd_tail = [comp.clang, '-shared', '-O1', '-w', '-I', HERE, '-I', gen, shim, os.path.join(gen, 'sky_sites.c')], []
     rsp = dll + '.rsp'
+    import build
+    if build.NOCRT and rl.module:
+        log('RECOMP_NOCRT: the re-lift of a script module is not done yet for a build without MSVC (only the game DLL)')
+        return 1
+    if build.NOCRT:
+        # the game DLL as build.py links it without MSVC (build_game_dll / link_dll): the shim and the game's data
+        # sources as objects (compiled against gen_<tag>: its funcs.h), sky_sites.c, lld-link alone, no C runtime
+        build.GEN = gen
+        data_objs = build.compile_game_data(obj + '_data', shim)
+        if data_objs is None:
+            return 1
+        so = os.path.join(obj + '_data', '_sky_sites.obj')
+        r = subprocess.run([comp.clang, '-c', '-O1', '-w', '-I', HERE, '-I', gen] + build.NOCRT_FLAGS + [os.path.join(gen, 'sky_sites.c'), '-o', so],
+                           capture_output=True, text=True)
+        if r.returncode:
+            log('could not compile sky_sites.c:\n%s' % (r.stdout + r.stderr)[-2000:])
+            return 1
+        objs = objs + data_objs + [so]
+        libdir = os.path.join(HERE, 'obj_nocrt')
+        os.makedirs(libdir, exist_ok=True)
+        libs = [build.lld_def_lib(os.path.join(build.NOCRT_DIR, n + '.def'), os.path.join(libdir, n + '.lib')) for n in ('ucrtbase_min', 'ntdll_min')]
+        cmd = [build.LLD_LINK, '/dll', '/noentry', '/nodefaultlib', '/machine:x64', '/out:' + dll, '@' + rsp] + libs + ['/implib:' + dll[:-4] + '.lib', '/lldmap:' + mapfile]
+    else:
+        cmd = cmd_head + ['@' + rsp, '-o', dll, '-Wl,/MAP:' + mapfile] + cmd_tail
     with open(rsp, 'w') as f:
         f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs))
-    cmd = cmd_head + ['@' + rsp, '-o', dll, '-Wl,/MAP:' + mapfile] + cmd_tail
     r = subprocess.run(cmd, capture_output=True, text=True)
     t_link = time.time() - t2
     log((r.stdout + r.stderr)[-3000:])

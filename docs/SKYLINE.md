@@ -110,6 +110,21 @@ the HDR launcher in the plugins folder), it loads with the steps above. HDR chan
 build cannot follow without a re-lift (inline hooks and patches inside functions, and smashline's changes to the common
 fighter module): steps 2 to 5 compile those in.
 
+## Example: Training Modpack (game 13.0.5, a build without MSVC)
+
+Tested with the modpack's `beta` release of 2026-10-12 (`libtraining_modpack.nro`, `libparam_hook.nro`, `libnro_hook.nro`; no
+ARCropolis needed) on an install made by `Install SSBU.bat`, whose game libraries are built with LLVM alone. Set
+`RECOMP_NOCRT=1` (and `RECOMP_BIN=<build>\binaries\13.0.5`) for steps 1 and 3: `build_plugins.py` and `relift_sites.py`
+then compile and link as `build.py` does without MSVC. With `RECOMP_NOCRT` the re-lift of a script module (`--module`) is
+not done yet; the modpack does not need it. The exe is linked separately against the re-lifted DLL
+(`RECOMP_DLL=ssbu_game_sky.dll python build.py host`).
+
+Measured: the modpack finds all its offsets, 64 sites compiled in (6 inline hooks, 1 patch, 57 hooked entries of which 13
+were inlined in the base objects), none `NOT ACTIVE`. `tests/seq_training_modpack.txt` (with `SSBU_SKIP_MOVIES=1`) enters
+Training, opens the modpack's menu (B + D-pad up), toggles an entry, saves and loads a state (ZL + D-pad down / up). The
+plugins see an offline console: name lookup and connect fail, so the modpack's version check and reports send nothing.
+At start the game shows no frame for about 8 s while the modpack searches the game's code for its offsets.
+
 ## Known problems
 
 - Two of smashline's hooks are in the SDK (`NOT ACTIVE`): its unwinder hook, whose effect `nnunwind.c` provides instead,

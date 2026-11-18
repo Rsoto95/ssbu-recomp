@@ -511,6 +511,54 @@ static void sky_tcp_send_raw(Ctx *c) {           /* (const char *data, u64 size)
 static void sky_get_plugin_addresses(Ctx *c) { if (c->x[1]) wr64(c->x[1], 0); if (c->x[2]) wr64(c->x[2], 0); }
 static void sky_nothing(Ctx *c) { (void)c; }
 
+/* ---- what plugins import beyond the game's own imports (seen with the Training Modpack).
+ * Network: a plugin gets an OFFLINE console. Name lookup and connect fail, so an HTTP client (the modpack's version check
+ * and its reports) ends with an error before nn::ssl is reached; the nn::ssl names exist so that a call returns a failed
+ * Result instead of stopping the game. Nothing of a plugin goes out to the network. */
+#define SKY_RESULT_OFFLINE 0x1c7bu                  /* module 123 (ssl), a description of our own: only "not success" matters */
+static void sky_net_fail(Ctx *c) { c->x[0] = (uint64_t)-1; }                     /* int functions: -1 */
+static void sky_net_errno(Ctx *c) { c->x[0] = 100; }                             /* nn::socket::GetLastError: ENETDOWN */
+static void sky_getaddrinfo(Ctx *c) { if (c->x[3]) wr64(c->x[3], 0); c->x[0] = 4; }   /* EAI_FAIL, no list */
+static void sky_ssl_ok(Ctx *c) { c->x[0] = 0; }
+static void sky_ssl_fail(Ctx *c) { c->x[0] = SKY_RESULT_OFFLINE; }
+static void sky_ssl_read(Ctx *c) { c->x[0] = (uint64_t)-1; }                     /* int Read(char *, u32) / Write: -1 */
+static void sky_ssl_last_error(Ctx *c) { if (c->x[1]) wr32(c->x[1], SKY_RESULT_OFFLINE); c->x[0] = 0; }
+/* nn::oe::GetPseudoDeviceId(nn::util::Uuid *): a fixed version-4 shaped id (no machine data) */
+static void sky_GetPseudoDeviceId(Ctx *c) {
+    static const uint8_t id[16] = {0x53, 0x53, 0x42, 0x55, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x72, 0x65, 0x63, 0x6f, 0x6d, 0x70};
+    if (c->x[0]) memcpy((void *)(uintptr_t)c->x[0], id, sizeof id);
+}
+/* clock_gettime(clockid_t, struct timespec *): 0 realtime (Unix epoch), anything else monotonic */
+static void sky_clock_gettime(Ctx *c) {
+    uint64_t ts = c->x[1], ns100;
+    if (!ts) { c->x[0] = (uint64_t)-1; return; }
+    if ((uint32_t)c->x[0] == 0) {
+        FILETIME ft; GetSystemTimeAsFileTime(&ft);
+        ns100 = (((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000ull;
+        wr64(ts, ns100 / 10000000ull); wr64(ts + 8, (ns100 % 10000000ull) * 100);
+    } else {
+        LARGE_INTEGER t, f; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f);
+        wr64(ts, (uint64_t)(t.QuadPart / f.QuadPart)); wr64(ts + 8, (uint64_t)((t.QuadPart % f.QuadPart) * 1000000000ll / f.QuadPart));
+    }
+    c->x[0] = 0;
+}
+#define SSLC(n) "_ZN2nn3ssl10Connection" n
+
+/* registered only with a plugin folder (sky_register): names the game does not import */
+static const ImportDef sky_plugin_imports[] = {
+    {"_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", sky_GetPseudoDeviceId}, {"clock_gettime", sky_clock_gettime},
+    {"nnsocketGetAddrInfo", sky_getaddrinfo}, {"nnsocketFreeAddrInfo", sky_nothing}, {"close", sky_net_fail},
+    {"_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", sky_net_fail}, {"_ZN2nn6socket4PollEPNS0_6PollFdEmi", sky_net_fail},
+    {"_ZN2nn6socket12GetLastErrorEv", sky_net_errno},
+    {"_ZN2nn3ssl10InitializeEv", sky_ssl_ok}, {"_ZN2nn3ssl8FinalizeEv", sky_ssl_ok},
+    {"_ZN2nn3ssl7ContextC1Ev", sky_nothing}, {"_ZN2nn3ssl7Context7DestroyEv", sky_ssl_ok},
+    {SSLC("C1Ev"), sky_nothing}, {SSLC("7DestroyEv"), sky_ssl_ok}, {SSLC("6CreateEPNS0_7ContextE"), sky_ssl_fail},
+    {SSLC("11SetHostNameEPKcj"), sky_ssl_fail}, {SSLC("19SetSocketDescriptorEi"), sky_ssl_fail},
+    {SSLC("9SetOptionENS1_10OptionTypeEb"), sky_ssl_fail}, {SSLC("15SetVerifyOptionENS1_12VerifyOptionE"), sky_ssl_fail},
+    {SSLC("11DoHandshakeEv"), sky_ssl_fail}, {SSLC("4ReadEPcj"), sky_ssl_read}, {SSLC("5WriteEPKcPij"), sky_ssl_read},
+    {SSLC("12GetLastErrorEPNS_6ResultE"), sky_ssl_last_error},
+};
+
 static const ImportDef sky_imports[] = {
     {"A64HookFunction", sky_A64HookFunction}, {"A64InlineHook", sky_A64InlineHook}, {"sky_memcpy", sky_memcpy_fn},
     {"getRegionAddress", sky_getRegionAddress}, {"get_program_id", sky_get_program_id}, {"skyline_tcp_send_raw", sky_tcp_send_raw},
@@ -688,6 +736,8 @@ static void sky_register(void) {
     extern int (*g_svc_handler)(Ctx *, uint32_t);        /* hostrt.c guest_svc */
     register_imports(sky_imports, (int)(sizeof sky_imports / sizeof sky_imports[0]));
     if (sky_registry() <= 0) return;
+    for (int i = 0; i < (int)(sizeof sky_plugin_imports / sizeof sky_plugin_imports[0]); i++)      /* never over a handler the runtime has */
+        if (!import_lookup(sky_plugin_imports[i].name) && !extra_import_lookup(sky_plugin_imports[i].name)) register_imports(&sky_plugin_imports[i], 1);
     g_svc_handler = sky_svc;
     hostfn_placeholders_readable();         /* hostrt.c: plugins read "orig" addresses as data */
     g_plugin_report_hook = sky_report;      /* report_and_exit (ExitProcess skips atexit) */

@@ -368,6 +368,7 @@ static void bind_symbols(NroModule *m, int *unresolved) {
         m->bind_fn[i] = a ? function_at(a) : NULL;
         if (!a && !m->syms[i].defined && m->syms[i].name[0] && strncmp(m->syms[i].name, "__rel_", 6) != 0) {
             if ((*unresolved)++ < 8) trace_printf("  %s: unresolved symbol %s\n", m->info->name, m->syms[i].name);
+            if (!strncmp(m->info->name, "sky_", 4)) printf("[skyline] %s imports %s, which nothing provides (a call to it stops the game)\n", m->info->name, m->syms[i].name);
         }
     }
 }
