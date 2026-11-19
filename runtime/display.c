@@ -52,6 +52,19 @@ static volatile LONG g_latch_pending;        /* a frame was queued and nobody ha
 static volatile LONG64 g_tick_at[16];        /* L1: QPC time at which tick n was published (index n & 15) */
 int rbg_owns_pacing(void);                    /* rollback_controller.c: 1 while an agreed online rollback match paces the game itself */
 static long long g_rbo_skips;                /* refresh waits left out for that reason */
+/* (2026-11-19, owner: "I see every rollback as a hitch") THE TICK WAITS FOR THE FRAME AFTER A ROLLBACK. A rollback's load and
+ * frames run again take 10-25 ms of the pass that follows it, so that pass's picture missed its tick: the picture before it
+ * stayed for two ticks (33 ms) and, the passes after it running back to back to meet the schedule again, the late picture
+ * and the next one were due at the same tick and one of them was never shown: a stop and a jump. Now, while the first real
+ * pass after a rollback has not given its picture yet (rbg_frame_owed), a tick that has no picture to show is moved by one
+ * refresh of the screen at a time (display lock: 8.3 ms at 120 Hz, 16.7 at 60; our own clock: a quarter of a frame) until
+ * the picture is there, at most two game frames, and the ticks go on from the moved place: the picture is late by a
+ * refresh or two, none is left out, and the fight runs that much behind (rollback_controller.c starts the next pass at the
+ * moved tick; the time sync between the two games takes the lead back as before). SSBU_RB_TICK_SLIP=0: never. */
+int rbg_frame_owed(void);                     /* rollback_controller.c */
+static long long g_slip_n, g_slip_ticks;     /* steps the ticks were moved by, ticks that were moved */
+static int g_slip_on = -1;
+static int tick_slip_on(void) { if (g_slip_on < 0) { const char *e = getenv("SSBU_RB_TICK_SLIP"); g_slip_on = !(e && e[0] == '0'); } return g_slip_on; }
 static int old_pacing(void) {
     if (g_old_pacing < 0) { const char *e = getenv("SSBU_OLD_PACING"); g_old_pacing = e && atoi(e) != 0; g_clockstat = getenv("SSBU_CLOCKSTAT") && atoi(getenv("SSBU_CLOCKSTAT")) != 0; }
     return g_old_pacing;
@@ -618,7 +631,7 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         LONG64 n = 0;
         HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-        int lock_tried = 0;
+        int lock_tried = 0, slips = 0;                                             /* (slips: steps the coming tick was moved by so far, see g_slip_n) */
         LONG64 vb_last = 0;
         pace_options();
         display_perf_thread();
@@ -647,6 +660,11 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
                 LONG64 extra = (vc - vb_target) / k;                               /* whole game frames this thread slept through */
                 vb_last = vb_target + extra * k;
                 precise_wait_until(vq - (LONGLONG)((double)(vc - vb_last) * period) + (LONGLONG)(period * g_lock_phase), timer);
+                if (!extra && slips < (k > 1 ? 2 * k - 1 : 1) && tick_slip_on() && g_latch <= n && rbg_frame_owed()) {
+                    vb_last -= k - 1; slips++; g_slip_n++;                        /* (the next target is the vblank after this one) */
+                    continue;
+                }
+                if (slips) { g_slip_ticks++; slips = 0; }
                 if (extra) InterlockedExchangeAdd64(&g_vsync_late, extra);
                 n += 1 + extra;
                 t0.QuadPart = 0;
@@ -654,6 +672,11 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
             if (!t0.QuadPart) { QueryPerformanceCounter(&now); t0.QuadPart = now.QuadPart - n * g_freq.QuadPart / 60; }
             LONGLONG target = t0.QuadPart + (n + 1) * g_freq.QuadPart / 60;       /* no accumulated rounding */
             precise_wait_until(target, timer);
+            if (slips < 7 && tick_slip_on() && g_latch <= n && rbg_frame_owed()) {  /* (our own clock: a quarter of a frame later, the clock with it) */
+                t0.QuadPart += g_freq.QuadPart / 240; slips++; g_slip_n++;
+                continue;
+            }
+            if (slips) { g_slip_ticks++; slips = 0; }
             QueryPerformanceCounter(&now);
             LONG64 passed = (now.QuadPart - t0.QuadPart) * 60 / g_freq.QuadPart;   /* >= n + 1; more when this thread was kept off the CPU */
             if (passed < n + 1) passed = n + 1;
@@ -1048,6 +1071,33 @@ int display_lock_tick_near(double t_ms, double *tick_ms, double *period_ms) {
     return 0;
 #endif
 }
+/* rollback_controller.c rbg_step, after the first real pass that follows a rollback ended later than its tick: waits, at most
+ * max_ms, for the tick that shows the picture that pass just gave (moved or not, see g_slip_n) and returns its time (now_ms's
+ * clock); 0 = that tick was given already, did not come in time, or ticks are never moved: the caller goes on as before. */
+double display_wait_planned_tick(double max_ms) {
+#ifdef _WIN32
+    if (!tick_slip_on() || old_pacing() || !g_freq.QuadPart) return 0;
+    LARGE_INTEGER t0, now;
+    QueryPerformanceCounter(&t0);
+    double fq = (double)g_freq.QuadPart / 1000.0;
+    int waited = 0;
+    AcquireSRWLockExclusive(&g_vsync_lock);
+    LONG64 want = g_latch;
+    while (g_vsync_n < want) {
+        QueryPerformanceCounter(&now);
+        double left = max_ms - (double)(now.QuadPart - t0.QuadPart) / fq;
+        if (left <= 0) break;
+        waited = 1;
+        SleepConditionVariableSRW(&g_vsync_cv, &g_vsync_lock, (DWORD)(left + 1.0), 0);
+    }
+    LONG64 n = g_vsync_n, q = g_tick_at[n & 15];
+    ReleaseSRWLockExclusive(&g_vsync_lock);
+    return waited && n >= want && q ? (double)q / fq : 0;
+#else
+    (void)max_ms;
+    return 0;
+#endif
+}
 /* Render thread, right after vkQueuePresentKHR returned: what the screen gets (see the comment at the top). */
 static void pace_stat_line(FILE *out, const char *what, int i, int since) {
     LONG64 n = g_ps[i].n - (since ? g_ps_last[i].n : 0), h[PS_HIST];
@@ -1241,6 +1291,7 @@ void display_report(FILE *out) {
     fprintf(out, "\ndisplay: %lld frames presented\n", (long long)g_frames);
     fprintf(out, "display: %s; %lld vsync signals, %lld refreshes slept through by the vsync thread\n", old_pacing() ? "old pacing (SSBU_OLD_PACING=1: two clocks)" : "one refresh clock", (long long)g_vsync_signals, (long long)g_vsync_late);
     if (g_rbo_skips) fprintf(out, "display: refresh waits left to the online rollback match's own 60 Hz schedule: %lld (SSBU_RB_PACE_ONLY=0: waited as before)\n", g_rbo_skips);
+    if (g_slip_n) fprintf(out, "display: ticks that waited for the frame after a rollback: %lld (moved by %lld steps in all: a refresh of the screen each, or a quarter of a frame on our own clock; SSBU_RB_TICK_SLIP=0: never)\n", g_slip_ticks, g_slip_n);
     if (g_pc_n > 0) fprintf(out, "display: the game's thread was on an EFFICIENCY core at %lld of %lld presents (%s)\n", (long long)g_pc_frames_slow, (long long)g_pc_frames, g_pc_on ? "performance cores asked for" : "SSBU_PCORES=0: left to the system");
     if (g_vb_state == 2) {
         fprintf(out, "display: refresh %.3f Hz measured; %s; presents held for their tick %lld, late frames presented at once %lld\n", (double)g_freq.QuadPart / g_vb_period,
