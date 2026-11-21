@@ -52,6 +52,8 @@
  *   SSBU_ONLINE_CODE                 online_code                      lobby code: only players with the same code meet
  *   SSBU_ONLINE_DIRECT=0             online_direct = off              no direct paths: everything through the lobby
  *   SSBU_ONLINE_PORT=<n>             local UDP port (default: any)
+ *   SSBU_ONLINE_PORT2_FIXED=<n>      online_port2 = <n>               the second port is this UDP port, FORWARDED to this PC
+ *                                                                     in the router (see g_rbf_fixed; default: any port, punched)
  *   SSBU_ONLINE_LOG=0..3             log level (default 1)
  *   SSBU_ONLINE_BUILD                build id override (players of different builds never meet) */
 #include <winsock2.h>
@@ -120,6 +122,7 @@ static int g_cfg = -1, g_log = 1, g_direct = 1;
 extern int g_game_build;             /* hostrt.c: 0 = 13.0.4, 1 = 13.0.5 (hostrt.h GAME_13_0_*), -1 before main.elf is read */
 static char g_server[256], g_name[NAME_LEN + 1], g_code[NAME_LEN + 1] = "public", g_build[BUILD_LEN + 1] = NET_BUILD_DEFAULT;
 static uint16_t g_local_port;
+static uint16_t g_rbf_fixed;                 /* online_port2: the second port, forwarded in the router (0 = any port; see rbf_open) */
 
 static int ini_value(const char *key, char *out, size_t n) {     /* "key = value" in graphics.ini (read only) */
     const GfxOptions *o = gfx_options();
@@ -521,6 +524,9 @@ static void configure(void) {
     if ((e = getenv("SSBU_ONLINE_DIRECT"))) g_direct = !is_off(e);
     else if (ini_value("online_direct", v, sizeof v)) g_direct = !is_off(v);
     if ((e = getenv("SSBU_ONLINE_PORT")) && atoi(e) > 0 && atoi(e) < 65536) g_local_port = (uint16_t)atoi(e);
+    if ((e = getenv("SSBU_ONLINE_PORT2_FIXED")) && atoi(e) > 0 && atoi(e) < 65536) g_rbf_fixed = (uint16_t)atoi(e);
+    else if (ini_value("online_port2", v, sizeof v) && atoi(v) > 0 && atoi(v) < 65536) g_rbf_fixed = (uint16_t)atoi(v);
+    if (g_rbf_fixed && g_rbf_fixed == g_local_port) { printf("[online] online_port2 = %u is the game's own port: ignored (forward another one)\n", g_rbf_fixed); fflush(stdout); g_rbf_fixed = 0; }
     if ((e = getenv("SSBU_ONLINE_LOG"))) g_log = atoi(e);
     mods_scan();                       /* O1: the mods this game loads (their names and hashes go to the lobby) */
     if ((e = getenv("SSBU_ONLINE_BUILD")) && *e) snprintf(g_build, sizeof g_build, "%s", e);
@@ -725,12 +731,24 @@ static volatile LONG g_rbm_ever;                        /* the first path has an
 typedef struct { SOCKET s; LONG gen; } RbfArg;
 static SRWLOCK g_rbrx_lock = SRWLOCK_INIT;              /* rbn_rx: one caller at a time (the client thread and the second port's) */
 static void rbn_rx_one(const uint8_t *p, int n) { AcquireSRWLockExclusive(&g_rbrx_lock); rbn_rx(p, n); ReleaseSRWLockExclusive(&g_rbrx_lock); }
+/* (2026-11-20, the Linux friend again: his router gives every destination another outside port, low numbers handed out in
+ * turn, so neither the first path nor a punched second port ever opened with a rival whose router lets in only the port it
+ * sent to; and Linux has no UPnP here) A FORWARDED SECOND PORT: online_port2 = <n> (SSBU_ONLINE_PORT2_FIXED) binds the second
+ * socket to UDP <n>, which the player forwards to this PC in the router. The rival's game is told that number as before and
+ * sends there: the forward lets it in whatever port this router would have given. This game then sends NOTHING from that
+ * socket (no openers: a packet of ours first would make the router note a way out with another outside port, and the rival's
+ * packet to <n> would collide with that note) until a message of the rival arrives there; it answers where that came from,
+ * through the entry the forward made, so the answer leaves from <n>: the port the rival's router expects. It says "my openers
+ * are out" at once, so the rival's game goes live as soon as its own are. Only this player's game needs the key. The port
+ * taken or not free: any port, punched, as before. */
+static volatile LONG g_rbf_fwd;                         /* the open second socket is on the forwarded port: wait for the rival, no openers */
 static int rbf_wanted(void) { static int v = -1; if (v < 0) { const char *e = getenv("SSBU_ONLINE_PORT2"); v = !(e && e[0] == '0'); } return v; }
 static void rbf_close_locked(void) {                    /* (g_rbd_lock held exclusively) */
     if (g_rbf_sock != INVALID_SOCKET) { InterlockedIncrement(&g_rbf_gen); closesocket(g_rbf_sock); g_rbf_sock = INVALID_SOCKET; }
     g_rbf_port = 0; memset(&g_rbf_at, 0, sizeof g_rbf_at);
     InterlockedExchange64(&g_rbf_last_rx, 0); InterlockedExchange64(&g_rbf_opened, 0); InterlockedExchange(&g_rbf_said, 0);
     InterlockedExchange(&g_rbf_out, 0); InterlockedExchange(&g_rbf_peer_out, 0); InterlockedExchange(&g_rbf_live, 0);
+    InterlockedExchange(&g_rbf_fwd, 0);
 }
 static void rbf_go_live(SOCKET s, const char *why) {    /* the openers are over: normal time to live, the match's messages go there */
     if (InterlockedExchange(&g_rbf_live, 1)) return;
@@ -788,6 +806,7 @@ static void rbf_open(void) {                            /* (client thread) the s
     if (g_rbf_sock != INVALID_SOCKET || !g_rbd_at.sin_port) { ReleaseSRWLockExclusive(&g_rbd_lock); return; }
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     uint16_t port = 0;
+    int fwd = 0;
     if (s != INVALID_SOCKET) {
         struct sockaddr_in a = {0};
         DWORD bytes = 0; BOOL off = FALSE; int big = 1 << 20, len = sizeof a;
@@ -795,7 +814,13 @@ static void rbf_open(void) {                            /* (client thread) the s
         net_set_rcvtimeo(s, 200);
         setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&big, sizeof big);
         WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
-        if (bind(s, (struct sockaddr *)&a, sizeof a) || getsockname(s, (struct sockaddr *)&a, &len)) { closesocket(s); s = INVALID_SOCKET; }
+        if (g_rbf_fixed) {                              /* (the forwarded port; not free: any port, as without the key) */
+            a.sin_port = htons(g_rbf_fixed);
+            fwd = !bind(s, (struct sockaddr *)&a, sizeof a);
+            if (!fwd) a.sin_port = 0;
+        }
+        if ((!fwd && bind(s, (struct sockaddr *)&a, sizeof a)) || getsockname(s, (struct sockaddr *)&a, &len)) { closesocket(s); s = INVALID_SOCKET; }
+        else if (fwd) port = ntohs(a.sin_port);         /* (no openers, the normal time to live: this game answers only) */
         else {
             int ttl = 0, tl = sizeof ttl, low = rbf_ttl();
             port = ntohs(a.sin_port);
@@ -805,11 +830,15 @@ static void rbf_open(void) {                            /* (client thread) the s
     }
     RbfArg *ra = s != INVALID_SOCKET ? malloc(sizeof *ra) : NULL;
     if (s != INVALID_SOCKET && !ra) { closesocket(s); s = INVALID_SOCKET; }
-    if (s != INVALID_SOCKET) { g_rbf_sock = s; g_rbf_port = port; InterlockedExchange64(&g_rbf_opened, (LONG64)ms_now()); ra->s = s; ra->gen = g_rbf_gen; }
+    if (s != INVALID_SOCKET) { g_rbf_sock = s; g_rbf_port = port; InterlockedExchange64(&g_rbf_opened, (LONG64)ms_now()); ra->s = s; ra->gen = g_rbf_gen;
+        InterlockedExchange(&g_rbf_fwd, fwd); if (fwd) InterlockedExchange(&g_rbf_out, RBF_OPENERS); }      /* ("mine are out": the rival goes live after its own) */
     ReleaseSRWLockExclusive(&g_rbd_lock);
     if (s == INVALID_SOCKET) { say("match: second port: the socket could not be made (error %d)", WSAGetLastError()); return; }
     HANDLE th = CreateThread(NULL, 0, rbf_thread, ra, 0, NULL);
     if (th) CloseHandle(th); else free(ra);
+    if (fwd) { say("match: second port: UDP %u (online_port2, forwarded in the router) opened for this opponent (the first path does not answer): told through the lobby; "
+                   "this game waits for the opponent's first message there and answers it", port); return; }
+    if (g_rbf_fixed) say("match: second port: online_port2 = %u is not free on this PC: any port instead", g_rbf_fixed);
     say("match: second port: UDP %u opened for this opponent only (the first path does not answer): told through the lobby; openers of %d hops first", port, rbf_ttl());
 }
 static void rbf_peer_port(uint32_t src, uint16_t port, int out) {       /* (client thread) the opponent's 0xF5 'F' 'R' '2' message */
@@ -847,7 +876,7 @@ static void rbf_tick(uint64_t t) {                      /* (client thread) opens
         last_told = 0;
     }
     if (main_ok || fresh_ok) return;                    /* (a path answers: nothing to tell) */
-    if (!g_rbf_live) {                                  /* the openers: 8 bytes (a receiver ignores them), every 100 ms, short time to live */
+    if (!g_rbf_live && !g_rbf_fwd) {                    /* the openers: 8 bytes (a receiver ignores them), every 100 ms, short time to live */
         static uint64_t last_opener;
         if (t - last_opener >= 100) {
             uint8_t o[8];
