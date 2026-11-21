@@ -102,6 +102,7 @@ static void om_nifm_true(Ctx *c) { RET(menu_online_blocked() ? 0 : 1); }
 static void om_nifm_false(Ctx *c) { RET(0); }
 static void om_nifm_keep(Ctx *c) { (void)c; }
 static uint64_t om_nsa_id(void);
+static void om_sala_start(void);
 static void om_nifm_GetCurrentPrimaryIpAddress(Ctx *c) {
     uint64_t out = A0;
     g_om_prev_primary_ip(c);
@@ -180,6 +181,7 @@ static void om_acc_EnsureIdTokenCacheAsync(Ctx *c) {
     wr64(ctx + 0x18, P(&g_om_token_request));
     om_log("nn::account::EnsureNetworkServiceAccountIdTokenCacheAsync: finished at once");
     menu_online_entered();                                 /* (2026-11-05) the version asked again (a release out during the session) */
+    om_sala_start();                                       /* (2026-11-21) the server knows this player's sala and name before the arena menus */
     RET(0);
 }
 static void om_acc_Async_HasDone(Ctx *c) { wr8(A1, om_ctx_ours(A0) ? 1 : 0); RET(0); }
@@ -287,6 +289,155 @@ int online_menu_status(int *players, int *ms, int *narenas, char codes[][6], int
     return st;
 }
 const char *online_menu_server(void) { return g_om_server; }
+
+/* ---------------------------------------------------------------- (2026-11-21) SALAS: rooms with several stations
+ * The game runs one fight per Battle Arena, so the server (tools/net/nex_server.py) groups arenas: a sala's STATIONS are
+ * arenas, each with its own fight, queue and spectators, and they fight at the same time. A member of a sala sees only its
+ * stations in the game's arena list, an arena it makes is the sala's next station, and every station shows the sala's
+ * code. This game says which sala it is in on the arena query port (UDP 39599, little-endian):
+ *   "SALA?" + version u8 (1) + op u8 (0 still here, 1 enter, 2 leave, 3 make one) + pid u64 + code[5] + name length u8 + name
+ *   -> "SALA!" + version u8 + status u8 (0 member, 1 no such sala, 2 in none, 3 no more salas) + code[5] + stations u8 + members u8
+ * every 30 s and at once when F1 changes it or the game logs in to Online (om_acc_EnsureIdTokenCacheAsync: seconds of
+ * menus before the game lists, makes or enters an arena). The name is for the stations' table of the other players. A
+ * server without salas does not answer: the F1 part says so and the arenas are as before.
+ *   "STATUS?" + version u8 (2) + pid u64 -> "SALAST!" + online u16 + sala[5] + rows u8 + per row: gid u32 + station u8 + code[5]
+ *   + members u8 + most u8 + fighting seats u8 + n u8 + n x (seat u8 + name[10]): asked every 3 s while F1 shows it. */
+typedef struct { int number; uint32_t gid; char code[6]; int members, most, n; int seat[8]; char name[8][11]; } OmStation;      /* (menu.cpp: the same) */
+#include <ctype.h>
+const char *nnfs_nickname(void); const char *gfx_online_sala(void); int gfx_ini_set(const char *key, const char *value);
+static SRWLOCK g_om_sala_lock = SRWLOCK_INIT;
+static char g_om_sala_want[6];                             /* the sala this game asks for ("" = none) */
+static int g_om_sala_op;                                   /* what the next SALA? says: 0 still here, 1 enter, 2 leave, 3 make */
+static int g_om_sala_state;                                /* 0 not asked, 1 member, 2 in none, 3 no such sala, 4 no answer, 5 no more salas */
+static char g_om_sala_code[6]; static int g_om_sala_stations, g_om_sala_members;
+static OmStation g_om_sala_rows[32]; static int g_om_sala_nrows, g_om_sala_rows_state; static char g_om_sala_rows_code[6];
+static volatile LONG g_om_sala_thread_on, g_om_sala_kick; static volatile LONG64 g_om_sala_rows_wanted;
+static int om_sala_ask(const uint8_t *q, int qn, uint8_t *b, int cap, int tries) {      /* the answer's length, 0 = none */
+    SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (u == INVALID_SOCKET) return 0;
+    struct sockaddr_in a; memset(&a, 0, sizeof a); a.sin_family = AF_INET; a.sin_port = htons(39599);
+    InetPtonA(AF_INET, g_om_server, &a.sin_addr);
+    DWORD to = 500; setsockopt(u, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
+    int n = 0;
+    for (int k = 0; k < tries && n <= 0; k++) { sendto(u, (const char *)q, qn, 0, (struct sockaddr *)&a, sizeof a); n = recv(u, (char *)b, cap, 0); }
+    closesocket(u);
+    return n > 0 ? n : 0;
+}
+static void om_sala_say(void) {
+    uint8_t q[21 + 32], b[64];
+    char want[6]; int op;
+    AcquireSRWLockShared(&g_om_sala_lock); memcpy(want, g_om_sala_want, 6); op = g_om_sala_op; ReleaseSRWLockShared(&g_om_sala_lock);
+    const char *name = nnfs_nickname();
+    size_t nl = strlen(name); if (nl > 32) nl = 32;
+    uint64_t me = om_nsa_id();
+    memset(q, 0, sizeof q); memcpy(q, "SALA?", 5); q[5] = 1; q[6] = (uint8_t)op; memcpy(q + 7, &me, 8);
+    if (op != 2 && op != 3) memcpy(q + 15, want, strlen(want));
+    q[20] = (uint8_t)nl; memcpy(q + 21, name, nl);
+    int n = om_sala_ask(q, 21 + (int)nl, b, sizeof b, 3);
+    int ok = n >= 14 && !memcmp(b, "SALA!", 5), was, now;
+    char code[6] = "";
+    if (ok) memcpy(code, b + 7, 5);
+    AcquireSRWLockExclusive(&g_om_sala_lock);
+    was = g_om_sala_state;
+    if (!ok) g_om_sala_state = 4;
+    else {
+        int st = b[6];
+        g_om_sala_state = st == 0 ? 1 : st == 1 ? 3 : st == 3 ? 5 : 2;
+        memcpy(g_om_sala_code, st == 0 ? code : "", 6); g_om_sala_stations = b[12]; g_om_sala_members = b[13];
+        if (g_om_sala_op == op) {                          /* (F1 did not ask for something else meanwhile) */
+            g_om_sala_op = 0;
+            if (st == 0) memcpy(g_om_sala_want, code, 6);  /* (a sala made: its code; one the server still had this player in) */
+            else if (op || st == 1) g_om_sala_want[0] = 0; /* (left, refused, or the sala is gone) */
+        }
+    }
+    now = g_om_sala_state;
+    memcpy(want, g_om_sala_want, 6);
+    ReleaseSRWLockExclusive(&g_om_sala_lock);
+    if (ok && (op || now != was)) {
+        gfx_ini_set("online_sala", want);
+        om_log("sala: %s%s (%d station(s), %d player(s) at them)", now == 1 ? "a member of " : now == 3 ? "no sala with that code" : now == 5 ? "the server makes no more salas now" : "in no sala",
+               now == 1 ? code : "", (int)b[12], (int)b[13]);
+    } else if (!ok && was != 4) om_log("sala: the server does not answer SALA? (a server without salas, or not reachable): the arenas are as before");
+}
+static void om_sala_rows(void) {
+    uint8_t q[16], b[1400];
+    uint64_t me = om_nsa_id();
+    memcpy(q, "STATUS?", 7); q[7] = 2; memcpy(q + 8, &me, 8);
+    int n = om_sala_ask(q, sizeof q, b, sizeof b, 1);
+    AcquireSRWLockExclusive(&g_om_sala_lock);
+    if (n >= 15 && !memcmp(b, "SALAST!", 7)) {
+        int k = b[14], o = 15;
+        g_om_sala_rows_state = 1; g_om_sala_nrows = 0; memcpy(g_om_sala_rows_code, b + 9, 5); g_om_sala_rows_code[5] = 0;
+        for (int i = 0; i < k && g_om_sala_nrows < 32 && o + 14 <= n; i++) {
+            OmStation *r = &g_om_sala_rows[g_om_sala_nrows];
+            memset(r, 0, sizeof *r);
+            memcpy(&r->gid, b + o, 4); r->number = b[o + 4]; memcpy(r->code, b + o + 5, 5); r->members = b[o + 10]; r->most = b[o + 11];
+            int people = b[o + 13];
+            o += 14;
+            if (o + 11 * people > n) break;
+            for (int j = 0; j < people; j++, o += 11) if (j < 8) { r->seat[j] = b[o]; memcpy(r->name[j], b + o + 1, 10); r->n = j + 1; }
+            g_om_sala_nrows++;
+        }
+    } else g_om_sala_rows_state = 2;                       /* (an older server answers STATUS!, or nothing came) */
+    ReleaseSRWLockExclusive(&g_om_sala_lock);
+}
+static DWORD WINAPI om_sala_thread(LPVOID unused) {
+    (void)unused;
+    ULONGLONG said = 0, rows = 0;
+    for (;;) {
+        ULONGLONG t = GetTickCount64();
+        int kick = InterlockedExchange(&g_om_sala_kick, 0);
+        if (kick || !said || t - said >= 30000) { om_sala_say(); said = GetTickCount64(); rows = 0; }
+        t = GetTickCount64();
+        if (t - (ULONGLONG)g_om_sala_rows_wanted <= 2000 && (!rows || t - rows >= 3000)) { om_sala_rows(); rows = GetTickCount64(); }
+        Sleep(100);
+    }
+    return 0;
+}
+static void om_sala_start(void) {                          /* the thread, once; then: say it now */
+    if (!g_om_on) return;
+    if (!InterlockedExchange(&g_om_sala_thread_on, 1)) {
+        const char *ini = gfx_online_sala();
+        AcquireSRWLockExclusive(&g_om_sala_lock);
+        if (!g_om_sala_want[0] && !g_om_sala_op && ini && strlen(ini) == 5) { memcpy(g_om_sala_want, ini, 6); g_om_sala_op = 1; }
+        ReleaseSRWLockExclusive(&g_om_sala_lock);
+        HANDLE th = CreateThread(NULL, 0, om_sala_thread, NULL, 0, NULL); if (th) CloseHandle(th);
+    }
+    InterlockedExchange(&g_om_sala_kick, 1);
+}
+/* F1: op 1 = enter the sala `code`, 2 = leave, 3 = make one (its code comes with online_menu_sala) */
+void online_menu_sala_set(int op, const char *code) {
+    if (!g_om_on) return;
+    AcquireSRWLockExclusive(&g_om_sala_lock);
+    g_om_sala_op = op; g_om_sala_state = 0;
+    memset(g_om_sala_want, 0, 6);
+    if (op == 1 && code) for (int k = 0; k < 5 && code[k]; k++) g_om_sala_want[k] = (char)toupper((unsigned char)code[k]);
+    ReleaseSRWLockExclusive(&g_om_sala_lock);
+    om_sala_start();
+}
+/* -1 = the Online menu is off; 0 asking; 1 a member of `code`; 2 in no sala; 3 no sala with that code; 4 the server does
+ * not answer (it has no salas); 5 the server makes no more salas now */
+int online_menu_sala(char code[6], int *stations, int *members) {
+    code[0] = 0; *stations = *members = 0;
+    if (!g_om_on) return -1;
+    if (!g_om_sala_thread_on) om_sala_start();
+    AcquireSRWLockShared(&g_om_sala_lock);
+    int st = g_om_sala_state; memcpy(code, g_om_sala_code, 6); *stations = g_om_sala_stations; *members = g_om_sala_members;
+    ReleaseSRWLockShared(&g_om_sala_lock);
+    return st;
+}
+/* the stations of this player's sala (or the arenas of no sala): 0 asking, 1 answered (n rows), 2 a server without them */
+int online_menu_stations(char sala[6], OmStation *rows, int cap, int *n) {
+    sala[0] = 0; *n = 0;
+    if (!g_om_on) return 0;
+    InterlockedExchange64(&g_om_sala_rows_wanted, (LONG64)GetTickCount64());
+    if (!g_om_sala_thread_on) om_sala_start();
+    AcquireSRWLockShared(&g_om_sala_lock);
+    int st = g_om_sala_rows_state; memcpy(sala, g_om_sala_rows_code, 6);
+    for (int i = 0; i < g_om_sala_nrows && i < cap; i++) { rows[i] = g_om_sala_rows[i]; *n = i + 1; }
+    ReleaseSRWLockShared(&g_om_sala_lock);
+    return st;
+}
 int online_menu_arena(uint32_t *gid, int *players, int *own_seat) {
     *gid = 0; *players = 0; *own_seat = -1;
     if (!g_om_on) return 0;

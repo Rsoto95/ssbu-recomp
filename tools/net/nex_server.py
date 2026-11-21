@@ -344,6 +344,131 @@ ARENAS = {}                 # gathering id -> {"owner": pid, "session": Matchmak
 ARENAS_LOCK = threading.Lock()
 _next_gid = [1000]
 
+# (2026-11-21) SALAS: rooms with several stations, as the Custom Rooms of other fighting games. The game runs ONE fight per
+# Battle Arena (every member's game sets up that same match), so a sala is a GROUP OF ARENAS: one arena = one station, with
+# the game's own queue, spectators and netcode inside it, and several stations fight at the same time. A sala has a code of
+# its own (5 characters of the arena code's alphabet: typed on the game's own Arena ID screen) and lives without its
+# stations: an arena is deleted when its host goes. Its members are told apart by pid:
+#   - explicit: the game said so on the arena query port (SALA?, F1 > Experimental): kept while it keeps saying so;
+#   - implicit: a player who typed the sala's code or entered one of its stations (a game without the F1 part): kept while
+#     it sits at a station and SALA_IMPLICIT_FOR s after.
+# For a member: the arena search (method 52) lists the sala's stations only, an arena it makes (38) is the sala's next
+# station, and every station shows the sala's code (55). For everyone else nothing changes: the arenas without a sala are
+# listed as before, and a sala's stations are not. All of it under ARENAS_LOCK.
+SALAS = {}                  # code -> {"stations": {number: gid}, "created": t, "empty_since": t or None}
+MEMBER = {}                 # pid -> {"sala": code, "explicit": bool, "seen": t}
+NAMES = {}                  # pid -> the player's name, as its game said (SALA?): for the stations' table only
+SALA_EMPTY_FOR = 600.0      # s a sala without stations and without members is kept
+SALA_EXPLICIT_FOR = 120.0   # s an explicit member is kept without a SALA? (the game sends one every 30 s)
+SALA_IMPLICIT_FOR = 300.0   # s an implicit member is kept after it left its station
+SALA_MOST = 64              # salas at once (a new one is refused beyond)
+
+
+def arena_members(a):
+    return a.get("players") or [a["owner"]]
+
+
+def sala_sweep(now=None):
+    """Members whose time ran out and salas left empty are dropped. Call with ARENAS_LOCK held."""
+    now = time.monotonic() if now is None else now
+    seated = {}
+    for a in ARENAS.values():
+        if a.get("sala"):
+            for p in arena_members(a):
+                seated[p] = a["sala"]
+    for pid, m in list(MEMBER.items()):
+        if m["sala"] not in SALAS:
+            del MEMBER[pid]
+            continue
+        if seated.get(pid) == m["sala"]:
+            m["seen"] = now
+        elif now - m["seen"] > (SALA_EXPLICIT_FOR if m["explicit"] else SALA_IMPLICIT_FOR):
+            del MEMBER[pid]
+    for code, sl in list(SALAS.items()):
+        sl["stations"] = {n: g for n, g in sl["stations"].items() if g in ARENAS and ARENAS[g].get("sala") == code}
+        if sl["stations"] or any(m["sala"] == code for m in MEMBER.values()):
+            sl["empty_since"] = None
+        elif sl["empty_since"] is None:
+            sl["empty_since"] = now
+        elif now - sl["empty_since"] > SALA_EMPTY_FOR:
+            del SALAS[code]
+
+
+def member_sala(pid):
+    """The code of the sala this player is a member of now, or None. Call with ARENAS_LOCK held."""
+    if not pid:
+        return None
+    sala_sweep()
+    m = MEMBER.get(pid)
+    return m["sala"] if m else None
+
+
+def sala_enter(pid, code, explicit):
+    """The player becomes a member of the sala (an explicit membership is never made implicit by a join). Call with
+    ARENAS_LOCK held; False: no such sala."""
+    if not pid or code not in SALAS:
+        return False
+    m = MEMBER.get(pid)
+    explicit = explicit or bool(m and m["sala"] == code and m["explicit"])
+    MEMBER[pid] = {"sala": code, "explicit": explicit, "seen": time.monotonic()}
+    SALAS[code]["empty_since"] = None
+    return True
+
+
+def new_code():
+    """A code no arena and no sala has. Call with ARENAS_LOCK held."""
+    while True:
+        code = "".join(ARENA_CODE_ALPHABET[b % len(ARENA_CODE_ALPHABET)] for b in os.urandom(5))
+        if code not in SALAS and not any(x.get("code") == code for x in ARENAS.values()):
+            return code
+
+
+def sala_route(code):
+    """The station a player who typed the sala's code is sent to: one where a single player waits for a rival (the lowest
+    station number first), else the one with the fewest members; a full station (members = the arena's most) only when
+    all are. 0: the sala has no station now. Call with ARENAS_LOCK held."""
+    sl = SALAS.get(code)
+    rows = []
+    for n, gid in sorted((sl or {}).get("stations", {}).items()):
+        a = ARENAS.get(gid)
+        if a is not None:
+            k = len(arena_members(a))
+            rows.append((bool(a.get("max")) and k >= a["max"], k != 1, k, n, gid))
+    return min(rows)[4] if rows else 0
+
+
+def close_arena(gid, why, log=None):
+    """An arena is deleted: everyone in it leaves the room for the lobby (the score), and its sala loses the station (the
+    sala stays). Call with ARENAS_LOCK held."""
+    a = ARENAS.pop(gid, None)
+    if a is None:
+        return False
+    for cl in set(a.get("clients", {}).values()) | {a.get("client")}:
+        notify_room_left(gid, cl)
+    sl = SALAS.get(a.get("sala"))
+    if sl is not None:
+        sl["stations"] = {n: g for n, g in sl["stations"].items() if g != gid}
+    if log:
+        log("arena %d closed (%s)%s" % (gid, why, (": station %s of sala %s" % (a.get("station"), a["sala"])) if a.get("sala") else ""))
+    return True
+
+
+def enter_arena(pid, gid, log=None):
+    """(2026-11-21) a player is in ONE arena: entering (or making) gid takes it out of every other one, and an arena it
+    had made and left behind is closed. A player who changed arena was still in the old one's list (its maker: for ever),
+    and the arena query answered whichever came last in the table: the wrong arena, so the rollback search carried the
+    wrong key and the fight went on with the game's own netcode. Call with ARENAS_LOCK held."""
+    if not pid:
+        return
+    for g in [g for g, a in ARENAS.items() if g != gid and pid in arena_members(a)]:
+        if ARENAS[g]["owner"] == pid:
+            close_arena(g, "its host is in arena %d now" % gid, log)
+        else:
+            leave_arenas(pid, g, NOTIFY_END_PARTICIPATION)
+    a = ARENAS.get(gid)
+    if a is not None:
+        a.setdefault("joined", {})[pid] = time.monotonic()
+
 
 def matchmake_session_span(b, o):
     """The bytes of a MatchmakeSession at b[o:]: the Gathering part (header + body) then the MatchmakeSession part."""
@@ -425,6 +550,14 @@ def create_matchmake_session_with_param(client, req):
             done, key = bytes(session), None
         session = bytearray(done)
         ARENAS[gid] = {"owner": client.pid, "session": done, "client": client, "key": key}
+        enter_arena(client.pid, gid, client.log)
+        sala = member_sala(client.pid)
+        if sala:                                      # (a member's arena: the sala's next station, the lowest number free)
+            st = SALAS[sala]["stations"]
+            n = next(i for i in range(1, 1000) if i not in st)
+            st[n] = gid
+            ARENAS[gid]["sala"], ARENAS[gid]["station"] = sala, n
+            client.log("%s     arena %d is station %d of sala %s" % (client.who, gid, n, sala))
     r = Reader(bytes(session))
     r.raw(5 + 4 + 16)
     mn, mx = r.u("H"), r.u("H")
@@ -446,7 +579,7 @@ def unregister_gathering(client, req):
     with ARENAS_LOCK:
         ok = ARENAS.get(gid, {}).get("owner") == client.pid
         if ok:
-            del ARENAS[gid]
+            close_arena(gid, "unregistered by its host")
     client.log("%s     unregister gathering %d: %s" % (client.who, gid, "removed" if ok else "not ours / unknown"))
     return Writer().u("B", 1 if ok else 0).bytes()
 
@@ -456,8 +589,12 @@ def matchmake_ext_52(client, req):
     (attribute strings "0", "1", "7"..., flags) and at the end a ResultRange {offset 0, size 50}. Answered with an empty
     list of sessions (u32 0) (UNCONFIRMED: the answer type)."""
     with ARENAS_LOCK:
-        found = [a["session"] for a in ARENAS.values()]
-    client.log("%s     MatchmakeExtension 52 (arena search): %d arena(s)" % (client.who, len(found)))
+        sala = member_sala(client.pid)
+        if sala:                                      # (a sala's member: its stations only, in their order)
+            found = [ARENAS[g]["session"] for n, g in sorted(SALAS[sala]["stations"].items()) if g in ARENAS]
+        else:                                         # (everyone else: the arenas of no sala, as before)
+            found = [a["session"] for a in ARENAS.values() if not a.get("sala")]
+    client.log("%s     MatchmakeExtension 52 (arena search): %d arena(s)%s" % (client.who, len(found), (" of sala %s" % sala) if sala else ""))
     w = Writer().u("I", len(found))
     for session in found:
         w.raw(session)
@@ -485,9 +622,11 @@ def matchmake_ext_55(client, req):
     gid = Reader(req.body).u("I")
     with ARENAS_LOCK:
         a = ARENAS.get(gid)
-        code = a.get("code") if a else None
-        while not code or any(x.get("code") == code for x in ARENAS.values()):
-            code = "".join(ARENA_CODE_ALPHABET[b % len(ARENA_CODE_ALPHABET)] for b in os.urandom(5))
+        # (2026-11-21) a station shows its sala's code; an arena asked twice keeps its code (it got a new one each time:
+        # the test "no arena has it" counted the arena itself)
+        code = (a.get("sala") or a.get("code")) if a else None
+        if not code:
+            code = new_code()
         if a is not None:
             a["code"] = code
     client.log("%s     MatchmakeExtension 55: arena %d gets the code %s%s" % (client.who, gid, code, "" if a else " (gid unknown)"))
@@ -502,9 +641,16 @@ def matchmake_ext_56(client, req):
     r.raw(5)                                  # (the structure's version u8 and length u32)
     n = r.u("H")
     code = r.raw(n).rstrip(b"\0").decode("ascii", "replace").strip().upper()
+    how = ""
     with ARENAS_LOCK:
-        gid = next((g for g, a in ARENAS.items() if a.get("code", "").upper() == code), 0)
-    client.log("%s     MatchmakeExtension 56: code %s -> %s" % (client.who, code, ("arena %d" % gid) if gid else "no arena"))
+        sala_sweep()
+        if code in SALAS:                             # (a sala's code: its member from now on, sent to a station)
+            sala_enter(client.pid, code, False)
+            gid = sala_route(code)
+            how = " (sala %s: %s)" % (code, ("station %s" % ARENAS[gid].get("station")) if gid else "no station open: Create Arena opens one")
+        else:
+            gid = next((g for g, a in ARENAS.items() if not a.get("sala") and a.get("code", "").upper() == code), 0)
+    client.log("%s     MatchmakeExtension 56: code %s -> %s%s" % (client.who, code, ("arena %d" % gid) if gid else "no arena", how))
     return Writer().u("I", gid).bytes()
 
 
@@ -552,6 +698,9 @@ def join_matchmake_session_with_param(client, req):
         parts = a.setdefault("players", [a["owner"]])
         if client.pid not in parts:
             parts.append(client.pid)
+        enter_arena(client.pid, gid, client.log)
+        if a.get("sala"):                             # (a station: the player is a member of its sala)
+            sala_enter(client.pid, a["sala"], False)
         seats = a.setdefault("seats", {a["owner"]: 0})
         if client.pid not in seats:                    # (2026-11-03) the game's seat: the lowest one free now
             # (2026-11-08) a seat whose member's connection dropped stays taken for SEAT_HOLD s: the game keeps that member in
@@ -830,12 +979,19 @@ def arena_query_listener(host, log, socks=None):
             data, addr = u.recvfrom(256)
         except OSError:
             continue
+        if data[:5] == b"SALA?" and len(data) >= 21:
+            u.sendto(sala_datagram(data, log), addr)
+            continue
+        if data[:7] == b"STATUS?" and len(data) >= 16 and data[7] == 2:
+            u.sendto(status_v2(struct.unpack_from("<Q", data, 8)[0]), addr)
+            continue
         if data[:7] == b"STATUS?":
             # (2026-11-02, F1 > Experimental) "STATUS!" + players online u16 + arenas u8 + per arena: code[5] (ASCII, NUL
-            # padded) + members u8 + most u8 (little-endian; at most 32 arenas)
+            # padded) + members u8 + most u8 (little-endian; at most 32 arenas). (2026-11-21) the arenas of no sala only: a
+            # sala's code is its key
             with ARENAS_LOCK:
                 online = len(CLIENTS_BY_CID)
-                rows = [(a.get("code", "") or "", len(a.get("players", [a["owner"]])), a.get("max", 0)) for a in ARENAS.values()][:32]
+                rows = [(a.get("code", "") or "", len(a.get("players", [a["owner"]])), a.get("max", 0)) for a in ARENAS.values() if not a.get("sala")][:32]
             out = b"STATUS!" + struct.pack("<HB", online, len(rows))
             for code, members, most in rows:
                 out += code.encode("ascii", "replace")[:5].ljust(5, b"\0") + struct.pack("<BB", min(members, 255), min(most, 255))
@@ -850,8 +1006,8 @@ def arena_query_listener(host, log, socks=None):
             continue
         pid = struct.unpack_from("<Q", data, 6)[0]
         with ARENAS_LOCK:
-            found = [(g, a.get("players", [a["owner"]]), dict(a.get("seats", {}))) for g, a in ARENAS.items() if pid in a.get("players", [a["owner"]])]
-        gid, players, seats = found[-1] if found else (0, [], {})
+            found = [(a.get("joined", {}).get(pid, 0.0), g, a.get("players", [a["owner"]]), dict(a.get("seats", {}))) for g, a in ARENAS.items() if pid in a.get("players", [a["owner"]])]
+        gid, players, seats = max(found, key=lambda f: f[:2])[1:] if found else (0, [], {})      # (the arena it entered last: enter_arena)
         if seats and all(p in seats for p in players):
             # (2026-11-03) indexed by the game's SEAT, pid 0 where a seat is empty: the game keeps a member's seat when others
             # leave (the members [A, B] sat at seats 0 and 4; by list index B took itself for seat 1: not a fighter, so the
@@ -862,6 +1018,90 @@ def arena_query_listener(host, log, socks=None):
             players = by_seat
         u.sendto(b"ARENA!" + struct.pack("<IB", gid, len(players)) + b"".join(struct.pack("<Q", x) for x in players), addr)
         log("arena query from %s:%d: pid %d -> arena %d, players %s" % (addr[0], addr[1], pid, gid, players))
+
+
+def sala_datagram(data, log=None):
+    """(2026-11-21) SALA? on the arena query port, from the game (runtime online_menu.inc), little-endian:
+        "SALA?" + version u8 (1) + op u8 + pid u64 + code[5] (ASCII, NUL padded) + name length u8 + name (UTF-8, <= 32)
+    op 0: still here (every 30 s; with a code: still a member of it) / 1: enter the sala `code` / 2: leave / 3: make a sala.
+    Answer: "SALA!" + version u8 + status u8 + code[5] + stations u8 + members u8 (the players at its stations)
+    status 0: a member of `code` / 1: no such sala (not a member of any) / 2: in no sala / 3: no more salas can be made.
+    The pid is as the game says it (no proof, as for ARENA?): a sala's code is what keeps strangers out, not this."""
+    op = data[6]
+    pid = struct.unpack_from("<Q", data, 7)[0]
+    code = data[15:20].rstrip(b"\0").decode("ascii", "replace").strip().upper()
+    n = min(data[20], 32)
+    name = data[21:21 + n].decode("utf-8", "replace").strip()
+    status = 2
+    with ARENAS_LOCK:
+        if pid and name:
+            if len(NAMES) > 4096:
+                NAMES.clear()
+            NAMES[pid] = name
+        sala_sweep()
+        if op == 3 and pid:
+            if len(SALAS) >= SALA_MOST:
+                status, code = 3, ""
+            else:
+                code = new_code()
+                SALAS[code] = {"stations": {}, "created": time.monotonic(), "empty_since": None}
+                sala_enter(pid, code, True)
+                status = 0
+                if log:
+                    log("sala %s made by pid %d (%s)" % (code, pid, name or "?"))
+        elif op == 2:
+            if MEMBER.pop(pid, None) is not None and log:
+                log("sala: pid %d (%s) left its sala" % (pid, name or "?"))
+            code = ""
+        elif code:
+            was = MEMBER.get(pid, {}).get("sala")
+            status = 0 if sala_enter(pid, code, True) else 1
+            if status == 0 and was != code and log:
+                log("sala %s: pid %d (%s) is a member" % (code, pid, name or "?"))
+            if status == 1:
+                MEMBER.pop(pid, None)
+                code = ""
+        else:                                          # (no code: which sala the server has it in, if any)
+            code = MEMBER.get(pid, {}).get("sala") or ""
+            status = 0 if code else 2
+        sl = SALAS.get(code) if status == 0 else None
+        stations = len(sl["stations"]) if sl else 0
+        members = len({p for g in sl["stations"].values() if g in ARENAS for p in arena_members(ARENAS[g])}) if sl else 0
+    return b"SALA!" + bytes((1, status)) + code.encode("ascii", "replace")[:5].ljust(5, b"\0") + bytes((min(stations, 255), min(members, 255)))
+
+
+def status_v2(pid):
+    """(2026-11-21) "STATUS?" + version u8 (2) + pid u64 (16 bytes: the STATUS? test comes before the NAT check's) ->
+        "SALAST!" + players online u16 + sala code[5] (NULs: in no sala) + rows u8 + per row:
+            gid u32 + station number u8 (0: an arena of no sala) + code[5] + members u8 + most u8 + fighting seats u8 (bit
+            per seat; 0: not known) + n u8 + n x (seat u8 + name[10], UTF-8 cut at a character, NUL padded)
+    The rows: the stations of the asker's sala in their order, or the arenas of no sala. At most 1200 bytes."""
+    with ARENAS_LOCK:
+        sala = member_sala(pid) or ""
+        online = len(CLIENTS_BY_CID)
+        if sala:
+            arenas = [(n, g, ARENAS[g]) for n, g in sorted(SALAS[sala]["stations"].items()) if g in ARENAS]
+        else:
+            arenas = [(0, g, a) for g, a in ARENAS.items() if not a.get("sala")]
+        rows = []
+        for n, gid, a in arenas:
+            seats = a.get("seats", {})
+            people = sorted((seats.get(p, 255), p) for p in arena_members(a))[:8]
+            row = struct.pack("<IB", gid, min(n, 255)) + (a.get("code", "") or "").encode("ascii", "replace")[:5].ljust(5, b"\0")
+            row += struct.pack("<BBBB", min(len(arena_members(a)), 255), min(a.get("max", 0) or 0, 255), 0, len(people))
+            for seat, p in people:
+                nm = (NAMES.get(p) or "?").encode("utf-8")[:10]
+                nm = nm.decode("utf-8", "ignore").encode("utf-8")
+                row += bytes((min(seat, 255),)) + nm.ljust(10, b"\0")
+            rows.append(row)
+    out = b"SALAST!" + struct.pack("<H", min(online, 65535)) + sala.encode("ascii", "replace")[:5].ljust(5, b"\0")
+    body, k = b"", 0
+    for row in rows:
+        if 15 + len(body) + len(row) > 1200 or k == 255:
+            break
+        body += row
+        k += 1
+    return out + bytes((k,)) + body
 
 
 def sinkhole(host, port, log):
@@ -1164,10 +1404,7 @@ class Client:
         finally:
             with ARENAS_LOCK:
                 for gid in [g for g, a in ARENAS.items() if a["client"] is self]:
-                    for cl in set(ARENAS[gid].get("clients", {}).values()) | {self}:
-                        notify_room_left(gid, cl)              # (the score: everyone leaves a closed arena)
-                    del ARENAS[gid]
-                    self.log("%s arena %d closed (its host left)" % (self.who, gid))
+                    close_arena(gid, "its host left", lambda t: self.log("%s %s" % (self.who, t)))   # (the score: everyone leaves it)
                 if getattr(self, "cid", None) and CLIENTS_BY_CID.get(self.cid) is self:
                     del CLIENTS_BY_CID[self.cid]
                     if self.pid:

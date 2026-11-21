@@ -52,6 +52,10 @@ extern char **environ;
 #include "net_stats.h"
 extern "C" int online_menu_status(int *players, int *ms, int *narenas, char codes[][6], int *members, int *most, int cap);   /* online_menu.inc (nnnet.c) */
 extern "C" const char *online_menu_server(void);
+typedef struct { int number; uint32_t gid; char code[6]; int members, most, n; int seat[8]; char name[8][11]; } OmStation;      /* online_menu.inc: the same */
+extern "C" void online_menu_sala_set(int op, const char *code);
+extern "C" int online_menu_sala(char code[6], int *stations, int *members);
+extern "C" int online_menu_stations(char sala[6], OmStation *rows, int cap, int *n);
 extern "C" int nnpad_rumble_on(void); extern "C" void nnpad_rumble_set(int on);      /* nnpad_sdl.c: F1 > Controls > Vibration */
 extern "C" int latency_mode(void);             /* display.c: the input latency mode in use (SSBU_LATENCY from the launcher wins over graphics.ini) */
 extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
@@ -1274,7 +1278,60 @@ static void sec_experimental(void) {
         if (st == 1) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "online (%d ms)", ms);
         else if (st == 2) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1), "not answering");
         else ImGui::TextDisabled("asking...");
-        if (st == 1) {
+        /* (2026-11-21) SALAS (online_menu.inc, tools/net/nex_server.py): a room with several stations; a station is a
+         * Battle Arena, so several pairs fight at the same time. Applied at once (no restart). */
+        char sala[6] = ""; int sala_st = 0, sala_mem = 0;
+        int sala_state = st == 1 ? online_menu_sala(sala, &sala_st, &sala_mem) : -1;
+        if (sala_state >= 0 && sala_state != 4) {
+            static char typed[6];
+            ImGui::Separator();
+            ImGui::Text("Sala (a room with several stations)");
+            if (sala_state == 1) {
+                ImGui::SetWindowFontScale(1.8f);
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1), "%s", sala);
+                ImGui::SetWindowFontScale(1.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("Copy##sala")) { ImGui::SetClipboardText(sala); printf("menu: sala code copied\n"); fflush(stdout); }
+                ImGui::SameLine();
+                if (ImGui::Button("Leave the sala")) { online_menu_sala_set(2, ""); printf("menu: sala %s left\n", sala); fflush(stdout); }
+                OmStation rows[32]; char rs[6]; int nr = 0;
+                int rst = online_menu_stations(rs, rows, 32, &nr);
+                if (rst == 1 && !strcmp(rs, sala)) {
+                    if (nr == 0) ImGui::TextDisabled("No station open yet: make one in the game (Online > Battle Arenas > Create Arena).");
+                    else if (ImGui::BeginTable("stations", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
+                        ImGui::TableSetupColumn("Station", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                        ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                        ImGui::TableSetupColumn("Who (by seat)", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableHeadersRow();
+                        for (int i = 0; i < nr; i++) {
+                            char who[160] = ""; size_t wl = 0;
+                            for (int j = 0; j < rows[i].n && wl < sizeof who - 16; j++) wl += (size_t)snprintf(who + wl, sizeof who - wl, "%s%s", j ? ", " : "", rows[i].name[j][0] ? rows[i].name[j] : "?");
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0); ImGui::Text("%d", rows[i].number);
+                            ImGui::TableSetColumnIndex(1); if (rows[i].most) ImGui::Text("%d / %d", rows[i].members, rows[i].most); else ImGui::Text("%d", rows[i].members);
+                            ImGui::TableSetColumnIndex(2); if (rows[i].members == 1) ImGui::Text("%s (waits for a rival)", who); else ImGui::Text("%s", who);
+                        }
+                        ImGui::EndTable();
+                    }
+                } else if (rst == 0) ImGui::TextDisabled("asking for the stations...");
+                help("In the game, Online > Battle Arenas lists this sala's stations only: enter one to fight or to watch (its queue is the "
+                     "game's own). Create Arena opens a new station. Every station shows the sala's code as its Arena ID: a friend who types it "
+                     "is sent to a station where someone waits for a rival. If a station's host leaves, that station closes; the sala stays.");
+            } else {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+                ImGui::InputTextWithHint("##salacode", "CODE", typed, sizeof typed, ImGuiInputTextFlags_CharsUppercase);
+                ImGui::SameLine();
+                if (ImGui::Button("Enter the sala") && strlen(typed) == 5) { online_menu_sala_set(1, typed); printf("menu: sala %s asked for\n", typed); fflush(stdout); }
+                ImGui::SameLine();
+                if (ImGui::Button("Make a sala")) { online_menu_sala_set(3, ""); printf("menu: a new sala asked for\n"); fflush(stdout); }
+                if (sala_state == 3) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1), "No sala with that code.");
+                if (sala_state == 5) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1), "The server cannot make more salas now.");
+                help("A sala groups several Battle Arenas (its stations) under one code, so several pairs fight at the same time. "
+                     "Make one and give its code to your friends, or type a friend's code. Without a sala the arenas are as always.");
+            }
+            ImGui::Separator();
+        }
+        if (st == 1 && sala_state != 1) {
             ImGui::TextDisabled("Players online"); ImGui::SameLine(); ImGui::Text("%d", players);
             ImGui::SameLine(); ImGui::TextDisabled("   Arenas open"); ImGui::SameLine(); ImGui::Text("%d", na);
             if (na > 0 && ImGui::BeginTable("arenas", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {

@@ -18,6 +18,17 @@ fighters through the lobby). While it is on, Local Wireless rooms are not availa
 plus the lobby 1.7, installed by `tools/net/deploy_arenas.sh` (Oracle Cloud ports: `tools/net/oci_arenas_ports.sh`);
 reverse-engineering notes: [ONLINE_MENU_RE.md](ONLINE_MENU_RE.md). Quickplay is not done.
 
+**Salas** (2026-11-21, not yet tried with games): a room with several stations, so several pairs fight at the same time.
+The game runs one fight per Battle Arena, so a sala is a group of arenas under one 5-character code: each station is an
+arena, with the game's own queue, spectators and netcode. F1 > Experimental > Sala: **Make a sala** gives the code,
+**Enter the sala** takes a friend's (graphics.ini `online_sala`, applied at once). For a member, Online > Battle Arenas
+lists only the sala's stations, **Create Arena** opens the next station, and every station shows the sala's code as its
+Arena ID; whoever types that code in the game (any version of the port) is sent to a station where one player waits for a
+rival, else to the one with the fewest players. F1 shows the stations and who sits at each. A station closes when its
+host leaves; the sala and its code stay (10 minutes with nobody in it). The score of a pair starts again at another
+station. Players in no sala see the arenas of no sala, as before. Server only: `tools/net/nex_server.py`
+(test: `tools/net/test_nex_sala.py`); the lobby is unchanged.
+
 Online play is experimental and ON by default: the game joins the project's public lobby
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).

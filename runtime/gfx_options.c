@@ -35,6 +35,11 @@ void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
  * the arenas' rollback, <server>:39500) at the start by gfx_online_menu_env (boot.c), when SSBU_ONLINE_MENU is not set. */
 static int g_gfx_online_menu = 1; static char g_gfx_online_menu_server[64] = GFX_ONLINE_MENU_SERVER_DEFAULT;
 int gfx_online_menu(void) { gfx_options(); return g_gfx_online_menu; }
+/* (2026-11-21) online_sala = <5 characters>: the sala (a room with several stations, tools/net/nex_server.py) this player
+ * is a member of at the start; F1 > Experimental writes it (online_menu.inc). "" = none. */
+#include <ctype.h>
+static char g_gfx_online_sala[6];
+const char *gfx_online_sala(void) { gfx_options(); return g_gfx_online_sala; }
 static int gfx_ipv4(const char *v) { int a, b, c, d; char x; return sscanf(v, "%d.%d.%d.%d%c", &a, &b, &c, &d, &x) == 4 && a >= 0 && a < 256 && b >= 0 && b < 256 && c >= 0 && c < 256 && d >= 0 && d < 256; }
 void gfx_online_menu_env(void) {
     gfx_options();
@@ -523,6 +528,8 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
         else if (!_stricmp(key, "rollback_delay_only")) g_gfx_rb_delay_only = !_stricmp(val, "on") || !strcmp(val, "1");      /* rollback_controller.c */
         else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
+        else if (!_stricmp(key, "online_sala")) { int k = 0; for (; k < 5 && isalnum((unsigned char)val[k]); k++) g_gfx_online_sala[k] = (char)toupper((unsigned char)val[k]);
+                                                   g_gfx_online_sala[k == 5 && !val[5] ? 5 : 0] = 0; }      /* online_menu.inc */
         else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }
         else if (!_stricmp(key, "refresh_switch")) g_gfx_refresh_switch = !(!_stricmp(val, "off") || !strcmp(val, "0"));      /* display.c */
         else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
