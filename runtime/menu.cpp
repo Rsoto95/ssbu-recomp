@@ -956,7 +956,7 @@ static void sec_controls(void) {
 #define ONLINE_DEFAULT_LOBBY "opensmash-lobby.duckdns.org:39500"      /* the project's public lobby server (host:port); a domain name can replace it */
 static const char *const k_online_mode[] = {"off", "lan", "host", "join", "lobby"};
 static const char *const k_online_name[] = {"Off", "Same network (LAN)", "Host a room (room code)", "Join with a code", "Lobby server (recommended)"};
-static struct { int mode, last_mode; bool upnp, relay_only; char join[64], server[128]; } O, O0;
+static struct { int mode, last_mode; bool upnp, relay_only; int port2; char join[64], server[128]; } O, O0;
 static void sec_online(void);
 static int g_online_inited;
 static volatile LONG g_osk_busy;
@@ -1002,6 +1002,7 @@ static void online_init(void) {
     if (!ini_read("online_server", O.server, sizeof O.server) || off_word(O.server)) snprintf(O.server, sizeof O.server, "%s", ONLINE_DEFAULT_LOBBY);
     if (ini_read("online_upnp", v, sizeof v)) O.upnp = !off_word(v);
     if (ini_read("online_direct", v, sizeof v)) O.relay_only = off_word(v);
+    if (ini_read("online_port2", v, sizeof v) && atoi(v) > 0 && atoi(v) < 65536) O.port2 = atoi(v);      /* net_relay.c: the forwarded second port */
     /* what this run started with: the online code's own answer (SSBU_ONLINE wins over the file) */
     O.last_mode = O.mode;
     O0 = O;
@@ -1014,6 +1015,7 @@ static void online_save(void) {
     if (O.mode == 4) ini("online_server", O.server[0] ? O.server : "off");
     ini("online_upnp", O.upnp ? "on" : "off");
     ini("online_direct", O.relay_only ? "off" : "on");
+    if (O.port2 != O0.port2 || O.port2) { char pv[16]; snprintf(pv, sizeof pv, "%d", O.port2); ini("online_port2", pv); }      /* (0: any port, as without the key) */
     printf("menu: online settings written: online_mode = %s%s%s (used at the next start)\n", k_online_mode[O.mode], O.mode == 3 ? ", online_join = " : O.mode == 4 ? ", online_server = " : "",
            O.mode == 3 ? O.join : O.mode == 4 ? O.server : "");
     fflush(stdout);
@@ -1362,6 +1364,13 @@ static void sec_online(void) {
         help("Everyone using the same lobby sees each other's rooms. Your own lobby: tools/net/ssbu_lobby.py.");
         if (ImGui::Checkbox("Relay only (everything through the lobby, no direct connection)", &O.relay_only)) changed = 1;
         tag(1, O.relay_only != O0.relay_only);
+        /* online_port2 (net_relay.c g_rbf_fixed): for a router that changes ports and has no UPnP (or Linux) */
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+        ImGui::InputInt("Forwarded UDP port (0 = none)", &O.port2, 0, 0);
+        if (ImGui::IsItemDeactivatedAfterEdit()) { if (O.port2 < 0 || O.port2 > 65535) O.port2 = 0; changed = 1; }
+        tag(1, O.port2 != O0.port2);
+        help("Only if matches keep going through the lobby (high delay) with most rivals: forward this UDP port to this PC in your router "
+             "(and open it in the firewall), then type it here. Leave 0 otherwise.");
     }
     if (changed) online_save();
     help("Then, in the game: Smash > Local Wireless (the game's own menu): one player Create Room, the others Rooms List.");
@@ -1369,7 +1378,7 @@ static void sec_online(void) {
     ImGui::Unindent();
 }
 static int online_differs(void) {
-    return O.mode != O0.mode || (O.mode == 3 && strcmp(O.join, O0.join)) || (O.mode == 4 && (strcmp(O.server, O0.server) || O.relay_only != O0.relay_only)) || (O.mode == 2 && O.upnp != O0.upnp);
+    return O.mode != O0.mode || (O.mode == 3 && strcmp(O.join, O0.join)) || (O.mode == 4 && (strcmp(O.server, O0.server) || O.relay_only != O0.relay_only || O.port2 != O0.port2)) || (O.mode == 2 && O.upnp != O0.upnp);
 }
 
 
