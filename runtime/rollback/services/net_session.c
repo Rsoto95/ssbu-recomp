@@ -762,6 +762,12 @@ static volatile LONG64 g_rx_pkts, g_rx_bad, g_rx_drop, g_tx_pkts, g_tx_fail, g_r
 static volatile LONG g_rtt_us = -1, g_rtt_min_us = -1;
 static long long g_rtt_n; static double g_rtt_sum;      /* (under g_rq_lock) */
 #define RTTR 32
+/* (2026-11-22, owner: delay 6 against a 19 ms opponent) 1 = the rollback messages go player to player now (0: through the lobby).
+ * The round trips taken through the lobby before the direct path answered (164 ms there) chose the match's delay. */
+static int rb_direct_now(void) {
+    void net_rb_path_stats(long long *dtx, long long *drx, long long *ltx, long long *lrx, int *direct_now);
+    long long a, b, c, d; int dn = 0; net_rb_path_stats(&a, &b, &c, &d, &dn); return dn;
+}
 static long g_rttr[RTTR]; static unsigned g_rttr_n;    /* (2026-11-03) the latest round trips (under g_rq_lock): their 75th percentile chooses the auto delay */
 #define TSQ 64
 static int32_t g_tsq[TSQ]; static int g_tsq_n;          /* clock-offset samples waiting for the main thread (under g_rq_lock) */
@@ -815,7 +821,11 @@ void rbn_rx(const uint8_t *p, int n) {
         long rtt = (long)(now_us() - m.echo_us);
         if (rtt <= 0 || rtt >= 5000000) return;
         InterlockedExchange(&g_rtt_us, rtt); if (g_rtt_min_us < 0 || rtt < g_rtt_min_us) InterlockedExchange(&g_rtt_min_us, rtt);
+        int dn = rb_direct_now(), dropped = 0;
         AcquireSRWLockExclusive(&g_rq_lock);
+        {   static int was_direct;                      /* (2026-11-22) the direct path began to answer before the match: the round trips so far were the lobby's way, measured again */
+            if (dn && !was_direct && !g_started && g_rttr_n) { dropped = (int)g_rttr_n; g_rtt_sum = 0; g_rtt_n = 0; g_rttr_n = 0; InterlockedExchange(&g_rtt_min_us, rtt); }
+            was_direct = dn; }
         g_rtt_sum += rtt; g_rtt_n++; g_rttr[g_rttr_n++ % RTTR] = rtt;
         if (g_started && m.frame > 0 && g_cur > 0 && g_tsq_n < TSQ) {
             long long off = (g_cur - m.frame) * 16683 - rtt / 2;                  /* > 0: this game runs ahead */
@@ -827,6 +837,7 @@ void rbn_rx(const uint8_t *p, int n) {
             g_tsq[g_tsq_n++] = (int32_t)off;
         }
         ReleaseSRWLockExclusive(&g_rq_lock);
+        if (dropped) { printf("[rbnet] round trip: the direct path answers now: %d round trip(s) measured through the lobby dropped, measured again (now %.1f ms)\n", dropped, rtt / 1000.0); fflush(stdout); }
         return;
     }
     AcquireSRWLockExclusive(&g_rq_lock);
@@ -883,6 +894,7 @@ static int hs_auto_delay(int dm, int dp, uint64_t waited_ms) {
     if (dm > 0 && dp > 0) return dm > dp ? dm : dp;
     int n; long mid = rtt_mid_us(&n);
     if (n < 10 && waited_ms < 3000) return -1;          /* (pings every 100 ms: about a second) */
+    if (!g_loop && !rb_direct_now() && waited_ms < 2000) return -1;      /* (2026-11-22) the direct path usually answers within a second: its round trips, not the lobby's */
     int a = delay_for_rtt(n ? mid : -1), measured = a;
     static char last_opp[64]; static int last_a;
     int kept = 0;
