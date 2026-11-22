@@ -1669,6 +1669,7 @@ void net_hall_pick_set(const char *internal) {
 const char *net_hall_pick(void) { static char out[24]; AcquireSRWLockShared(&g_hall_lock); memcpy(out, g_hall_pick, sizeof out); ReleaseSRWLockShared(&g_hall_lock); return out; }
 static int hall_seat(void);
 static volatile LONG g_hall_ready = 1, g_hall_parked, g_hall_by_pilot;      /* (2026-11-22) rematch said; the game has waited for a hall match; the pilot took it there */
+static volatile LONG g_hall_played;                     /* the rival of the station's last match (its address): the same one again needs the word, another does not */
 static volatile LONG64 g_hall_own_chara;                /* the fighter of the game's own character select when the player went there himself */
 static int hall_raw(void);
 uint64_t net_hall_chara(void) {                         /* the hall's screen's fighter; with none, and the pilot at the select screen, the player's own last one */
@@ -1677,7 +1678,12 @@ uint64_t net_hall_chara(void) {                         /* the hall's screen's f
     return v ? v : g_hall_by_pilot ? (uint64_t)g_hall_own_chara : 0;
 }
 int net_hall_member(void) { return hall_raw() > 0; }
-int net_hall_ready(void) { return g_hall_ready != 0; }
+static int hall_word(void) {                            /* 1 = the station's next match may start as far as this player goes */
+    if (g_hall_ready) return 1;
+    AcquireSRWLockShared(&g_hall_lock); uint32_t opp = g_hall.opp; ReleaseSRWLockShared(&g_hall_lock);
+    return opp != (uint32_t)g_hall_played;
+}
+int net_hall_ready(void) { return hall_word(); }
 void net_hall_ready_set(int on) { if (InterlockedExchange(&g_hall_ready, on ? 1 : 0) != (on ? 1 : 0)) say("hall: %s", on ? "this player wants the rematch" : "the next match of this station waits for this player's word"); }
 int nnhid_pilot_on(void), rbn_hs_waiting(void); void nnhid_pilot(int mode);
 void net_hall_parked(uint64_t chara, int by_pilot) {
@@ -1688,6 +1694,7 @@ void net_hall_parked(uint64_t chara, int by_pilot) {
 
 void net_hall_match_over(void) {                        /* a rollback match ended: in a hall the game goes back to waiting by itself */
     if (hall_raw() != 2) return;                        /* (only a hall station's match) */
+    AcquireSRWLockShared(&g_hall_lock); InterlockedExchange(&g_hall_played, (LONG)g_hall.opp); ReleaseSRWLockShared(&g_hall_lock);
     net_hall_ready_set(0);
     nnhid_pilot(1);
 }
@@ -1719,7 +1726,7 @@ static int hall_raw(void) {
     ReleaseSRWLockShared(&g_hall_lock);
     return !in ? 0 : s == NET_HP_MATCHED || s == NET_HP_PLAYING ? 2 : 1;
 }
-static int hall_seat(void) { int r = hall_raw(); return r == 2 && !g_hall_ready ? 1 : r; }      /* (2026-11-22) after a match: the rematch only once this player said so */
+static int hall_seat(void) { int r = hall_raw(); return r == 2 && !hall_word() ? 1 : r; }      /* (2026-11-22) after a match: the rematch only once this player said so */
 void net_hall_op(int op, uint32_t arg, const char *code) {
     if (!net_online() || (!gfx_hall() && op != NET_HALL_LEAVE)) return;
     if (op == NET_HALL_ENTER || op == NET_HALL_MAKE) {
@@ -1760,7 +1767,7 @@ static void hall_test(uint64_t t) {
     if (step == 0) { step = 1; if (getenv("SSBU_HALL_TEST_PICK")) net_hall_pick_set(getenv("SSBU_HALL_TEST_PICK")); if (!strcmp(e, "make")) net_hall_op(NET_HALL_MAKE, 0, ""); else net_hall_op(NET_HALL_ENTER, 0, e); }
     else if (step == 1 && in) { step = 2; at = t; }
     else if (step == 2 && t - at > 2000) { step = 3; if (sit && st == NET_HP_FREE) net_hall_op(NET_HALL_SIT, (uint32_t)atoi(sit), ""); }
-    if (re && in && st == NET_HP_MATCHED && !g_hall_ready) { if (!unready) unready = t; else if (t - unready > (uint64_t)(atof(re) * 1000.0)) { unready = 0; net_hall_ready_set(1); } } else unready = 0;
+    if (re && in && st == NET_HP_MATCHED && !hall_word()) { if (!unready) unready = t; else if (t - unready > (uint64_t)(atof(re) * 1000.0)) { unready = 0; net_hall_ready_set(1); } } else unready = 0;
 }
 static void hall_tick(uint64_t t) {                     /* (client thread, joined) */
     hall_test(t);
@@ -1815,7 +1822,6 @@ static void hall_state(const uint8_t *p, int n) {       /* (client thread) a HAL
         say("hall %s: the lobby does not have this game in it any more: entering again", old.code);     /* (a lobby that started again: op 1 goes on) */
     }
     if (h.status != NET_HALL_IN) return;
-    if ((h.state == NET_HP_MATCHED || h.state == NET_HP_PLAYING) && (!was_in || (old.state != NET_HP_MATCHED && old.state != NET_HP_PLAYING) || old.opp != h.opp)) InterlockedExchange(&g_hall_ready, 1);      /* (a new rival: no word needed) */
     if (h.from && h.from != old.from) {
         say("hall %s: %s challenges this player", h.code, h.from_name);
         snprintf(t, sizeof t, "%s challenges you!\nF1 > Arena: Accept or Decline.", h.from_name);

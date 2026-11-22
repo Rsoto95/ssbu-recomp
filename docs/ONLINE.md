@@ -63,7 +63,14 @@ without a stage select, custom orders of the screens), "Get ready" from the sele
 rival that stands up while the other waits. The same test showed why a second match by hand did not start before: the A's
 given to port 2 on the results screen went on into the character select (the select screen's opening did not end them in
 this flow), so the A that picks the fighter made a second player join there; the pilot ends them when the results are
-over. Server:
+over. (2026-11-22, second fix) A Smash (versus) match agreed by the handshake (a hall's match, a room code) gave
+each player only its name-tag words, not its buttons: player 1 played with the controls of the PC's own profile on each
+game, so two players with different controls never saw the same fight (owner against Kaine in a hall: 1469 of 1567
+frames differed, from the first button on; the day before from frame 184). Now, as in a room's match, each game sends its
+own player's controls (LAYOUT) and both games write both players' (`runtime/debug_mode.c` hs_apply, controls_fill_hook);
+an older game does not answer and the match is as before. Test: two games with different controls, buttons pressed, 0
+desyncs. The word for the rematch is asked only against the rival of the station's last match (it was set by itself
+when the lobby's states changed after a result). Server:
 `tools/net/ssbu_lobby.py` (HALL 41 / HALL_STATE 42; test: `tools/net/test_lobby_hall.py`); game: `runtime/net_relay.c`
 (hall_*), `runtime/menu.cpp` (sec_hall, draw_hall).
 

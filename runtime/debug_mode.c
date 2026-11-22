@@ -466,11 +466,12 @@ static void lwr_own_controls(uint64_t st, uint8_t out[LWR_CTL + 2]) {
             printf("[rbnet] room match: TEST: this game's player's controls from SSBU_RB_NET_TEST_CTL\n"); fflush(stdout); } }
 }
 static int g_seat_of_rank[2];                   /* (defined below, with the arena's seats) */
+static int g_hs_smctl;                          /* (2026-11-22) a Smash (versus) match agreed by the handshake: the players' own controls were exchanged, as in a room's match */
 static ImportFn g_orig_controls_fill;
 static void controls_fill_hook(Ctx *c, void *user) {
     (void)user;
     g_orig_controls_fill(c);
-    if (!g_hs_lwr || !g_lwr_ctl_ok || g_lwr_ctl_applied) return;
+    if (!(g_hs_lwr || g_hs_smctl) || !g_lwr_ctl_ok || g_lwr_ctl_applied) return;
     uint64_t o = sr64(GA(0x71052c40f0ULL)); if (!o) return;
     for (int i = 0; i < 2; i++) {
         /* (2026-11-03) the controls object is indexed like the records: by ARENA SEAT in a Battle Arena (player i = seat
@@ -675,6 +676,29 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         }
         return;
     }
+    /* (2026-11-22, owner and Kaine in a hall: "my controller did not move my fighter"; 1469 of 1567 frames differed, from the first
+     * button on: player 1's jump on one game was a shield on the other) a Smash (versus) match agreed by the handshake gave each
+     * player only its name-tag words: the buttons themselves (profile + 0x24 .. + 0x4e, copied by the controls set-up) stayed THIS
+     * PC's own profile for player 1 and the defaults for player 2, on each game. So two players with different controls never saw
+     * the same fight. Now as in a room's match (above): each game sends its own player's controls, both games write both players'
+     * (controls_fill_hook), and each port is shown in its player's controller kind. An older game does not answer: as before. */
+    if (!g_hs_local) {
+        int rbn_local_player(void); int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[LWR_CTL + 2], uint16_t other[11], int *other_has, uint8_t other_ctl[LWR_CTL + 2]);
+        static uint8_t own[LWR_CTL + 2];
+        if (idx == 0) { g_lwr_ctl_ok = 0; g_lwr_ctl_applied = 0; g_hs_smctl = 0; lwr_own_controls(st, own); }      /* (this game's own panel is its first one, whichever player it is in the match) */
+        else {
+            int local = rbn_local_player(), other_has = 0; uint16_t other[11]; uint8_t octl[LWR_CTL + 2];
+            int got = local == 0 || local == 1 ? rbn_room_layout(g_hs_m.layout[local], g_hs_m.has_layout[local], own, other, &other_has, octl) : 0;
+            if (got) {
+                void nnhid_lwr_styles(int on, int gc0, int gc1);
+                memcpy(g_lwr_ctl[local], own, sizeof own); memcpy(g_lwr_ctl[1 - local], octl, sizeof octl);
+                g_lwr_ctl_ok = 1; g_hs_smctl = 1;
+                nnhid_lwr_styles(1, g_lwr_ctl[0][LWR_CTL + 1], g_lwr_ctl[1][LWR_CTL + 1]);
+                printf("[rbnet] handshake: the players' own controls exchanged (this game is player %d); controller kinds: player 1 %s, player 2 %s%c", local + 1, g_lwr_ctl[0][LWR_CTL + 1] ? "GameCube" : "Pro", g_lwr_ctl[1][LWR_CTL + 1] ? "GameCube" : "Pro", 10);
+            } else printf("[rbnet] handshake: the players' own controls NOT exchanged (the other game is an older version): with different controls the two games will not show the same fight%c", 10);
+            fflush(stdout);
+        }
+    }
     if (type_was == 3) {                                /* (hs12) no panel for this player on this game's select screen: player 1's state is the template */
         if (!g_hs_p1_ok) { printf("[rbnet] handshake: player %d has NO panel on this game's select screen and player 1's state was not read: this match will not be the agreed one\n", idx + 1); fflush(stdout); return; }
         hs_fill_empty(st, idx); wr64(st + 0x80, g_hs_m.chara[idx]);
@@ -754,7 +778,7 @@ static void match_player_hook(Ctx *c, void *user) {
     if (g_hs_wanted) hs_apply(st, idx, type_was);       /* R3: the match both online games agreed (rb_net.c handshake) */
     if (idx == 1) g_dm_state1_ok = safe_read(st, g_dm_state1, sizeof g_dm_state1);
     g_orig_player_record(c);
-    if (rank_of(idx) == 1 && g_hs_lwr && g_lwr_ctl_ok) for (int i = 0; i < 2; i++) wr8(MI_PLAYER(g_seat_of_rank[i]) - 8 + 0x48, g_lwr_ctl[i][LWR_CTL]);      /* (R3 lwr) each player's own option byte (record + 0x48, see lwr_own_controls) */
+    if ((g_hs_lwr ? rank_of(idx) == 1 : g_hs_smctl && idx == 1) && g_lwr_ctl_ok) for (int i = 0; i < 2; i++) wr8(MI_PLAYER(g_seat_of_rank[i]) - 8 + 0x48, g_lwr_ctl[i][LWR_CTL]);      /* (R3 lwr) each player's own option byte (record + 0x48, see lwr_own_controls) */
     if (idx == 1 && rd32(st + 0x78) == 0) { void input_mark(const char *what); input_mark("setup-2p"); }      /* (R3 pub2, test aid) a match set up with a human player 2 (SSBU_SEQ @untilmark:setup-2p) */
     if (getenv("SSBU_DEBUG_P1PROFILE") && idx == 0) {     /* (R3 lwr, research) player 1's name-tag profile index forced (=<n>), or (=c<n>) profile n's
                                                            * control bytes + 0x24 .. + 0x50 copied over player 1's own profile's (in memory only, this run) */
