@@ -102,7 +102,10 @@ extern "C" int menu_enabled(void) {
     return g_enabled;
 }
 extern "C" int menu_is_open(void) { return g_enabled > 0 && g_open; }
-extern "C" int menu_input_blocked(void) { return g_enabled > 0 && (g_open || g_guard); }
+static volatile LONG g_hall_open, g_hall_req;         /* (2026-11-21) the hall's own screen is shown; F3 / Capture asked to open or close it */
+extern "C" int menu_input_blocked(void) { return g_enabled > 0 && (g_open || g_guard || g_hall_open); }
+extern "C" int menu_hall_screen_open(void) { return g_enabled > 0 && g_hall_open; }
+extern "C" int rbn_hs_waiting(void);                   /* net_session.c: the game waits in a match's handshake */
 extern "C" void menu_request_toggle(void) { InterlockedIncrement(&g_toggle_req); }
 /* R3: the online match's message (any thread; copied under a lock, read by the render thread) */
 static SRWLOCK g_notice_lock = SRWLOCK_INIT;
@@ -183,6 +186,7 @@ extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
     (void)hwnd;
     if (!menu_enabled()) return 0;
     if (m == WM_KEYDOWN && w == VK_F1) { if (!(l & (1 << 30))) menu_request_toggle(); return 1; }
+    if (m == WM_KEYDOWN && w == VK_F3) { if (!(l & (1 << 30))) InterlockedIncrement(&g_hall_req); return 1; }      /* the hall's screen */
     if (m == WM_KEYDOWN && w == VK_F2) { if (!(l & (1 << 30))) InterlockedIncrement(&g_stats_req); return 1; }      /* the stats overlay */
     if (!g_open || osk_active()) return 0;
     switch (m) {
@@ -1816,12 +1820,442 @@ static uint32_t sec_match(void) {
 
 /* ------------------------------------------------------------------ Arena (lobby 1.6, net_relay.c net_arena_*)
  * A queue at the lobby: the first two play a 1-on-1 rollback match (Smash versus), the winner stays, the others wait. */
+/* (2026-11-21, lobby 1.9) THE HALL: several pairs playing at the same time (net_stats.h NetHall). F1 > Arena shows it
+ * first: enter or make one; inside: the stations (sit / stand), the players (challenge), a challenge to answer. 1 = the
+ * player is in a hall (the room queue below is not shown then). */
+static const char *hall_state_text(int st) { return st == NET_HP_PLAYING ? "playing" : st == NET_HP_MATCHED ? "about to play" : st == NET_HP_SEATED ? "waits for a rival" : "free"; }
+static int sec_hall(void) {
+    NetHall h;
+    net_hall_get(&h);
+    const ImVec4 green(0.45f, 0.9f, 0.45f, 1), amber(1, 0.8f, 0.2f, 1), gold(1.0f, 0.75f, 0.25f, 1), head(1.0f, 0.55f, 0.35f, 1.0f);
+    float bw = ImGui::GetFontSize() * 9;
+    ImGui::TextColored(head, "Hall (several matches at the same time)");
+    if (!(h.known && h.status == NET_HALL_IN)) {
+        static char typed[6];
+        if (h.asked && !h.known) { ImGui::TextDisabled("Asking the lobby..."); help("No answer after a few seconds: the lobby is an older version without halls."); }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+        ImGui::InputTextWithHint("##hallcode", "CODE", typed, sizeof typed, ImGuiInputTextFlags_CharsUppercase);
+        ImGui::SameLine();
+        if (ImGui::Button("Enter the hall") && strlen(typed) == 5) { net_hall_op(NET_HALL_ENTER, 0, typed); printf("menu: hall %s asked for\n", typed); fflush(stdout); }
+        ImGui::SameLine();
+        if (ImGui::Button("Make a hall")) { net_hall_op(NET_HALL_MAKE, 0, ""); printf("menu: a new hall asked for\n"); fflush(stdout); }
+        help("A hall is a room where everyone plays at once: sit at a station and a rival sits in front of you, or challenge a player. "
+             "Matches are Smash (versus) with rollback, 1-on-1. Make one and give its code to your friends, or type a friend's code.");
+        ImGui::Separator();
+        return 0;
+    }
+    ImGui::SetWindowFontScale(1.8f);
+    ImGui::TextColored(gold, "%s", h.code);
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::SameLine();
+    if (ImGui::Button("Copy##hall")) { ImGui::SetClipboardText(h.code); printf("menu: hall code copied\n"); fflush(stdout); }
+    ImGui::SameLine();
+    if (ImGui::Button("Leave the hall")) { net_hall_op(NET_HALL_LEAVE, 0, ""); printf("menu: hall %s left\n", h.code); fflush(stdout); }
+    /* this player */
+    if (h.state == NET_HP_PLAYING) ImGui::TextColored(green, "Station %d: playing against %s", h.station, h.opp_name);
+    else if (h.state == NET_HP_MATCHED) { ImGui::TextColored(amber, "Station %d: your rival is %s", h.station, h.opp_name);
+        help("In the game: Smash, choose your fighter and start. The match begins when both of you have. After it you both stay seated: start again for a rematch, or stand up."); }
+    else if (h.state == NET_HP_SEATED) { ImGui::TextColored(amber, "Station %d: waiting for a rival to sit down", h.station);
+        help("You may already go to Smash, choose your fighter and start: the match begins by itself when a rival sits down."); }
+    else ImGui::TextDisabled("You are at no station: sit at one, or challenge a free player.");
+    if (h.state != NET_HP_FREE) { if (ImGui::Button("Stand up", ImVec2(bw, 0))) { net_hall_op(NET_HALL_STAND, 0, ""); printf("menu: hall: stood up\n"); fflush(stdout); } }
+    else if (ImGui::Button("Sit at a station", ImVec2(bw * 1.4f, 0))) { net_hall_op(NET_HALL_SIT, 0, ""); printf("menu: hall: sit (any station)\n"); fflush(stdout); }
+    /* a challenge to answer, a challenge sent */
+    if (h.from) {
+        ImGui::Separator();
+        ImGui::TextColored(gold, "%s challenges you!", h.from_name);
+        ImGui::SameLine();
+        if (ImGui::Button("Accept", ImVec2(bw, 0))) { net_hall_op(NET_HALL_ACCEPT, h.from, ""); printf("menu: hall: challenge of %s accepted\n", h.from_name); fflush(stdout); }
+        ImGui::SameLine();
+        if (ImGui::Button("Decline", ImVec2(bw, 0))) { net_hall_op(NET_HALL_DECLINE, h.from, ""); printf("menu: hall: challenge of %s declined\n", h.from_name); fflush(stdout); }
+    }
+    if (h.to) {
+        ImGui::Text("You challenged %s: waiting for the answer (30 s).", net_hall_name(&h, h.to));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Take it back")) net_hall_op(NET_HALL_CANCEL, 0, "");
+    }
+    int can = h.state == NET_HP_FREE || h.state == NET_HP_SEATED;      /* this player may sit elsewhere or challenge */
+    ImGui::Separator();
+    ImGui::TextDisabled("Stations");
+    if (h.nstations == 0) ImGui::TextDisabled("  None yet: sit at a station to open the first one.");
+    else if (ImGui::BeginTable("hstations", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+        ImGui::TableSetupColumn("Players and score", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < h.nstations; i++) {
+            const NetHallStation *s = &h.stations[i];
+            ImGui::TableNextRow(); ImGui::PushID(i);
+            ImGui::TableSetColumnIndex(0); ImGui::Text("%d", s->number);
+            ImGui::TableSetColumnIndex(1);
+            if (s->p2) ImGui::Text("%s  %d - %d  %s", net_hall_name(&h, s->p1), s->w1, s->w2, net_hall_name(&h, s->p2));
+            else ImGui::Text("%s", net_hall_name(&h, s->p1));
+            ImGui::TableSetColumnIndex(2);
+            if (s->playing) ImGui::TextColored(green, "playing"); else if (s->p2) ImGui::TextColored(amber, "about to play"); else ImGui::TextColored(amber, "waits for a rival");
+            ImGui::TableSetColumnIndex(3);
+            if (!s->p2 && s->p1 != h.me && can && ImGui::SmallButton("Sit here")) { net_hall_op(NET_HALL_SIT, (uint32_t)s->number, ""); printf("menu: hall: sit at station %d\n", s->number); fflush(stdout); }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::TextDisabled("Players (%d)", h.nmembers);
+    if (ImGui::BeginTable("hmembers", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+        for (int i = 0; i < h.nmembers; i++) {
+            const NetHallMember *m = &h.members[i];
+            ImGui::TableNextRow(); ImGui::PushID(100 + i);
+            ImGui::TableSetColumnIndex(0); if (m->ip == h.me) ImGui::TextColored(gold, "%s (you)", m->name); else ImGui::Text("%s", m->name);
+            ImGui::TableSetColumnIndex(1);
+            if (m->station) ImGui::Text("station %d, %s", m->station, hall_state_text(m->state)); else ImGui::TextDisabled("free");
+            ImGui::TableSetColumnIndex(2);
+            int free_ = m->state == NET_HP_FREE || m->state == NET_HP_SEATED;
+            if (m->ip != h.me && can && free_ && h.to != m->ip && ImGui::SmallButton(h.from == m->ip ? "Accept" : "Challenge")) {
+                net_hall_op(h.from == m->ip ? NET_HALL_ACCEPT : NET_HALL_CHALLENGE, m->ip, ""); printf("menu: hall: %s %s\n", h.from == m->ip ? "accepted" : "challenged", m->name); fflush(stdout); }
+            else if (h.to == m->ip) ImGui::TextDisabled("challenged");
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    help("Two players at a station play each other, again and again, until one stands up; the score is theirs at that station. "
+         "A player alone at a station waits for whoever sits there. Watching another station's match is not possible yet.");
+    return 1;
+}
+/* ---------------------------------------------------------------- (2026-11-21) THE HALL'S OWN SCREEN
+ * (owner: "that menu is ugly": the hall is not driven from F1) A full screen of its own over the game, driven with the
+ * controller, laid out as the custom rooms of fighting games: on the left the numbered stations, each with its two seats
+ * and "VS" between them; on the right the players with what each one is doing; under them a box with what this player
+ * should do next, or the challenge it has to answer; at the bottom the buttons. It opens by itself when the player enters
+ * a hall and when someone challenges it (never during an online fight), and with the Capture / Share button, F3, or - held
+ * for 1 s. While it is shown the game gets no pad input (menu_input_blocked), as with F1.
+ *   up / down: move; left / right: stations <-> players; A: sit at the station / challenge the player (or accept its
+ *   challenge); Y: stand up; X: take the challenge back; -: twice, leave the hall; B: close.
+ *   A challenge waiting: A accepts, B declines. */
+static int g_hs_col, g_hs_row[2];
+static ULONGLONG g_hs_leave_t;
+/* the fighters one can choose in the hall's screen: internal name (ui_chara_<name>), shown name. Not here: the Mii
+ * fighters and Random (how the match's set-up takes them is not known) and the Pokemon Trainer's three alone. The last
+ * twelve are add-on fighters: only with that content installed. */
+static const struct { const char *id, *name; } k_hall_fighters[] = {
+    {"mario", "Mario"}, {"donkey", "Donkey Kong"}, {"link", "Link"}, {"samus", "Samus"}, {"samusd", "Dark Samus"}, {"yoshi", "Yoshi"}, {"kirby", "Kirby"}, {"fox", "Fox"},
+    {"pikachu", "Pikachu"}, {"luigi", "Luigi"}, {"ness", "Ness"}, {"captain", "Captain Falcon"}, {"purin", "Jigglypuff"}, {"peach", "Peach"}, {"daisy", "Daisy"}, {"koopa", "Bowser"},
+    {"ice_climber", "Ice Climbers"}, {"sheik", "Sheik"}, {"zelda", "Zelda"}, {"mariod", "Dr. Mario"}, {"pichu", "Pichu"}, {"falco", "Falco"}, {"marth", "Marth"}, {"lucina", "Lucina"},
+    {"younglink", "Young Link"}, {"ganon", "Ganondorf"}, {"mewtwo", "Mewtwo"}, {"roy", "Roy"}, {"chrom", "Chrom"}, {"gamewatch", "Mr. Game & Watch"}, {"metaknight", "Meta Knight"}, {"pit", "Pit"},
+    {"pitb", "Dark Pit"}, {"szerosuit", "Zero Suit Samus"}, {"wario", "Wario"}, {"snake", "Snake"}, {"ike", "Ike"}, {"ptrainer", "Pokemon Trainer"}, {"diddy", "Diddy Kong"}, {"lucas", "Lucas"},
+    {"sonic", "Sonic"}, {"dedede", "King Dedede"}, {"pikmin", "Olimar"}, {"lucario", "Lucario"}, {"robot", "R.O.B."}, {"toonlink", "Toon Link"}, {"wolf", "Wolf"}, {"murabito", "Villager"},
+    {"rockman", "Mega Man"}, {"wiifit", "Wii Fit Trainer"}, {"rosetta", "Rosalina & Luma"}, {"littlemac", "Little Mac"}, {"gekkouga", "Greninja"}, {"palutena", "Palutena"}, {"pacman", "Pac-Man"}, {"reflet", "Robin"},
+    {"shulk", "Shulk"}, {"koopajr", "Bowser Jr."}, {"duckhunt", "Duck Hunt"}, {"ryu", "Ryu"}, {"ken", "Ken"}, {"cloud", "Cloud"}, {"kamui", "Corrin"}, {"bayonetta", "Bayonetta"},
+    {"inkling", "Inkling"}, {"ridley", "Ridley"}, {"simon", "Simon"}, {"richter", "Richter"}, {"krool", "King K. Rool"}, {"shizue", "Isabelle"}, {"gaogaen", "Incineroar"},
+    {"packun", "Piranha Plant *"}, {"jack", "Joker *"}, {"brave", "Hero *"}, {"buddy", "Banjo & Kazooie *"}, {"dolly", "Terry *"}, {"master", "Byleth *"}, {"tantan", "Min Min *"},
+    {"pickel", "Steve *"}, {"edge", "Sephiroth *"}, {"element", "Pyra / Mythra *"}, {"demon", "Kazuya *"}, {"trail", "Sora *"}};
+enum { HALL_FIGHTERS = (int)(sizeof k_hall_fighters / sizeof k_hall_fighters[0]), HALL_PICK_COLS = 6 };
+static int g_hs_pick_open, g_hs_pick_at;                /* the fighter list is shown; the entry under the cursor */
+static const char *hall_pick_name(void) {
+    const char *id = net_hall_pick();
+    for (int i = 0; id[0] && i < HALL_FIGHTERS; i++) if (!strcmp(k_hall_fighters[i].id, id)) return k_hall_fighters[i].name;
+    return "";
+}
+static int hall_slot_count(const NetHall *h) {
+    int top = 0;
+    for (int i = 0; i < h->nstations; i++) if (h->stations[i].number > top) top = h->stations[i].number;
+    int n = top + 1;
+    return n < 4 ? 4 : n > 16 ? 16 : n;
+}
+static const NetHallStation *hall_slot(const NetHall *h, int number) {
+    for (int i = 0; i < h->nstations; i++) if (h->stations[i].number == number) return &h->stations[i];
+    return NULL;
+}
+static void hall_screen_show(int on, const char *why) {
+    if (on == (g_hall_open != 0)) return;
+    InterlockedExchange(&g_hall_open, on ? 1 : 0);
+    InterlockedExchange(&g_guard, 1);                    /* (closing: nothing reaches the game until every button is up) */
+    if (!on) g_closed_at = g_frame;
+    printf("menu: hall screen %s (%s)\n", on ? "opened" : "closed", why); fflush(stdout);
+}
+static void hall_screen_tick(uint64_t b, uint64_t down) {
+    NetHall h; net_hall_get(&h);
+    int in = h.known && h.status == NET_HALL_IN, fight = rbg_score_slot() >= 0;
+    static int was_in; static uint32_t from_seen; static ULONGLONG minus_t0; static int minus_done;
+    int toggle = 0;
+    for (LONG t = InterlockedExchange(&g_hall_req, 0); t > 0; t--) toggle ^= 1;
+    static int was_wait;
+    int wait = in && rbn_hs_waiting();
+    if (!g_open && !g_hall_open && in && !fight) {
+        if (!was_in) hall_screen_show(1, "entered a hall");
+        else if (h.from && h.from != from_seen) hall_screen_show(1, "a challenge came");
+        else if (wait && !was_wait) hall_screen_show(1, "the game waits for this player's match");
+        if (b == BIT(B_MINUS)) {                          /* - alone, held for 1 s */
+            ULONGLONG now = GetTickCount64();
+            if (!minus_t0) minus_t0 = now;
+            else if (!minus_done && now - minus_t0 >= 1000) { minus_done = 1; hall_screen_show(1, "- held for 1 s"); down = 0; }
+        } else { minus_t0 = 0; minus_done = 0; }
+    }
+    was_in = in; from_seen = in ? h.from : 0; was_wait = wait;
+    if (toggle) { if (g_hall_open) hall_screen_show(0, "asked"); else if (in && !g_open && !fight) { hall_screen_show(1, "asked"); down = 0; } }
+    if (g_hall_open && (!in || g_open || fight)) hall_screen_show(0, !in ? "not in a hall any more" : fight ? "an online fight began" : "F1 opened");
+    if (!g_hall_open) { g_hs_pick_open = 0; return; }
+    int can = h.state == NET_HP_FREE || h.state == NET_HP_SEATED;
+    if (g_hs_pick_open && !h.from) {                     /* the fighter list: its own keys */
+        int rows_ = (HALL_FIGHTERS + HALL_PICK_COLS - 1) / HALL_PICK_COLS, r = g_hs_pick_at / HALL_PICK_COLS, c = g_hs_pick_at % HALL_PICK_COLS;
+        if (down & BIT(B_LEFT)) c = (c + HALL_PICK_COLS - 1) % HALL_PICK_COLS;
+        if (down & BIT(B_RIGHT)) c = (c + 1) % HALL_PICK_COLS;
+        if (down & BIT(B_UP)) r = (r + rows_ - 1) % rows_;
+        if (down & BIT(B_DOWN)) r = (r + 1) % rows_;
+        g_hs_pick_at = r * HALL_PICK_COLS + c;
+        if (g_hs_pick_at >= HALL_FIGHTERS) g_hs_pick_at = HALL_FIGHTERS - 1;
+        if (down & BIT(B_A)) { net_hall_pick_set(k_hall_fighters[g_hs_pick_at].id); printf("menu: hall screen: fighter %s\n", k_hall_fighters[g_hs_pick_at].id); fflush(stdout); g_hs_pick_open = 0; }
+        else if (down & BIT(B_Y)) { net_hall_pick_set(""); printf("menu: hall screen: no fighter chosen here\n"); fflush(stdout); g_hs_pick_open = 0; }
+        else if (down & (BIT(B_B) | BIT(B_X))) g_hs_pick_open = 0;
+        return;
+    }
+    if (h.from) {                                        /* a challenge to answer: nothing else until it is */
+        if (down & BIT(B_A)) { net_hall_op(NET_HALL_ACCEPT, h.from, ""); printf("menu: hall screen: challenge of %s accepted\n", h.from_name); fflush(stdout); }
+        else if (down & BIT(B_B)) { net_hall_op(NET_HALL_DECLINE, h.from, ""); printf("menu: hall screen: challenge of %s declined\n", h.from_name); fflush(stdout); }
+        return;
+    }
+    int rows[2] = {hall_slot_count(&h), h.nmembers};
+    if (down & (BIT(B_LEFT) | BIT(B_RIGHT))) g_hs_col = !g_hs_col;
+    if (!rows[g_hs_col]) g_hs_col = 0;
+    if (down & BIT(B_UP)) g_hs_row[g_hs_col] = (g_hs_row[g_hs_col] + rows[g_hs_col] - 1) % rows[g_hs_col];
+    if (down & BIT(B_DOWN)) g_hs_row[g_hs_col] = (g_hs_row[g_hs_col] + 1) % rows[g_hs_col];
+    for (int c = 0; c < 2; c++) if (g_hs_row[c] >= rows[c]) g_hs_row[c] = rows[c] ? rows[c] - 1 : 0;
+    if (down & BIT(B_A)) {
+        if (g_hs_col == 0) {
+            int number = g_hs_row[0] + 1;
+            const NetHallStation *st = hall_slot(&h, number);
+            int mine = st && (st->p1 == h.me || st->p2 == h.me);
+            if (!mine && can && !(st && st->p2)) { net_hall_op(NET_HALL_SIT, (uint32_t)number, ""); printf("menu: hall screen: sit at station %d\n", number); fflush(stdout); }
+        } else if (g_hs_row[1] < h.nmembers) {
+            const NetHallMember *m = &h.members[g_hs_row[1]];
+            int free_ = m->state == NET_HP_FREE || m->state == NET_HP_SEATED;
+            if (m->ip != h.me && h.to == m->ip) net_hall_op(NET_HALL_CANCEL, 0, "");      /* (A again on the challenged player: taken back) */
+            else if (m->ip != h.me && can && free_) { net_hall_op(NET_HALL_CHALLENGE, m->ip, ""); printf("menu: hall screen: %s challenged\n", m->name); fflush(stdout); }
+        }
+    }
+    if ((down & BIT(B_Y)) && h.state != NET_HP_FREE) { net_hall_op(NET_HALL_STAND, 0, ""); printf("menu: hall screen: stood up\n"); fflush(stdout); }
+    if (down & BIT(B_X)) {                               /* the fighter list, at the fighter chosen now */
+        const char *id = net_hall_pick();
+        g_hs_pick_open = 1;
+        for (int i = 0; id[0] && i < HALL_FIGHTERS; i++) if (!strcmp(k_hall_fighters[i].id, id)) g_hs_pick_at = i;
+    }
+    if (down & BIT(B_MINUS)) {
+        ULONGLONG now = GetTickCount64();
+        if (g_hs_leave_t && now - g_hs_leave_t < 2500) { g_hs_leave_t = 0; net_hall_op(NET_HALL_LEAVE, 0, ""); printf("menu: hall screen: hall %s left\n", h.code); fflush(stdout); }
+        else g_hs_leave_t = now;
+    }
+    if (down & BIT(B_B)) hall_screen_show(0, "B");
+}
+static float hs_w(ImFont *f, float size, const char *t) { return f->CalcTextSizeA(size, FLT_MAX, 0.0f, t).x; }
+static void hs_fit(char *out, size_t n, ImFont *f, float size, float width, const char *t) {      /* the text, cut with ".." to fit the width */
+    snprintf(out, n, "%s", t);
+    size_t len = strlen(out);
+    while (len > 1 && hs_w(f, size, out) > width) {
+        len--;
+        while (len > 1 && ((unsigned char)out[len] & 0xc0) == 0x80) len--;      /* (between UTF-8 characters) */
+        snprintf(out + len, n - len, "..");
+    }
+}
+static void hs_button(ImDrawList *dl, ImFont *f, float size, float *x, float y, const char *key, const char *what) {
+    float r = size * 0.72f, kw = hs_w(f, size * 0.9f, key);
+    float bw = kw + r > 2 * r ? kw + r : 2 * r;
+    dl->AddRectFilled(ImVec2(*x, y - r), ImVec2(*x + bw, y + r), IM_COL32(235, 235, 240, 255), r);
+    dl->AddText(f, size * 0.9f, ImVec2(*x + (bw - kw) * 0.5f, y - size * 0.47f), IM_COL32(20, 20, 30, 255), key);
+    *x += bw + size * 0.4f;
+    dl->AddText(f, size, ImVec2(*x, y - size * 0.52f), IM_COL32(215, 218, 228, 255), what);
+    *x += hs_w(f, size, what) + size * 1.6f;
+}
+static void draw_hall_screen(void) {
+    if (!g_hall_open) return;
+    NetHall h; net_hall_get(&h);
+    if (!(h.known && h.status == NET_HALL_IN)) return;
+    ImGuiIO &io = ImGui::GetIO();
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    ImFont *f = ImGui::GetFont();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    const ImU32 white = IM_COL32(245, 245, 250, 255), dim = IM_COL32(160, 165, 185, 255), gold = IM_COL32(255, 191, 64, 255), green = IM_COL32(96, 220, 120, 255),
+                panel = IM_COL32(30, 28, 62, 240), seat = IM_COL32(52, 46, 110, 255), seat_on = IM_COL32(18, 18, 28, 255), edge = IM_COL32(110, 96, 200, 255),
+                sel_fill = IM_COL32(120, 70, 215, 255), amber = IM_COL32(255, 205, 60, 255);
+    static const ImU32 accent[4] = {IM_COL32(240, 80, 80, 255), IM_COL32(240, 80, 80, 255), IM_COL32(70, 170, 255, 255), IM_COL32(150, 150, 165, 255)};
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), IM_COL32(8, 7, 20, 232));
+    for (int i = -6; i < 30; i++) dl->AddLine(ImVec2(W * 0.05f * i, H), ImVec2(W * 0.05f * i + H * 0.55f, 0), IM_COL32(120, 90, 220, 14), H * 0.012f);
+    char t[160], cut[160];
+    /* the title */
+    float ts = H * 0.058f;
+    snprintf(t, sizeof t, "HALL  %s", h.code);
+    dl->AddText(f, ts, ImVec2((W - hs_w(f, ts, t)) * 0.5f, H * 0.028f), IM_COL32(210, 160, 255, 255), t);
+    int fights = 0; for (int i = 0; i < h.nstations; i++) fights += h.stations[i].playing != 0;
+    snprintf(t, sizeof t, "Code: %s.  Players: %d / 30.  Matches now: %d.", h.code, h.nmembers, fights);
+    dl->AddText(f, H * 0.026f, ImVec2((W - hs_w(f, H * 0.026f, t)) * 0.5f, H * 0.098f), white, t);
+    /* ---- the stations */
+    const float x0 = W * 0.065f, cw = W * 0.42f, top = H * 0.155f, rh = H * 0.185f;
+    int nslots = hall_slot_count(&h), first = 0;
+    if (g_hs_row[0] >= 4) first = g_hs_row[0] - 3;
+    if (first > nslots - 4) first = nslots - 4;
+    for (int v = 0; v < 4 && first + v < nslots; v++) {
+        int number = first + v + 1;
+        const NetHallStation *st = hall_slot(&h, number);
+        float y = top + rh * v;
+        int sel = g_hs_col == 0 && g_hs_row[0] == number - 1 && !h.from, mine = st && (st->p1 == h.me || st->p2 == h.me);
+        ImU32 ac = !st ? accent[3] : st->playing ? accent[0] : st->p2 ? accent[1] : accent[2];
+        snprintf(t, sizeof t, "%d", number);
+        dl->AddText(f, H * 0.04f, ImVec2(x0 - H * 0.004f, y - H * 0.004f), ac, t);
+        const char *label = !st ? "Open" : st->playing ? "In battle" : st->p2 ? "About to play" : "Waiting for a rival";
+        dl->AddText(f, H * 0.026f, ImVec2(x0 + H * 0.045f, y + H * 0.008f), ac, label);
+        if (st && st->p2) { snprintf(t, sizeof t, "Score  %d - %d", st->w1, st->w2); dl->AddText(f, H * 0.024f, ImVec2(x0 + cw - hs_w(f, H * 0.024f, t), y + H * 0.01f), dim, t); }
+        ImVec2 b0(x0, y + H * 0.045f), b1(x0 + cw, y + H * 0.165f);
+        dl->AddRectFilled(b0, b1, sel ? sel_fill : panel);
+        dl->AddRect(b0, b1, sel ? white : mine ? gold : edge, 0.0f, 0, sel ? H * 0.005f : H * 0.0025f);
+        dl->AddRectFilled(ImVec2(x0 - H * 0.008f, b0.y), ImVec2(x0 - H * 0.003f, b1.y), ac);
+        float sw = cw * 0.40f, sh = (b1.y - b0.y) * 0.66f, sy = b0.y + ((b1.y - b0.y) - sh) * 0.5f, pad = cw * 0.045f;
+        for (int k = 0; k < 2; k++) {
+            uint32_t who = st ? (k ? st->p2 : st->p1) : 0;
+            float sx = k ? b1.x - pad - sw : b0.x + pad;
+            dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + sw, sy + sh), who ? seat_on : seat);
+            dl->AddRect(ImVec2(sx, sy), ImVec2(sx + sw, sy + sh), who == h.me && who ? gold : edge, 0.0f, 0, H * 0.002f);
+            float fs = H * 0.028f;
+            if (who) { hs_fit(cut, sizeof cut, f, fs, sw * 0.9f, net_hall_name(&h, who)); dl->AddText(f, fs, ImVec2(sx + (sw - hs_w(f, fs, cut)) * 0.5f, sy + (sh - fs) * 0.5f), who == h.me ? gold : white, cut); }
+            else { const char *e = "Looking for a fight!"; fs = H * 0.023f; dl->AddText(f, fs, ImVec2(sx + (sw - hs_w(f, fs, e)) * 0.5f, sy + (sh - fs) * 0.5f), IM_COL32(205, 195, 255, 255), e); }
+        }
+        float vs = H * 0.05f;
+        dl->AddText(f, vs, ImVec2(x0 + (cw - hs_w(f, vs, "VS")) * 0.5f, b0.y + ((b1.y - b0.y) - vs) * 0.5f), IM_COL32(110, 90, 220, 255), "VS");
+    }
+    if (nslots > 4) { snprintf(t, sizeof t, "%d - %d of %d", first + 1, first + 4, nslots); dl->AddText(f, H * 0.02f, ImVec2(x0, top + rh * 4 - H * 0.004f), dim, t); }
+    /* ---- the players */
+    const float x1 = W * 0.515f, mh = H * 0.062f, mgap = H * 0.008f;
+    snprintf(t, sizeof t, "Players in the hall: %d / 30", h.nmembers);
+    dl->AddText(f, H * 0.024f, ImVec2(x1 + cw - hs_w(f, H * 0.024f, t), top + H * 0.008f), dim, t);
+    int mfirst = 0;
+    if (g_hs_row[1] >= 6) mfirst = g_hs_row[1] - 5;
+    for (int v = 0; v < 6 && mfirst + v < h.nmembers; v++) {
+        const NetHallMember *m = &h.members[mfirst + v];
+        float y = top + H * 0.045f + (mh + mgap) * v;
+        int sel = g_hs_col == 1 && g_hs_row[1] == mfirst + v && !h.from;
+        ImVec2 b0(x1, y), b1(x1 + cw, y + mh);
+        dl->AddRectFilled(b0, b1, sel ? sel_fill : panel);
+        dl->AddRect(b0, b1, sel ? white : edge, 0.0f, 0, sel ? H * 0.004f : H * 0.002f);
+        float fs = H * 0.028f;
+        snprintf(t, sizeof t, "%s%s", m->name, m->ip == h.me ? "  (you)" : "");
+        hs_fit(cut, sizeof cut, f, fs, cw * 0.55f, t);
+        dl->AddText(f, fs, ImVec2(x1 + cw * 0.04f, y + (mh - fs) * 0.5f), m->ip == h.me ? gold : white, cut);
+        ImU32 sc = dim;
+        if (m->ip == h.to) { snprintf(t, sizeof t, "Challenged..."); sc = amber; }
+        else if (m->state == NET_HP_PLAYING) { snprintf(t, sizeof t, "%d  In battle", m->station); sc = accent[0]; }
+        else if (m->state == NET_HP_MATCHED) { snprintf(t, sizeof t, "%d  About to play", m->station); sc = accent[0]; }
+        else if (m->state == NET_HP_SEATED) { snprintf(t, sizeof t, "%d  Waiting for a rival", m->station); sc = accent[2]; }
+        else { snprintf(t, sizeof t, "Free"); sc = green; }
+        float ss = H * 0.024f;
+        dl->AddText(f, ss, ImVec2(x1 + cw * 0.96f - hs_w(f, ss, t), y + (mh - ss) * 0.5f), sc, t);
+    }
+    if (h.nmembers > 6) { snprintf(t, sizeof t, "%d - %d of %d", mfirst + 1, mfirst + 6 > h.nmembers ? h.nmembers : mfirst + 6, h.nmembers); dl->AddText(f, H * 0.02f, ImVec2(x1, top + H * 0.045f + (mh + mgap) * 6), dim, t); }
+    /* ---- the box: a challenge to answer, or what to do next */
+    ImVec2 i0(x1, H * 0.655f), i1(x1 + cw, H * 0.895f);
+    dl->AddRectFilled(i0, i1, h.from ? IM_COL32(70, 50, 10, 245) : panel);
+    dl->AddRect(i0, i1, h.from ? gold : edge, 0.0f, 0, h.from ? H * 0.005f : H * 0.0025f);
+    float ix = i0.x + cw * 0.04f, iy = i0.y + H * 0.022f, ls = H * 0.03f, ss = H * 0.024f;
+    if (h.from) {
+        snprintf(t, sizeof t, "%s challenges you!", h.from_name); hs_fit(cut, sizeof cut, f, ls * 1.15f, cw * 0.92f, t);
+        dl->AddText(f, ls * 1.15f, ImVec2(ix, iy), gold, cut);
+        float bx = ix; hs_button(dl, f, ss * 1.1f, &bx, iy + H * 0.11f, "A", "Accept"); hs_button(dl, f, ss * 1.1f, &bx, iy + H * 0.11f, "B", "Decline");
+    } else {
+        const char *l1, *l2 = "", *l3 = "";
+        char a[160];
+        if (h.state == NET_HP_PLAYING) { snprintf(a, sizeof a, "Station %d: playing against %s.", h.station, h.opp_name); l1 = a; }
+        else if (h.state == NET_HP_MATCHED) { snprintf(a, sizeof a, "Station %d: your rival is %s.", h.station, h.opp_name); l1 = a;
+            l2 = "Press B, then in the game: Smash, choose your fighter, start."; l3 = "The match begins when both of you have."; }
+        else if (h.state == NET_HP_SEATED) { snprintf(a, sizeof a, "Station %d: waiting for a rival to sit down.", h.station); l1 = a;
+            l2 = "You may press B and start a Smash match already:"; l3 = "it begins by itself when a rival sits here."; }
+        else { l1 = "You are at no station."; l2 = "Choose a station and press A to sit,"; l3 = "or choose a free player and press A to challenge."; }
+        if (h.to) { snprintf(a, sizeof a, "You challenged %s: waiting for the answer...", net_hall_name(&h, h.to)); l1 = a; l2 = "A on that player again takes it back."; l3 = ""; }
+        if (!rbn_hs_waiting() && h.state != NET_HP_PLAYING) {      /* the game is not waiting for a hall match: once, by hand */
+            l2 = "First, once: press B, then in the game Smash > any fighter > start.";
+            l3 = "The game then waits here and your matches start by themselves."; }
+        if (g_hs_leave_t && GetTickCount64() - g_hs_leave_t < 2500) { l1 = "Leave the hall?"; l2 = "Press - again to leave."; l3 = ""; }
+        hs_fit(cut, sizeof cut, f, ls, cw * 0.92f, l1); dl->AddText(f, ls, ImVec2(ix, iy), h.state == NET_HP_FREE ? white : gold, cut);
+        hs_fit(cut, sizeof cut, f, ss, cw * 0.92f, l2); dl->AddText(f, ss, ImVec2(ix, iy + H * 0.062f), white, cut);
+        hs_fit(cut, sizeof cut, f, ss, cw * 0.92f, l3); dl->AddText(f, ss, ImVec2(ix, iy + H * 0.1f), white, cut);
+        char fl[96]; const char *pn = hall_pick_name();
+        snprintf(fl, sizeof fl, "Your fighter: %s", pn[0] ? pn : "the one chosen in the game (X: choose here)");
+        hs_fit(cut, sizeof cut, f, ss, cw * 0.92f, fl); dl->AddText(f, ss, ImVec2(ix, iy + H * 0.155f), pn[0] ? gold : dim, cut);
+    }
+    if (g_hs_pick_open && !h.from) {                     /* ---- the fighter list, over everything */
+        ImVec2 p0(W * 0.06f, H * 0.14f), p1(W * 0.94f, H * 0.91f);
+        dl->AddRectFilled(p0, p1, IM_COL32(14, 12, 34, 250));
+        dl->AddRect(p0, p1, white, 0.0f, 0, H * 0.004f);
+        dl->AddText(f, H * 0.034f, ImVec2(p0.x + W * 0.02f, p0.y + H * 0.012f), gold, "Choose your fighter");
+        dl->AddText(f, H * 0.02f, ImVec2(p0.x + W * 0.02f, p1.y - H * 0.036f), dim, "* add-on fighters: only if you have that content.   A: choose   Y: none (the game's character select)   B: back");
+        int rows_ = (HALL_FIGHTERS + HALL_PICK_COLS - 1) / HALL_PICK_COLS;
+        float gx = p0.x + W * 0.02f, gy = p0.y + H * 0.065f, gw = (p1.x - p0.x - W * 0.04f) / HALL_PICK_COLS, gh = (p1.y - gy - H * 0.045f) / rows_;
+        const char *cur = net_hall_pick();
+        for (int i = 0; i < HALL_FIGHTERS; i++) {
+            float cx = gx + gw * (i % HALL_PICK_COLS), cy = gy + gh * (i / HALL_PICK_COLS);
+            int on = i == g_hs_pick_at, chosen = !strcmp(cur, k_hall_fighters[i].id);
+            ImVec2 c0(cx + 2, cy + 2), c1(cx + gw - 2, cy + gh - 2);
+            dl->AddRectFilled(c0, c1, on ? sel_fill : panel);
+            if (on || chosen) dl->AddRect(c0, c1, on ? white : gold, 0.0f, 0, H * 0.003f);
+            float fs = gh * 0.52f; if (fs > H * 0.026f) fs = H * 0.026f;
+            hs_fit(cut, sizeof cut, f, fs, gw * 0.9f, k_hall_fighters[i].name);
+            dl->AddText(f, fs, ImVec2(cx + (gw - hs_w(f, fs, cut)) * 0.5f, cy + (gh - fs) * 0.5f), chosen ? gold : white, cut);
+        }
+    }
+    /* ---- the buttons */
+    float bx = x0, by = H * 0.948f, bs = H * 0.026f;
+    if (h.from) { hs_button(dl, f, bs, &bx, by, "A", "Accept"); hs_button(dl, f, bs, &bx, by, "B", "Decline"); }
+    else {
+        hs_button(dl, f, bs, &bx, by, "A", g_hs_col == 0 ? "Sit" : "Challenge");
+        hs_button(dl, f, bs, &bx, by, "B", "Close");
+        if (h.state != NET_HP_FREE) hs_button(dl, f, bs, &bx, by, "Y", "Stand up");
+        hs_button(dl, f, bs, &bx, by, "X", "Fighter");
+        hs_button(dl, f, bs, &bx, by, "-", "Leave the hall");
+    }
+}
+/* the hall over the game while F1 is closed and no online fight is shown: who is where, and a challenge waiting */
+static int hall_hud_on(void) {
+    NetHall h; net_hall_get(&h);
+    return h.known && h.status == NET_HALL_IN && rbg_score_slot() < 0;
+}
+static void draw_hall(void) {
+    NetHall h; net_hall_get(&h);
+    if (g_open || g_hall_open || !(h.known && h.status == NET_HALL_IN) || rbg_score_slot() >= 0) return;
+    ImGuiIO &io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 12.0f, io.DisplaySize.y * 0.14f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.72f);
+    if (ImGui::Begin("##hallhud", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove)) {
+        const ImVec4 green(0.45f, 0.9f, 0.45f, 1), amber(1, 0.8f, 0.2f, 1), gold(1.0f, 0.75f, 0.25f, 1);
+        ImGui::TextColored(gold, "Hall %s", h.code); ImGui::SameLine(); ImGui::TextDisabled("  %d player%s", h.nmembers, h.nmembers == 1 ? "" : "s");
+        for (int i = 0; i < h.nstations; i++) {
+            const NetHallStation *s = &h.stations[i];
+            int mine = s->p1 == h.me || s->p2 == h.me;
+            char line[120];
+            if (s->p2) snprintf(line, sizeof line, "%d  %.14s %d - %d %.14s", s->number, net_hall_name(&h, s->p1), s->w1, s->w2, net_hall_name(&h, s->p2));
+            else snprintf(line, sizeof line, "%d  %.14s (waits for a rival)", s->number, net_hall_name(&h, s->p1));
+            if (mine) ImGui::TextColored(gold, "%s", line); else if (s->playing) ImGui::TextColored(green, "%s", line); else ImGui::Text("%s", line);
+        }
+        int free_n = 0; char names[160] = ""; size_t nl = 0;
+        for (int i = 0; i < h.nmembers; i++) if (!h.members[i].station) { free_n++; if (nl < sizeof names - 20) nl += (size_t)snprintf(names + nl, sizeof names - nl, "%s%.14s", nl ? ", " : "", h.members[i].name); }
+        if (free_n) ImGui::TextDisabled("Free: %s", names);
+        if (h.from) ImGui::TextColored(amber, "%s challenges you: Capture / F3", h.from_name);
+        else if (h.state == NET_HP_MATCHED) ImGui::TextColored(amber, "Your rival: %s. Smash > start", h.opp_name);
+        else ImGui::TextDisabled("Capture / F3 / hold -: the hall");
+    }
+    ImGui::End();
+}
 static void sec_arena(void) {
     NetArena a;
     net_arena_get(&a);
     const ImVec4 green(0.45f, 0.9f, 0.45f, 1), amber(1, 0.8f, 0.2f, 1), gold(1.0f, 0.75f, 0.25f, 1);
     NetStats ns;
     net_stats_get(&ns);
+    {   static int hall_on = -1;                         /* (2026-11-21) hall = on | off, OFF by default: everything of the halls is behind it */
+        int now_on = gfx_hall();
+        if (hall_on < 0) hall_on = now_on;
+        if (onoff("hall", now_on != 0, getenv("SSBU_HALL") == NULL)) { now_on = !now_on; gfx_set_hall(now_on); ini("hall", now_on ? "on" : "off"); printf("menu: halls %s\n", now_on ? "on" : "off"); fflush(stdout); }
+        ImGui::SameLine(); ImGui::Text("Halls (beta): a room where several pairs play at the same time");
+        if (!now_on) { help("OFF: nothing changes. ON: this game can make or enter a hall (below) and gets the hall's own screen."); ImGui::Separator(); }
+    }
+    if (gfx_hall() && ns.state == NET_CONNECTED && sec_hall()) return;      /* (in a hall: the room queue below is not for it) */
     if (ns.state != NET_CONNECTED) { help("Not connected to a lobby. Online play: F1 > Online (the arena needs a lobby: a lobby server or Same network)."); return; }
     if (!a.known && !a.making) { ImGui::TextDisabled("Asking the lobby..."); help("No answer after a few seconds: the lobby is an older version without rooms. Everyone: close the game and open Play SSBU.bat (it updates by itself)."); return; }
     float bw = ImGui::GetFontSize() * 12;
@@ -2775,13 +3209,16 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         }
         if (g_open && capturing()) { if (g_pcap < 0 && (down & (BIT(B_HOME) | BIT(B_CAPTURE)))) capture_cancel("Home / Capture"); }      /* Home cancels a rebinding instead of closing */
         else {
-            if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
+            /* (2026-11-21) in a hall the Capture / Share button is the hall's screen (Home stays the menu) */
+            if ((down & BIT(B_CAPTURE)) && !g_open && hall_hud_on()) { InterlockedIncrement(&g_hall_req); down &= ~BIT(B_CAPTURE); }
+            else if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
             if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
         }
     }
     if (g_open) capture_tick(down);
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
-    if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
+    if (!osk_active()) hall_screen_tick(b, down);
+    if (!g_open && !g_hall_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
     update_check();
     ver_tick();
@@ -2792,9 +3229,9 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
 #endif
     NetLadder score_ld;
 #ifdef _WIN32
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld)) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld) && !hall_hud_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
 #else
-    if (!g_open && !osk_active() && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld)) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !osk_active() && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld) && !hall_hud_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
 #endif
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
@@ -2838,8 +3275,10 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     ImGui::NewFrame();
     if (S.overlay) draw_overlay();
     draw_score();
+    draw_hall();
+    draw_hall_screen();
     if (S.stats) draw_stats();
-    if (g_notice_on) {                                   /* R3: the online match's message, in the middle */
+    if (g_notice_on && !g_hall_open) {                   /* R3: the online match's message, in the middle (the hall's screen says it itself) */
         char text[512];
         AcquireSRWLockShared(&g_notice_lock); snprintf(text, sizeof text, "%s", g_notice); ReleaseSRWLockShared(&g_notice_lock);
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));

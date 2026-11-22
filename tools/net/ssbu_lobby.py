@@ -86,6 +86,16 @@ rollback search, 0 outside one): a match in another room starts it again at 0-0,
 are told when their match starts and after each counted result; the game shows it over the fight (menu.cpp).
     28 SCORE        lobby:  the other fighter's address u32, wins u16, losses u16 (the one told), wins u16, losses u16 (the other),
                             name[32] (the one told), name[32] (the other): the ladder name, else the lobby name
+    41 HALL         game:   cookie u64, op u8, argument u32, code[5] (ASCII, NUL padded)        (1.9, 2026-11-21)
+    42 HALL_STATE   lobby:  see hall_send
+       A HALL is a room where several pairs play rollback matches at the same time (Smash versus, as the 1.6 arena; the
+       game's Online menu is not needed). It has a code of 5 characters and STATIONS: a station holds two players, who
+       play each other, again and again, until one of them stands up. A player sits at a station (and waits there for a
+       rival), or challenges a free player: when the other accepts, both sit at a new station. Ops: 0 leave the hall,
+       1 still here (every second; with a code: enter that hall), 3 make a hall, 4 challenge the player `argument`
+       (its lobby address), 5 accept the challenge of `argument`, 6 decline it, 7 sit at the station `argument` (0: the
+       lowest one with a single player, else a new one), 8 stand up, 9 take the challenge back. A player at a full
+       station is paired (MATCH op 2) with the other one of its station only, and nobody else is paired with either.
     40 ROOM_LEFT    nex_server.py on this host (from 127.0.0.1 only): arena gid u32, the player's public address u32: the
                     players at that address whose count is of that arena start again at 0-0 (they left the room: by its
                     menu, a dropped connection, or the arena closed)
@@ -124,7 +134,7 @@ except (ImportError, OSError):
     tournament_mod = None
 
 PROTO = 1
-LOBBY_VERSION = "1.8"
+LOBBY_VERSION = "1.9"
 (JOIN, WELCOME, REJECT, PING, PONG, DATA, LEAVE, LIST, LISTING, LIST_END,
  PEERS, PUNCH, DIRECT, BCAST) = range(1, 15)
 RB = 16          # online rollback messages between two games (recomp-study/net_relay.c T_RB, rb_net.c)
@@ -140,6 +150,13 @@ SCORE = 28                                   # 1.8 (2026-11-07): the session's w
 SCORE_IDLE = 3600.0                          # a player's score starts again at 0-0 after an hour without a match
 F_STOCKS_FALLS = 4                           # RESULT flag: stocks left = the rule's stocks less the falls (a newer game: its winner is right)
 AR_OUT, AR_WAITING, AR_TURN, AR_PLAYING = range(4)
+HALL, HALL_STATE = 41, 42                    # 1.9 (2026-11-21): a hall, several pairs playing at the same time
+(H_LEAVE, H_STAY, H_LOOK, H_MAKE, H_CHALLENGE, H_ACCEPT, H_DECLINE, H_SIT, H_STAND, H_CANCEL) = range(10)
+HS_OUT, HS_IN, HS_NONE, HS_FULL = range(4)   # HALL_STATE status: not in a hall, in one, no hall with that code, no room (hall / halls full)
+HP_FREE, HP_SEATED, HP_MATCHED, HP_PLAYING = range(4)   # a player in a hall: free, alone at a station, its station is full (go and fight), playing
+HALL_CODE = "ABCDEFGHJKLMNPQRSTUVWXY0123456789"
+HALL_MEMBERS, HALL_STATIONS, HALLS_MOST = 30, 16, 64
+HALL_CHALLENGE_FOR, HALL_IDLE_FOR, HALL_PLAY_FOR, HALL_EMPTY_FOR = 30.0, 300.0, 900.0, 600.0
 ARENA_TURN_FOR, ARENA_PLAY_FOR, ARENA_WATCH_FOR, ARENA_LIST = 120.0, 900.0, 3.0, 16
 TOURNEY, TOURNEY_STATE, TOURNEY_DOC = 29, 30, 31   # 1.7 tournaments (tournament.py; 26 is the games' own RB_DIRECT, net_relay.c)
 (T_LOOK, T_SIGNUP, T_WITHDRAW, T_CREATE, T_START, T_CANCEL, T_SEEDMODE, T_MOVE, T_DQ, T_RESULT, T_STAGE, T_READY,
@@ -245,11 +262,53 @@ class Client:
         self.arena_streak = 0     # 1.6: wins in a row in the arena
         self.arena_seen = None    # 1.6: when it last asked for the arena's state (it is shown the changes for ARENA_WATCH_FOR s)
         self.rb_group = None      # 1.7: the Battle Arena group it is in (RB_GROUP key), None = none
+        self.hall = None          # 1.9: the Hall it is in
+        self.hall_to = None       # (the Client it challenged, and when)
+        self.hall_to_at = 0.0
         self.t_seq = None         # 1.7: the last TOURNEY op done (its seq), its outcome, the tournament it looks at
         self.t_err = ""
         self.t_err_at = 0.0
         self.t_focus = 0
         self.t_have = 0
+
+
+class Station:
+    """1.9: a station of a hall: one or two players; two play each other until one stands up."""
+    def __init__(self, n, now):
+        self.n = n
+        self.players = []         # Clients, the first one is player 1
+        self.playing = False      # their games exchange rollback messages
+        self.at = now             # since when it is in its state
+        self.last_seed = None
+        self.wins = {}            # Client -> matches won at this station against the other one
+
+    def full(self):
+        return len(self.players) == 2
+
+
+class Hall:
+    """1.9: a hall of one build and lobby code: its members and its stations."""
+    def __init__(self, code, part, now):
+        self.code, self.part = code, part
+        self.members = []         # Clients, in the order they came
+        self.stations = {}        # number -> Station
+        self.version = 0
+        self.empty_since = None
+        self.made = now
+
+    def station_of(self, c):
+        for st in self.stations.values():
+            if c in st.players:
+                return st
+        return None
+
+    def state_of(self, c):
+        st = self.station_of(c)
+        if st is None:
+            return HP_FREE
+        if not st.full():
+            return HP_SEATED
+        return HP_PLAYING if st.playing else HP_MATCHED
 
 
 class Arena:
@@ -1067,6 +1126,8 @@ class Lobby(TourneyMixin):
         self.web_q = queue.Queue()   # (2026-11-02) the web page's organizer actions, done on the lobby's own thread
         self.web_tokens = {}      # token -> (account id hex, name, until): an organizer logged in on the web page
         self.arenas = {}          # 1.6: part (build, code) -> Arena
+        self.halls = {}           # 1.9: (part, code) -> Hall
+        self.halls_on = True      # (--no-halls: HALL is not answered, as an older lobby)
         self.arena_streak = arena_streak
         self.search_for, self.match_for = search_for, match_for
         self.relay_secret = None  # (2026-11-05) --relay-secret: the key a relay near the players signs its RELAY_HB with
@@ -1127,6 +1188,7 @@ class Lobby(TourneyMixin):
         self.say("room of %s closed (%s)" % (room.owner.name, why))
 
     def drop(self, c, why):
+        self.hall_leave(c, why)
         self.arena_leave(c, why)
         self.lq_leave(c, why)
         if c.match is not None:
@@ -1219,6 +1281,7 @@ class Lobby(TourneyMixin):
                 m.rb_seen.add(c.ip)
                 if len(m.rb_seen) == 2:
                     h, g = m.host, m.guest
+                    self.hall_playing(h, g, now)
                     self.arena_playing(h, g, now)
                     self.t_playing(h, g, now)
                     self.score_send(h, g, now, touch=True)
@@ -1244,12 +1307,15 @@ class Lobby(TourneyMixin):
             act = self.t_active(c)
             self.ladder_ack(c, struct.unpack_from(">Q", p, 12)[0], OUT_WAIT if act is not None and act[0].is_ladder() else OUT_UNRANKED)
             self.score_result(c, p, now)
+            self.hall_result(c, p, now)
             self.arena_result(c, p, now)
             self.t_result(c, p, now)
         elif kind == TOURNEY and len(p) >= 23 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.on_tourney(c, p, now)
         elif kind == ARENA and len(p) >= 13 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.on_arena(c, p[12], now)
+        elif kind == HALL and self.halls_on and len(p) >= 17 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
+            self.on_hall(c, p[12], struct.unpack_from(">I", p, 13)[0], p[17:22].rstrip(b"\0").decode("ascii", "replace").upper() if len(p) >= 22 else "", now)
         elif kind == DATA and len(p) >= 16:
             self.on_data(c, p, 4, now, ())
         elif kind == BCAST and len(p) >= 5:
@@ -1636,9 +1702,18 @@ class Lobby(TourneyMixin):
         pair = a.pair if a is not None and op == KIND_ROLLBACK else None
         tp = self.t_pairing(c) if op == KIND_ROLLBACK and not key else None      # (a Battle Arena's match: the arena pairs it; a featured set's result still counts)
         busy = self.t_busy(c.part)
+        hst = c.hall.station_of(c) if c.hall is not None and op == KIND_ROLLBACK and not key else None
+        if not key:                                 # (1.9) nobody is paired with a player seated at another one's station
+            waiting = [x for x in waiting if x.hall is None or x.hall.state_of(x) == HP_FREE
+                       or (hst is not None and x in hst.players)]
         if tp is not None:                          # 1.7 tournament: only the opponent of its set, once both are ready
             waiting = [x for x in waiting if x is tp[0]] if tp[0] is not None else []
             pair = [tp[0], c] if tp[1] == 1 else [c, tp[0]]
+        elif hst is not None and hst.full():        # 1.9 hall: the two of a station meet only each other; its first one is player 1
+            waiting = [x for x in waiting if x in hst.players]
+            pair = list(hst.players)
+        elif hst is not None:                       # (alone at a station: it waits for a rival to sit down, not for a search)
+            waiting = []
         elif pair and c in pair:                      # 1.6 arena: a player taking its turn meets only its opponent of the turn
             waiting = [x for x in waiting if x is (pair[1] if c is pair[0] else pair[0])]
         elif a is not None and c in a.members():   # (in the queue: its turn has not come; the box says it searches)
@@ -1696,6 +1771,7 @@ class Lobby(TourneyMixin):
                 self.close_room(r, "no advertisement for %d s" % ROOM_TIMEOUT)
         self.t_sweep(now)
         self.lq_sweep(now)
+        self.hall_sweep(now)
         for a in list(self.arenas.values()):
             if a.pair and not a.playing and now - a.at > ARENA_TURN_FOR:
                 # (a turn not started in time: whoever did not even search is away and leaves the arena; the other keeps its place)
@@ -1709,6 +1785,215 @@ class Lobby(TourneyMixin):
                     self.arena_leave(away[0], "did not start its turn in %d s" % ARENA_TURN_FOR, now)
             elif a.pair and a.playing and now - a.at > ARENA_PLAY_FOR:
                 self.arena_end(a, None, "no result of the match of %s and %s in %d s" % (a.pair[0].name, a.pair[1].name, ARENA_PLAY_FOR), now)
+
+    # ---- 1.9 hall
+    def hall_send(self, c, now, status=None, code=""):
+        """HALL_STATE to c:
+            version u32, status u8 (HS_*), code[5]
+            its own: state u8 (HP_*), station u8 (0: none), the other player of its station: address u32 + name[32],
+                     seconds in that state u16, the player who challenges it: address u32 + name[32] (0: nobody),
+                     the player it challenges: address u32 (0: nobody)
+            members u8, then each: address u32, name[32], state u8, station u8
+            stations u8, then each: number u8, playing u8, player 1 address u32, player 2 address u32 (0: empty),
+                                    player 1's wins u16, player 2's wins u16 (at this station, against each other)"""
+        def nm(x):
+            return (x.name.encode("utf-8", "replace")[:NAME_LEN] if x is not None else b"").ljust(NAME_LEN, b"\0")
+        h = c.hall
+        if h is None:
+            out = hdr(HALL_STATE) + struct.pack(">IB", 0, HS_OUT if status is None else status) + code.encode("ascii", "replace")[:5].ljust(5, b"\0")
+            out += bytes((0, 0)) + struct.pack(">I", 0) + nm(None) + struct.pack(">H", 0) + struct.pack(">I", 0) + nm(None) + struct.pack(">I", 0) + bytes((0, 0))
+            return self.send(out, c.at)
+        st = h.station_of(c)
+        opp = next((x for x in st.players if x is not c), None) if st is not None else None
+        frm = next((x for x in h.members if x.hall_to is c), None)
+        out = hdr(HALL_STATE) + struct.pack(">IB", h.version, HS_IN) + h.code.encode("ascii")[:5].ljust(5, b"\0")
+        out += bytes((h.state_of(c), st.n if st is not None else 0)) + struct.pack(">I", opp.ip if opp else 0) + nm(opp)
+        out += struct.pack(">H", max(0, min(int(now - st.at), 65535)) if st is not None else 0)
+        out += struct.pack(">I", frm.ip if frm else 0) + nm(frm) + struct.pack(">I", c.hall_to.ip if c.hall_to is not None else 0)
+        out += bytes((len(h.members),)) + b"".join(struct.pack(">I", x.ip) + nm(x) + bytes((h.state_of(x), (h.station_of(x).n if h.station_of(x) else 0)))
+                                                  for x in h.members)
+        rows = sorted(h.stations.values(), key=lambda s_: s_.n)
+        out += bytes((len(rows),))
+        for s_ in rows:
+            p1 = s_.players[0] if s_.players else None
+            p2 = s_.players[1] if len(s_.players) > 1 else None
+            out += bytes((s_.n, 1 if s_.playing else 0)) + struct.pack(">IIHH", p1.ip if p1 else 0, p2.ip if p2 else 0,
+                                                                       min(s_.wins.get(p1, 0), 65535), min(s_.wins.get(p2, 0), 65535))
+        self.send(out, c.at)
+
+    def hall_changed(self, h, now):
+        h.version += 1
+        for x in list(h.members):
+            self.hall_send(x, now)
+
+    def hall_stand(self, h, c, why):
+        """c leaves its station (it stays in the hall); the other one stays seated, alone. No message sent."""
+        st = h.station_of(c)
+        if st is None:
+            return False
+        st.players.remove(c)
+        st.playing, st.at, st.wins, st.last_seed = False, time.monotonic(), {}, None
+        if not st.players:
+            del h.stations[st.n]
+        self.say("hall %s: %s left station %d (%s)" % (h.code, c.name, st.n, why))
+        return True
+
+    def hall_sit(self, h, c, n, now):
+        """c at station n (0: the lowest one with a single player, else the lowest number free). False: no seat."""
+        if n == 0:
+            alone = sorted(s_.n for s_ in h.stations.values() if len(s_.players) == 1 and c not in s_.players)
+            n = alone[0] if alone else next((i for i in range(1, HALL_STATIONS + 1) if i not in h.stations), 0)
+        if not 1 <= n <= HALL_STATIONS:
+            return False
+        st = h.stations.get(n)
+        if st is not None and (c in st.players or st.full()):
+            return c in st.players
+        self.hall_stand(h, c, "to another station")
+        st = h.stations.get(n)
+        if st is None:
+            st = h.stations[n] = Station(n, now)
+        st.players.append(c)
+        st.playing, st.at, st.wins, st.last_seed = False, now, {}, None
+        self.say("hall %s: %s sits at station %d%s" % (h.code, c.name, n, (" against %s" % st.players[0].name) if st.full() else ""))
+        return True
+
+    def hall_leave(self, c, why, now=None):
+        h = c.hall
+        if h is None:
+            return
+        now = time.monotonic() if now is None else now
+        self.hall_stand(h, c, why)
+        for x in h.members:
+            if x.hall_to is c:
+                x.hall_to = None
+        c.hall_to = None
+        h.members.remove(c)
+        c.hall = None
+        if not h.members:
+            h.empty_since = now
+        self.say("hall %s: %s left (%s); %d in it" % (h.code, c.name, why, len(h.members)))
+        self.hall_changed(h, now)
+        self.hall_send(c, now)
+
+    def on_hall(self, c, op, arg, code, now):
+        """HALL from a game (see the top of this file)."""
+        h = c.hall
+        if op == H_LEAVE:
+            return self.hall_leave(c, "left the hall", now) if h is not None else self.hall_send(c, now)
+        if op == H_MAKE and h is None:
+            if sum(1 for k in self.halls if k[0] == c.part) >= HALLS_MOST:
+                return self.hall_send(c, now, HS_FULL)
+            while True:
+                code = "".join(secrets.choice(HALL_CODE) for _ in range(5))
+                if (c.part, code) not in self.halls:
+                    break
+            h = self.halls[(c.part, code)] = Hall(code, c.part, now)
+            self.say("hall %s made by %s" % (code, c.name))
+        if op in (H_STAY, H_MAKE) and c.hall is None:
+            if op == H_STAY:
+                if not code:
+                    return self.hall_send(c, now)
+                h = self.halls.get((c.part, code))
+                if h is None:
+                    return self.hall_send(c, now, HS_NONE, code)
+                if len(h.members) >= HALL_MEMBERS:
+                    return self.hall_send(c, now, HS_FULL, code)
+            self.arena_leave(c, "entered a hall", now)   # (the 1.6 queue and a hall would both hold its searches)
+            h.members.append(c)
+            h.empty_since = None
+            c.hall, c.hall_to = h, None
+            self.say("hall %s: %s came in (%d in it)" % (h.code, c.name, len(h.members)))
+            return self.hall_changed(h, now)
+        if h is None:
+            return self.hall_send(c, now)
+        o = self.by_ip.get(arg) if op in (H_CHALLENGE, H_ACCEPT, H_DECLINE) else None
+        if o is not None and (o is c or o.hall is not h):
+            o = None
+        changed = False
+        if op == H_CHALLENGE and o is not None and h.state_of(c) in (HP_FREE, HP_SEATED) and h.state_of(o) in (HP_FREE, HP_SEATED):
+            if o.hall_to is c:                      # (each challenged the other: that is a yes)
+                op = H_ACCEPT
+            elif c.hall_to is not o:
+                c.hall_to, c.hall_to_at, changed = o, now, True
+                self.say("hall %s: %s challenges %s" % (h.code, c.name, o.name))
+        if op == H_ACCEPT and o is not None and o.hall_to is c and h.state_of(c) in (HP_FREE, HP_SEATED) and h.state_of(o) in (HP_FREE, HP_SEATED):
+            n = next((i for i in range(1, HALL_STATIONS + 1) if i not in h.stations or
+                      (len(h.stations[i].players) == 1 and h.stations[i].players[0] in (c, o))), 0)
+            if n:
+                o.hall_to = c.hall_to = None
+                for x in h.members:                 # (other challenges to either one: gone)
+                    if x.hall_to in (c, o):
+                        x.hall_to = None
+                self.hall_sit(h, o, n, now)         # (the challenger is player 1)
+                self.hall_sit(h, c, n, now)
+                changed = True
+        elif op == H_DECLINE and o is not None and o.hall_to is c:
+            o.hall_to, changed = None, True
+            self.say("hall %s: %s declined %s" % (h.code, c.name, o.name))
+        elif op == H_CANCEL and c.hall_to is not None:
+            c.hall_to, changed = None, True
+        elif op == H_SIT:
+            before = h.station_of(c)
+            if self.hall_sit(h, c, arg & 0xff, now) and h.station_of(c) is not before:
+                c.hall_to = None
+                st = h.station_of(c)
+                if st.full():
+                    for x in h.members:
+                        if x.hall_to in st.players:
+                            x.hall_to = None
+                changed = True
+        elif op == H_STAND:
+            changed = self.hall_stand(h, c, "stood up")
+        if changed:
+            return self.hall_changed(h, now)
+        self.hall_send(c, now)
+
+    def hall_playing(self, hc, g, now):
+        h = hc.hall
+        st = h.station_of(hc) if h is not None else None
+        if st is not None and st.full() and g in st.players and not st.playing:
+            st.playing, st.at = True, now
+            self.say("hall %s: station %d: %s and %s are playing" % (h.code, st.n, st.players[0].name, st.players[1].name))
+            self.hall_changed(h, now)
+
+    def hall_result(self, c, p, now):
+        """RESULT of a game of a station's pair: the winner's count goes up; the pair stays seated for the next match."""
+        h = c.hall
+        st = h.station_of(c) if h is not None else None
+        if st is None or not st.full():
+            return
+        seed, peer, slot, rule_kind, stock, flags = struct.unpack_from(">QIBBBB", p, 12)
+        s0, s1, d0, d1 = struct.unpack_from(">BBHH", p, 48)
+        other = st.players[1] if c is st.players[0] else st.players[0]
+        if seed == st.last_seed or peer != other.ip or slot > 1:
+            return
+        st.last_seed, st.playing, st.at = seed, False, now
+        win = 0 if s0 > s1 else 1 if s1 > s0 else 0 if d0 < d1 else 1 if d1 < d0 else None
+        if not flags & 2 and win is not None:
+            w = c if win == slot else other
+            st.wins[w] = st.wins.get(w, 0) + 1
+            self.say("hall %s: station %d: %s beat %s (%d-%d)" % (h.code, st.n, w.name, (other if w is c else c).name,
+                                                                 st.wins.get(st.players[0], 0), st.wins.get(st.players[1], 0)))
+        self.hall_changed(h, now)
+
+    def hall_sweep(self, now):
+        for key, h in list(self.halls.items()):
+            changed = False
+            for x in h.members:
+                if x.hall_to is not None and now - x.hall_to_at > HALL_CHALLENGE_FOR:
+                    x.hall_to, changed = None, True
+            for st in list(h.stations.values()):
+                if st.full() and st.playing and now - st.at > HALL_PLAY_FOR:
+                    st.playing, st.at, changed = False, now, True      # (no result came: the pair may play again)
+                elif st.full() and not st.playing and now - st.at > HALL_IDLE_FOR and all(x.search_since is None and x.match is None for x in st.players):
+                    for x in list(st.players):                      # (nobody started the match: the station is given up)
+                        self.hall_stand(h, x, "no match started in %d s" % HALL_IDLE_FOR)
+                    changed = True
+            if changed:
+                self.hall_changed(h, now)
+            if not h.members and h.empty_since is not None and now - h.empty_since > HALL_EMPTY_FOR:
+                del self.halls[key]
+                self.say("hall %s closed (empty for %d s)" % (h.code, HALL_EMPTY_FOR))
 
     # ---- 1.6 arena
     def arena_status(self, a, c):
@@ -1749,6 +2034,8 @@ class Lobby(TourneyMixin):
     def on_arena(self, c, op, now):
         """ARENA from a game: op 0 leave, 1 join (or stay in), 2 only look."""
         a = self.arenas.get(c.part)
+        if op == 1 and c.hall is not None:           # (1.9: in a hall: its stations pair it, not this queue)
+            op = 2
         if op == 1 and (a is None or c not in a.members()):
             if a is None:
                 a = self.arenas[c.part] = Arena()
@@ -2506,6 +2793,7 @@ def main():
     ap.add_argument("--relay-secret", default="", help="a file with the key of the relay near the players (ssbu_relay.py); empty: no relay")
     ap.add_argument("--arena-streak", type=int, default=3, help="arena: wins in a row after which the winner goes to the back of the queue too (default 3, 0: no limit)")
     ap.add_argument("--ladder-stages", default="", help="ladder: the legal stages, comma-separated stage ids (match block + 0x420, hex or decimal; empty: any)")
+    ap.add_argument("--no-halls", action="store_true", help="halls (1.9: several pairs playing at once) off: HALL is not answered, as an older lobby")
     o = ap.parse_args()
     ladder = None
     if o.ladder_db:
@@ -2539,6 +2827,7 @@ def main():
     sock.bind((o.bind, o.port))
     admins = [x.strip() for x in o.tournament_admins.split(",") if x.strip()] or None
     lobby = Lobby(sock, o.verbose, o.search_secs, o.match_secs, ladder, o.arena_streak, admins)
+    lobby.halls_on = not o.no_halls
     if o.relay_secret:
         with open(o.relay_secret, "rb") as f:
             lobby.relay_secret = f.read().strip()

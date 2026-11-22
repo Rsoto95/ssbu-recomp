@@ -1602,17 +1602,18 @@ void net_arena_get(NetArena *o) {
     o->making = (int)g_ar_making;
     if (!g_joined) o->known = 0;
 }
+static int hall_seat(void);                             /* (lobby 1.9) 0 at no station, 1 alone at one, 2 with a rival */
 int net_arena_turn(void) {
     AcquireSRWLockShared(&g_ar_lock);
     int t = g_ar_in && g_ar.known && (g_ar.status == NET_ARENA_TURN || g_ar.status == NET_ARENA_PLAYING);
     ReleaseSRWLockShared(&g_ar_lock);
-    return t;
+    return t || hall_seat() == 2;                       /* (a hall's full station: the match is searched now) */
 }
 int net_arena_queued(void) {
     AcquireSRWLockShared(&g_ar_lock);
     int q = g_ar_in && g_ar.known && g_ar.status != NET_ARENA_OUT;
     ReleaseSRWLockShared(&g_ar_lock);
-    return q;
+    return q || hall_seat() > 0;                        /* (seated in a hall: a Smash match waits for the rival) */
 }
 void net_arena_create(void) {
     if (!net_online()) return;
@@ -1631,6 +1632,167 @@ void net_arena_kick(const char *name) {
     ar_command(5, 3);
     say("arena: removing %s from the room", name);
 }
+/* ---------------------------------------------------------------- (2026-11-21, lobby 1.9) HALL: several pairs at once
+ * net_stats.h NetHall; tools/net/ssbu_lobby.py (HALL 41: cookie u64, op u8, argument u32, code[5]; HALL_STATE 42:
+ * hall_send). While this game asks to be in a hall, op 1 goes out every second with the hall's code (it enters, and the
+ * lobby answers with the state; the lobby also sends the state to every member at each change). A command (make,
+ * challenge, accept, decline, sit, stand, take back, leave) is sent 3 times, 300 ms apart: every one of them is harmless
+ * when it arrives twice. An older lobby never answers: `known` stays 0 and F1 says so. */
+#define T_HALL 41
+#define T_HALL_STATE 42
+static SRWLOCK g_hall_lock = SRWLOCK_INIT;
+static NetHall g_hall;                                  /* (g_hall_lock) the lobby's last HALL_STATE */
+static char g_hall_want[6];                             /* (g_hall_lock) the hall this game is in or asks for ("" = the one it makes) */
+static volatile LONG g_hall_in;                         /* this game asks to be in a hall */
+static volatile LONG g_hall_op, g_hall_op_left;         /* a command, sends left */
+static uint32_t g_hall_arg;
+static volatile LONG64 g_hall_rx;                       /* when the last HALL_STATE came */
+static uint64_t g_hall_tx;                              /* (client thread) */
+int gfx_hall(void);                                     /* gfx_options.c: hall = on (OFF by default): nothing below runs without it */
+static char g_hall_pick[24];                            /* (g_hall_lock) the fighter chosen in the hall's screen ("" none) */
+static volatile LONG64 g_hall_pick_chara;
+void net_hall_pick_set(const char *internal) {
+    uint64_t v = 0;
+    char nm[48];
+    AcquireSRWLockExclusive(&g_hall_lock);
+    snprintf(g_hall_pick, sizeof g_hall_pick, "%s", internal ? internal : "");
+    if (g_hall_pick[0]) {                               /* the game's hash of "ui_chara_<name>": crc32 | length << 32, in a 0xc1 id (debug_mode.c hash40) */
+        snprintf(nm, sizeof nm, "ui_chara_%s", g_hall_pick);
+        uint32_t crc = 0xffffffffu; size_t n = strlen(nm);
+        for (size_t i = 0; i < n; i++) { crc ^= (uint8_t)nm[i]; for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1))); }
+        v = 0xc100000000000000ull | ((uint64_t)n << 32) | (uint32_t)~crc;
+    }
+    ReleaseSRWLockExclusive(&g_hall_lock);
+    InterlockedExchange64(&g_hall_pick_chara, (LONG64)v);
+    say("hall: fighter for this player's matches: %s", internal && internal[0] ? internal : "(the one of the game's character select)");
+}
+const char *net_hall_pick(void) { static char out[24]; AcquireSRWLockShared(&g_hall_lock); memcpy(out, g_hall_pick, sizeof out); ReleaseSRWLockShared(&g_hall_lock); return out; }
+static int hall_seat(void);
+uint64_t net_hall_chara(void) { return hall_seat() ? (uint64_t)g_hall_pick_chara : 0; }
+const char *net_hall_name(const NetHall *h, uint32_t ip) {
+    for (int i = 0; ip && i < h->nmembers; i++) if (h->members[i].ip == ip) return h->members[i].name;
+    return "";
+}
+void net_hall_get(NetHall *o) {
+    AcquireSRWLockShared(&g_hall_lock);
+    *o = g_hall;
+    ReleaseSRWLockShared(&g_hall_lock);
+    o->asked = (int)g_hall_in;
+    o->me = g_ip;
+    if (!gfx_hall()) { memset(o, 0, sizeof *o); return; }
+    if (!g_joined || ms_now() - (uint64_t)g_hall_rx > 5000) o->known = 0;
+    if (!o->known || o->status != NET_HALL_IN) { o->state = NET_HP_FREE; o->station = 0; o->nmembers = o->nstations = 0; o->from = o->to = o->opp = 0; }
+}
+/* 0 = not in a hall (or halls off); 1 = in one, no rival yet (a Smash match started now WAITS: the player sits or challenges
+ * in the hall's screen meanwhile, owner 2026-11-21: "nothing outside that screen"); 2 = at a station with a rival */
+static int hall_seat(void) {
+    if (!gfx_hall() || !g_hall_in || !g_joined || ms_now() - (uint64_t)g_hall_rx > 5000) return 0;
+    AcquireSRWLockShared(&g_hall_lock);
+    int in = g_hall.known && g_hall.status == NET_HALL_IN, s = in ? g_hall.state : NET_HP_FREE;
+    ReleaseSRWLockShared(&g_hall_lock);
+    return !in ? 0 : s == NET_HP_MATCHED || s == NET_HP_PLAYING ? 2 : 1;
+}
+void net_hall_op(int op, uint32_t arg, const char *code) {
+    if (!net_online() || (!gfx_hall() && op != NET_HALL_LEAVE)) return;
+    if (op == NET_HALL_ENTER || op == NET_HALL_MAKE) {
+        AcquireSRWLockExclusive(&g_hall_lock);
+        memset(g_hall_want, 0, sizeof g_hall_want);
+        if (op == NET_HALL_ENTER && code) for (int k = 0; k < 5 && code[k]; k++) g_hall_want[k] = (char)toupper((unsigned char)code[k]);
+        g_hall.known = 0;
+        ReleaseSRWLockExclusive(&g_hall_lock);
+        InterlockedExchange(&g_hall_in, 1);
+        say("hall: %s%s", op == NET_HALL_MAKE ? "making a hall" : "entering the hall ", op == NET_HALL_MAKE ? "" : g_hall_want);
+        if (op == NET_HALL_ENTER) { g_hall_tx = 0; return; }
+    } else if (op == NET_HALL_LEAVE) {
+        InterlockedExchange(&g_hall_in, 0);
+        AcquireSRWLockExclusive(&g_hall_lock); memset(g_hall_want, 0, sizeof g_hall_want); g_hall.status = NET_HALL_OUT; ReleaseSRWLockExclusive(&g_hall_lock);
+        say("hall: leaving");
+    }
+    g_hall_arg = arg;
+    InterlockedExchange(&g_hall_op, op); InterlockedExchange(&g_hall_op_left, op == NET_HALL_MAKE ? 6 : 3);
+    g_hall_tx = 0;
+}
+static void hall_send(int op, uint32_t arg) {           /* (client thread) */
+    uint8_t p[4 + 8 + 1 + 4 + 5];
+    hdr(p, T_HALL);
+    s64(p + 4, g_cookie);
+    p[12] = (uint8_t)op;
+    s32(p + 13, arg);
+    AcquireSRWLockShared(&g_hall_lock); memcpy(p + 17, g_hall_want, 5); ReleaseSRWLockShared(&g_hall_lock);
+    tx(p, sizeof p, &g_lobby);
+}
+static void hall_tick(uint64_t t) {                     /* (client thread, joined) */
+    if (!gfx_hall() && g_hall_in) net_hall_op(NET_HALL_LEAVE, 0, "");      /* (turned off in F1 while in a hall: out of it) */
+    if (g_hall_op_left > 0) {
+        if (t - g_hall_tx >= 300) { hall_send((int)g_hall_op, g_hall_arg); g_hall_tx = t; InterlockedDecrement(&g_hall_op_left); }
+        return;
+    }
+    if (!g_hall_in || t - g_hall_tx < 1000) return;
+    AcquireSRWLockShared(&g_hall_lock); int have = g_hall_want[0] != 0; ReleaseSRWLockShared(&g_hall_lock);
+    if (!have) return;                                  /* (a hall being made: its code comes with the state) */
+    hall_send(1, 0);
+    g_hall_tx = t;
+}
+static void hall_name(char *out, const uint8_t *p) { memcpy(out, p, NAME_LEN); out[NAME_LEN] = 0; }
+static void hall_state(const uint8_t *p, int n) {       /* (client thread) a HALL_STATE body */
+    if (n < 91 || !gfx_hall()) return;
+    NetHall h, old;
+    memset(&h, 0, sizeof h);
+    h.known = 1; h.status = p[4];
+    memcpy(h.code, p + 5, 5);
+    h.state = p[10]; h.station = p[11]; h.opp = g32(p + 12); hall_name(h.opp_name, p + 16); h.secs = g16(p + 48);
+    h.from = g32(p + 50); hall_name(h.from_name, p + 54); h.to = g32(p + 86);
+    int o = 91, k = p[90];
+    for (int i = 0; i < k && o + 38 <= n; i++, o += 38) if (h.nmembers < 30) {
+        NetHallMember *m = &h.members[h.nmembers++];
+        m->ip = g32(p + o); hall_name(m->name, p + o + 4); m->state = p[o + 36]; m->station = p[o + 37];
+    }
+    if (o < n) { k = p[o++];
+        for (int i = 0; i < k && o + 14 <= n; i++, o += 14) if (h.nstations < 16) {
+            NetHallStation *s = &h.stations[h.nstations++];
+            s->number = p[o]; s->playing = p[o + 1]; s->p1 = g32(p + o + 2); s->p2 = g32(p + o + 6); s->w1 = g16(p + o + 10); s->w2 = g16(p + o + 12);
+        } }
+    if (!g_hall_in && h.status == NET_HALL_IN) return;  /* (a state of the hall this game just left) */
+    AcquireSRWLockExclusive(&g_hall_lock);
+    old = g_hall;
+    g_hall = h;
+    if (h.status == NET_HALL_IN) memcpy(g_hall_want, h.code, 6);
+    ReleaseSRWLockExclusive(&g_hall_lock);
+    InterlockedExchange64(&g_hall_rx, (LONG64)ms_now());
+    int was_in = old.known && old.status == NET_HALL_IN;
+    char t[256];
+    if (h.status == NET_HALL_IN && !was_in) {
+        if (g_hall_op == NET_HALL_MAKE) InterlockedExchange(&g_hall_op_left, 0);
+        say("hall %s: in it (%d player(s), %d station(s))", h.code, h.nmembers, h.nstations);
+        snprintf(t, sizeof t, "You are in the hall %s (%d player%s).\nF1 > Arena: sit at a station or challenge a player.", h.code, h.nmembers, h.nmembers == 1 ? "" : "s");
+        menu_popup("Hall", t);
+    } else if (h.status == NET_HALL_NONE || h.status == NET_HALL_FULL) {
+        if (g_hall_in) { InterlockedExchange(&g_hall_in, 0); say("hall: %s", h.status == NET_HALL_NONE ? "no hall with that code" : "no room in it");
+            menu_popup("Hall", h.status == NET_HALL_NONE ? "There is no hall with that code (it closes when everyone leaves)." : "That hall is full (or the lobby has too many halls)."); }
+    } else if (h.status == NET_HALL_OUT && was_in && g_hall_in && !g_hall_op_left) {
+        say("hall %s: the lobby does not have this game in it any more: entering again", old.code);     /* (a lobby that started again: op 1 goes on) */
+    }
+    if (h.status != NET_HALL_IN) return;
+    if (h.from && h.from != old.from) {
+        say("hall %s: %s challenges this player", h.code, h.from_name);
+        snprintf(t, sizeof t, "%s challenges you!\nF1 > Arena: Accept or Decline.", h.from_name);
+        menu_popup("Hall", t);
+    }
+    if (h.to == 0 && old.to && was_in && h.state == old.state && h.state != NET_HP_MATCHED) {
+        snprintf(t, sizeof t, "%s did not take your challenge.", net_hall_name(&old, old.to)[0] ? net_hall_name(&old, old.to) : "The other player");
+        menu_popup("Hall", t);
+    }
+    if (h.state == NET_HP_MATCHED && (!was_in || old.state == NET_HP_FREE || old.state == NET_HP_SEATED || old.opp != h.opp)) {
+        say("hall %s: station %d: the rival is %s", h.code, h.station, h.opp_name);
+        snprintf(t, sizeof t, "Station %d: your rival is %s.\nIn the game: Smash, choose your fighter and start.\nThe match begins when both have.", h.station, h.opp_name);
+        menu_popup("Hall", t);
+    } else if (h.state == NET_HP_SEATED && was_in && (old.state == NET_HP_MATCHED || old.state == NET_HP_PLAYING)) {
+        snprintf(t, sizeof t, "%s left station %d. You keep the seat: the next rival sits there.", old.opp_name[0] ? old.opp_name : "Your rival", h.station);
+        menu_popup("Hall", t);
+    } else if (h.state == NET_HP_FREE && was_in && old.state != NET_HP_FREE) say("hall %s: at no station now", h.code);
+    else if (h.state == NET_HP_PLAYING && old.state != NET_HP_PLAYING) say("hall %s: station %d: playing against %s", h.code, h.station, h.opp_name);
+}
+
 static void arena_send(int op) {                        /* (client thread) */
     uint8_t p[4 + 8 + 1 + NAME_LEN];
     int n = 13;
@@ -2309,6 +2471,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         if (g_joined && t - (uint64_t)g_rooms_wanted < 5000 && t - g_rooms_sent >= 2000) rooms_ask(t);     /* O1: while someone looks */
         if (g_joined) mm_tick(t);                                                                         /* O2 */
         if (g_joined) ladder_tick(t);                                                                     /* ladder: a match result until acknowledged */
+        if (g_joined) hall_tick(t);                                                                       /* hall (lobby 1.9) */
         if (g_joined) arena_tick(t);                                                                      /* arena (lobby 1.6) */
         if (g_joined) rbf_tick(t);                                                                        /* the second port of a rollback match */
         struct sockaddr_in from;
@@ -2363,6 +2526,9 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             break;
         case T_MATCH_STATE:
             if (n >= 4 + 49 && g_joined) mm_state(buf + 4, n - 4, ms_now());
+            break;
+        case T_HALL_STATE:
+            if (g_joined) hall_state(buf + 4, n - 4);
             break;
         case T_ARENA_STATE:
             if (g_joined) arena_state(buf + 4, n - 4);

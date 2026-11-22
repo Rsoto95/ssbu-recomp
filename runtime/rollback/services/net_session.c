@@ -383,7 +383,8 @@ static int hs_stop_pressed(double waited_ms) {
     HWND fg = GetForegroundWindow(); DWORD pid = 0;
     if (fg) GetWindowThreadProcessId(fg, &pid);
     if (pid == GetCurrentProcessId() && (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) down = 1;
-    if (waited_ms > 500 && (nnhid_menu_buttons() & 2)) down = 1;
+    {   int menu_hall_screen_open(void);                /* (2026-11-21) B in the hall's screen closes that screen, it does not end the wait */
+        if (waited_ms > 500 && (nnhid_menu_buttons() & 2) && !menu_hall_screen_open()) down = 1; }
     ULONGLONG now = GetTickCount64();
     if (!down) { since = 0; return 0; }
     if (!since) since = now;
@@ -407,6 +408,7 @@ static void hs_stage_rule(RbhMatch *m, const RbhMatch *peer) {
            (unsigned long long)js, *(const uint32_t *)(peer->stage + 8), e && *e ? e : "random", joiner ? "joiner" : "host", valid ? "" : " (the joiner's is not a stage entry)");
     fflush(stdout);
 }
+int rbn_hs_waiting(void) { return g_hs_waiting != 0; }     /* (menu.cpp: the hall's screen opens while the game waits here) */
 int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     if (!rbn_handshake_wanted() || rbn_on() <= 0 || g_loop) return 0;
     LONG round = InterlockedIncrement(&g_hs_round);
@@ -549,6 +551,8 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     for (;;) {
         uint64_t now = GetTickCount64();
         if (g_hs_refused) break;
+        {   uint64_t hc = find ? net_hall_chara() : 0;      /* (2026-11-21) a hall: the fighter chosen in its screen, until the match is agreed */
+            if (hc && hc != mine->chara[0] && !g_hs_have_prop) { ((RbhMatch *)mine)->chara[0] = hc; printf("[rbnet] handshake %ld: hall: this player's fighter is the one chosen in the hall's screen (ui_chara %016llx)\n", (long)round, (unsigned long long)hc); fflush(stdout); } }
         if (ar_wait) {                                  /* (room) waiting for the turn */
             if (!net_arena_queued()) { snprintf(g_hs_why, sizeof g_hs_why, "you are not in the room's queue any more"); break; }
             if (net_arena_turn()) { ar_wait = 0; t0 = now; net_match_find_rb(); printf("[rbnet] handshake %ld: the room's turn came: asking the lobby for the opponent of the turn\n", (long)round); fflush(stdout); }
@@ -632,14 +636,20 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             char t[400]; double w = (now - t0) / 1000.0;
             char line[200];
             NetArena ra; if (find) net_arena_get(&ra); else memset(&ra, 0, sizeof ra);
-            if (ar_wait) {                               /* (room) what the player sees while it waits for the turn */
+            NetHall rh; if (find) net_hall_get(&rh); else memset(&rh, 0, sizeof rh);
+            if (ar_wait && rh.known && rh.status == NET_HALL_IN) {      /* (2026-11-21) in a hall with no rival yet */
+                if (rh.station) snprintf(t, sizeof t, "Hall %s, station %d: waiting for a rival to sit down.\nYour match starts by itself.\nHold B to stop waiting.", rh.code, rh.station);
+                else snprintf(t, sizeof t, "Hall %s: sit at a station or challenge a player (Capture / F3 opens the hall).\nYour match starts by itself.\nHold B to stop waiting.", rh.code);
+                menu_notice(t);
+            } else if (ar_wait) {                        /* (room) what the player sees while it waits for the turn */
                 char now_on[120] = "";
                 if (ra.has_match) snprintf(now_on, sizeof now_on, "\nNow playing: %s vs %s.", ra.match[0].name, ra.match[1].name);
                 snprintf(t, sizeof t, "%s's room: waiting for your turn (place %d in the queue).%s\nKeep this screen: your match starts by itself when it is your turn.\nPress Esc or hold B to stop waiting.",
                          ra.host[0] ? ra.host : "The", ra.place, now_on);
                 menu_notice(t);
             } else {
-            if (phase == 0 && ra.known && ra.status != NET_ARENA_OUT) snprintf(line, sizeof line, "Your turn in the room: starting your match against %s...", ra.opponent);
+            if (phase == 0 && rh.known && rh.status == NET_HALL_IN && rh.station && rh.opp) snprintf(line, sizeof line, "Hall %s, station %d: starting your match against %s (waiting for their game)...", rh.code, rh.station, rh.opp_name);
+            else if (phase == 0 && ra.known && ra.status != NET_ARENA_OUT) snprintf(line, sizeof line, "Your turn in the room: starting your match against %s...", ra.opponent);
             else if (phase == 0) snprintf(line, sizeof line, !net_rb_ready() ? "Online match: connecting to the lobby..." : mm.searching > 0 ? "Online match: finding an opponent (%d of %d players of your version searching)..." : "Online match: finding an opponent...", mm.searching, mm.players);
             else if (lwr && g_rbs_need) snprintf(line, sizeof line, "Battle Arena: agreeing on a rollback match with the other fighter and the spectators (%d of %d ready)...", rbs_popc(g_rbs_seats), (int)g_rbs_need);
             else if (lwr) snprintf(line, sizeof line, "Room match: agreeing on a rollback match with the other player...");

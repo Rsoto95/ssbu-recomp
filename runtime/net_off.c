@@ -41,6 +41,12 @@ void net_arena_get(NetArena *o) { memset(o, 0, sizeof *o); }            /* (aren
 void net_arena_join(int in) { (void)in; }
 int net_arena_turn(void) { return 0; }
 int net_arena_queued(void) { return 0; }
+void net_hall_get(NetHall *out) { memset(out, 0, sizeof *out); }
+void net_hall_op(int op, uint32_t arg, const char *code) { (void)op; (void)arg; (void)code; }
+const char *net_hall_name(const NetHall *h, uint32_t ip) { (void)h; (void)ip; return ""; }
+void net_hall_pick_set(const char *internal) { (void)internal; }
+const char *net_hall_pick(void) { return ""; }
+uint64_t net_hall_chara(void) { return 0; }
 void net_arena_create(void) {}
 void net_arena_close(void) {}
 void net_arena_kick(const char *name) { (void)name; }

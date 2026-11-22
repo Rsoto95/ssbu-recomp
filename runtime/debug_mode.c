@@ -553,6 +553,8 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         RbhMatch me; memset(&me, 0, sizeof me);
         uint32_t cur = rd32(GA(0x7105309968ULL)); uint64_t sel = GA(0x71053097c0ULL) + 0x20ull * (cur < 3 ? cur : 0);
         me.chara[0] = rd64(st + 0x88); me.colour[0] = rd8(st + 0x90); me.has_layout[0] = (uint8_t)hs_layout(st, me.layout[0]);
+        {   uint64_t net_hall_chara(void); uint64_t hc = net_hall_chara();      /* (2026-11-21) in a hall: the fighter chosen in its screen (0: none, or halls off) */
+            if (hc) { printf("[rbnet] hall: this player's fighter %016llx of the character select replaced by the hall's choice %016llx\n", (unsigned long long)me.chara[0], (unsigned long long)hc); fflush(stdout); me.chara[0] = hc; } }
         safe_read(sel, me.stage, sizeof me.stage);
         me.hazards = rd8(GA(0x7105309985ULL)); me.items = rd32(MELEE_INFO + 0x54); me.rule_kind = rd8(st + 5); me.stock = rd8(st + 0xa);
         me.ctx_seed = rd32(GA(0x710530d380ULL)); safe_read(GA(0x71050c5ad0ULL), me.ctx_hist, sizeof me.ctx_hist); safe_read(MELEE_INFO + 0x420, me.ctx_stage, sizeof me.ctx_stage); safe_read(MELEE_INFO + 0x4d0, me.ctx_rules, sizeof me.ctx_rules);   /* (hs12) the stage set-up's inputs (rb_hs.h) */

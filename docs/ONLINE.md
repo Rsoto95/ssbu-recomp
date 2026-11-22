@@ -29,6 +29,29 @@ host leaves; the sala and its code stay (10 minutes with nobody in it). The scor
 station. Players in no sala see the arenas of no sala, as before. Server only: `tools/net/nex_server.py`
 (test: `tools/net/test_nex_sala.py`); the lobby is unchanged.
 
+**Halls** (2026-11-21, lobby 1.9, not yet tried with games; OFF by default: graphics.ini `hall = on`, F1 > Arena, or
+`SSBU_HALL=1`; while it is off nothing of it is sent, shown or asked and every other online path is as without it; the
+lobby's `--no-halls` turns its side off): a room of the port's own where several pairs play at the same
+time, without the game's Online menu: the matches are Smash (versus) with rollback, through the lobby, so a player whose
+router keeps it out of Battle Arenas can play too, and nothing closes when the one who made it leaves. F1 > Arena > Hall:
+**Make a hall** gives a 5-character code, **Enter the hall** takes a friend's. Inside, a hall has **stations** of two
+players: **Sit at a station** (you wait there for a rival; **Sit here** takes the seat in front of a waiting player), or
+**Challenge** a free player, who gets Accept / Decline (30 s); two who accept sit at a new station. The two of a station
+then go to Smash, choose their fighters and start: their games find each other by themselves, and several stations play
+at once. After a match both stay seated (start again for a rematch; the station keeps their score) until one presses
+**Stand up**. The hall has a screen of its own over the game, driven with the controller (stations with their two seats on
+the left, the players on the right, the challenge to answer or what to do next under them): it opens by itself when the
+player enters a hall and when a challenge comes, and with Capture / Share, F3 or - held for 1 s; A sits or challenges (or
+accepts), B closes (or declines), Y stands up, X takes a challenge back, - twice leaves the hall. F1 > Arena has the same
+actions. While both are closed a small box over the game shows the stations and scores. Not done yet: watching another
+station's match. The fighter can be chosen in the hall's screen (X: a list of names; no Mii fighters or Random; the ones
+with * need their add-on content): it replaces this player's fighter of the character select when the match is set up.
+A Smash match started while in a hall WAITS for the hall's match (no time limit, the hall's screen opens over it): so the
+player goes through the game's menus once (Smash > any fighter > start), then sits, challenges and plays from the hall's
+screen; after each match it presses start again at the character select to wait for the next one. Server:
+`tools/net/ssbu_lobby.py` (HALL 41 / HALL_STATE 42; test: `tools/net/test_lobby_hall.py`); game: `runtime/net_relay.c`
+(hall_*), `runtime/menu.cpp` (sec_hall, draw_hall).
+
 Online play is experimental and ON by default: the game joins the project's public lobby
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).
