@@ -46,9 +46,24 @@ accepts), B closes (or declines), Y stands up, X takes a challenge back, - twice
 actions. While both are closed a small box over the game shows the stations and scores. Not done yet: watching another
 station's match. The fighter can be chosen in the hall's screen (X: a list of names; no Mii fighters or Random; the ones
 with * need their add-on content): it replaces this player's fighter of the character select when the match is set up.
-A Smash match started while in a hall WAITS for the hall's match (no time limit, the hall's screen opens over it): so the
-player goes through the game's menus once (Smash > any fighter > start), then sits, challenges and plays from the hall's
-screen; after each match it presses start again at the character select to wait for the next one. Server:
+A Smash match started while in a hall WAITS for the hall's match (no time limit, the hall's screen opens over it), and
+(2026-11-22) the matches start from the hall's screen: nothing but the game's own screens starts a fight, so the port
+presses their buttons itself (`runtime/nnhid.c`, "the hall's pilot": only with hall = on, as player 1, the real pads off
+meanwhile). **+ (Get ready)** at the game's main menu: Smash > Smash > the rules under the cursor > + on the stage select
+> on the character select hand up and left, A, A; the game is then held in the match's handshake and the match starts the
+moment the rival is there (about 20 s from the main menu). After a match the pilot presses A through the results and does
+the same again (about 25 s to the next fight), and the two of a station play again only when each pressed **A: Rematch**
+in the hall's screen (Y stands up); a new rival needs no word. The fighter is the one of the hall's screen (asked for
+before anything else; the pilot's own pick on the character select is never used). The pilot knows a screen only by the
+change of screen before it (black or loading frames, then a still screen), not by its draw count; it stops when the game
+is held in the handshake, when a fight begins, after 75 s, or when the match did not start (then a box says to do it by
+hand: Smash > any fighter > start). The stage is the one + gives on the stage select. Test (two games and a lobby on one
+PC, 2026-11-22): six matches in a row with no hand on either game, 0 desyncs. NOT tested: other saves and rules (rules
+without a stage select, custom orders of the screens), "Get ready" from the select screens after a wait was stopped, a
+rival that stands up while the other waits. The same test showed why a second match by hand did not start before: the A's
+given to port 2 on the results screen went on into the character select (the select screen's opening did not end them in
+this flow), so the A that picks the fighter made a second player join there; the pilot ends them when the results are
+over. Server:
 `tools/net/ssbu_lobby.py` (HALL 41 / HALL_STATE 42; test: `tools/net/test_lobby_hall.py`); game: `runtime/net_relay.c`
 (hall_*), `runtime/menu.cpp` (sec_hall, draw_hall).
 

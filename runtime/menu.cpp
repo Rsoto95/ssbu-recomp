@@ -1980,19 +1980,20 @@ static void hall_screen_tick(uint64_t b, uint64_t down) {
     static int was_in; static uint32_t from_seen; static ULONGLONG minus_t0; static int minus_done;
     int toggle = 0;
     for (LONG t = InterlockedExchange(&g_hall_req, 0); t > 0; t--) toggle ^= 1;
-    static int was_wait;
-    int wait = in && rbn_hs_waiting();
+    static int was_wait, was_pilot;
+    int wait = in && rbn_hs_waiting(), pilot = in ? nnhid_pilot_on() : 0;
     if (!g_open && !g_hall_open && in && !fight) {
         if (!was_in) hall_screen_show(1, "entered a hall");
         else if (h.from && h.from != from_seen) hall_screen_show(1, "a challenge came");
         else if (wait && !was_wait) hall_screen_show(1, "the game waits for this player's match");
+        else if (pilot == 2 && was_pilot != 2) hall_screen_show(1, "the game gets ready by itself");
         if (b == BIT(B_MINUS)) {                          /* - alone, held for 1 s */
             ULONGLONG now = GetTickCount64();
             if (!minus_t0) minus_t0 = now;
             else if (!minus_done && now - minus_t0 >= 1000) { minus_done = 1; hall_screen_show(1, "- held for 1 s"); down = 0; }
         } else { minus_t0 = 0; minus_done = 0; }
     }
-    was_in = in; from_seen = in ? h.from : 0; was_wait = wait;
+    was_in = in; from_seen = in ? h.from : 0; was_wait = wait; was_pilot = pilot;
     if (toggle) { if (g_hall_open) hall_screen_show(0, "asked"); else if (in && !g_open && !fight) { hall_screen_show(1, "asked"); down = 0; } }
     if (g_hall_open && (!in || g_open || fight)) hall_screen_show(0, !in ? "not in a hall any more" : fight ? "an online fight began" : "F1 opened");
     if (!g_hall_open) { g_hs_pick_open = 0; return; }
@@ -2006,7 +2007,6 @@ static void hall_screen_tick(uint64_t b, uint64_t down) {
         g_hs_pick_at = r * HALL_PICK_COLS + c;
         if (g_hs_pick_at >= HALL_FIGHTERS) g_hs_pick_at = HALL_FIGHTERS - 1;
         if (down & BIT(B_A)) { net_hall_pick_set(k_hall_fighters[g_hs_pick_at].id); printf("menu: hall screen: fighter %s\n", k_hall_fighters[g_hs_pick_at].id); fflush(stdout); g_hs_pick_open = 0; }
-        else if (down & BIT(B_Y)) { net_hall_pick_set(""); printf("menu: hall screen: no fighter chosen here\n"); fflush(stdout); g_hs_pick_open = 0; }
         else if (down & (BIT(B_B) | BIT(B_X))) g_hs_pick_open = 0;
         return;
     }
@@ -2015,6 +2015,11 @@ static void hall_screen_tick(uint64_t b, uint64_t down) {
         else if (down & BIT(B_B)) { net_hall_op(NET_HALL_DECLINE, h.from, ""); printf("menu: hall screen: challenge of %s declined\n", h.from_name); fflush(stdout); }
         return;
     }
+    if (!net_hall_pick()[0] && (down & (BIT(B_A) | BIT(B_PLUS)))) { g_hs_pick_open = 1; printf("menu: hall screen: no fighter chosen yet: the list first%c", 10); fflush(stdout); return; }      /* (2026-11-22) the game's own character select is not seen any more: the fighter is chosen here, before anything else */
+    if (h.state == NET_HP_MATCHED && !net_hall_ready()) {      /* (2026-11-22) after a match: the rematch, or up from the station */
+        if (down & BIT(B_A)) { net_hall_ready_set(1); printf("menu: hall screen: rematch against %s\n", h.opp_name); fflush(stdout); down &= ~BIT(B_A); }
+    }
+    if ((down & BIT(B_PLUS)) && !rbn_hs_waiting() && !pilot && h.state != NET_HP_PLAYING) { net_hall_get_ready(); printf("menu: hall screen: get ready asked\n"); fflush(stdout); }
     int rows[2] = {hall_slot_count(&h), h.nmembers};
     if (down & (BIT(B_LEFT) | BIT(B_RIGHT))) g_hs_col = !g_hs_col;
     if (!rows[g_hs_col]) g_hs_col = 0;
@@ -2168,15 +2173,19 @@ static void draw_hall_screen(void) {
             l2 = "You may press B and start a Smash match already:"; l3 = "it begins by itself when a rival sits here."; }
         else { l1 = "You are at no station."; l2 = "Choose a station and press A to sit,"; l3 = "or choose a free player and press A to challenge."; }
         if (h.to) { snprintf(a, sizeof a, "You challenged %s: waiting for the answer...", net_hall_name(&h, h.to)); l1 = a; l2 = "A on that player again takes it back."; l3 = ""; }
-        if (!rbn_hs_waiting() && h.state != NET_HP_PLAYING) {      /* the game is not waiting for a hall match: once, by hand */
-            l2 = "First, once: press B, then in the game Smash > any fighter > start.";
-            l3 = "The game then waits here and your matches start by themselves."; }
+        int pilot = nnhid_pilot_on(), ready = rbn_hs_waiting();
+        if (h.state == NET_HP_MATCHED && ready) { l2 = "Your match starts when both games are ready."; l3 = ""; }
+        if (h.state == NET_HP_MATCHED && !net_hall_ready()) { snprintf(a, sizeof a, "Rematch against %s?", h.opp_name); l1 = a; l2 = "A: rematch.   Y: stand up."; l3 = pilot ? "(the game is getting ready meanwhile)" : ""; }
+        else if (pilot) { l2 = "The game is getting ready by itself..."; l3 = "Your matches then start from this screen."; }
+        else if (!ready && h.state != NET_HP_PLAYING) {      /* the game is not waiting for a hall match */
+            l2 = "Press + at the game's main menu: the game gets ready by itself.";
+            l3 = "(or by hand: B, then Smash > any fighter > start)"; }
         if (g_hs_leave_t && GetTickCount64() - g_hs_leave_t < 2500) { l1 = "Leave the hall?"; l2 = "Press - again to leave."; l3 = ""; }
         hs_fit(cut, sizeof cut, f, ls, cw * 0.92f, l1); dl->AddText(f, ls, ImVec2(ix, iy), h.state == NET_HP_FREE ? white : gold, cut);
         hs_fit(cut, sizeof cut, f, ss, cw * 0.92f, l2); dl->AddText(f, ss, ImVec2(ix, iy + H * 0.062f), white, cut);
         hs_fit(cut, sizeof cut, f, ss, cw * 0.92f, l3); dl->AddText(f, ss, ImVec2(ix, iy + H * 0.1f), white, cut);
         char fl[96]; const char *pn = hall_pick_name();
-        snprintf(fl, sizeof fl, "Your fighter: %s", pn[0] ? pn : "the one chosen in the game (X: choose here)");
+        snprintf(fl, sizeof fl, "Your fighter: %s", pn[0] ? pn : "none yet (X: choose)");
         hs_fit(cut, sizeof cut, f, ss, cw * 0.92f, fl); dl->AddText(f, ss, ImVec2(ix, iy + H * 0.155f), pn[0] ? gold : dim, cut);
     }
     if (g_hs_pick_open && !h.from) {                     /* ---- the fighter list, over everything */
@@ -2184,7 +2193,7 @@ static void draw_hall_screen(void) {
         dl->AddRectFilled(p0, p1, IM_COL32(14, 12, 34, 250));
         dl->AddRect(p0, p1, white, 0.0f, 0, H * 0.004f);
         dl->AddText(f, H * 0.034f, ImVec2(p0.x + W * 0.02f, p0.y + H * 0.012f), gold, "Choose your fighter");
-        dl->AddText(f, H * 0.02f, ImVec2(p0.x + W * 0.02f, p1.y - H * 0.036f), dim, "* add-on fighters: only if you have that content.   A: choose   Y: none (the game's character select)   B: back");
+        dl->AddText(f, H * 0.02f, ImVec2(p0.x + W * 0.02f, p1.y - H * 0.036f), dim, "* add-on fighters: only if you have that content.   A: choose   B: back");
         int rows_ = (HALL_FIGHTERS + HALL_PICK_COLS - 1) / HALL_PICK_COLS;
         float gx = p0.x + W * 0.02f, gy = p0.y + H * 0.065f, gw = (p1.x - p0.x - W * 0.04f) / HALL_PICK_COLS, gh = (p1.y - gy - H * 0.045f) / rows_;
         const char *cur = net_hall_pick();
@@ -2203,7 +2212,9 @@ static void draw_hall_screen(void) {
     float bx = x0, by = H * 0.948f, bs = H * 0.026f;
     if (h.from) { hs_button(dl, f, bs, &bx, by, "A", "Accept"); hs_button(dl, f, bs, &bx, by, "B", "Decline"); }
     else {
-        hs_button(dl, f, bs, &bx, by, "A", g_hs_col == 0 ? "Sit" : "Challenge");
+        int rematch = h.state == NET_HP_MATCHED && !net_hall_ready();
+        hs_button(dl, f, bs, &bx, by, "A", rematch ? "Rematch" : g_hs_col == 0 ? "Sit" : "Challenge");
+        if (!rbn_hs_waiting() && !nnhid_pilot_on() && h.state != NET_HP_PLAYING) hs_button(dl, f, bs, &bx, by, "+", "Get ready");
         hs_button(dl, f, bs, &bx, by, "B", "Close");
         if (h.state != NET_HP_FREE) hs_button(dl, f, bs, &bx, by, "Y", "Stand up");
         hs_button(dl, f, bs, &bx, by, "X", "Fighter");

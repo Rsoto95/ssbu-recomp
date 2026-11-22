@@ -540,6 +540,9 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     AcquireSRWLockExclusive(&g_hs_lock);
     do g_hs_nonce = (uint32_t)hs_rand(); while (!g_hs_nonce);
     g_hs_peer_nonce = 0; g_hs_have_peer = g_hs_have_prop = 0; g_hs_accepted = g_hs_refused = 0; g_hs_why[0] = 0; g_hs_cancelled = 0; g_hs_delay = 0;
+    int hall = 0;                                       /* (2026-11-22) a hall member's match: the game stays here from match to match */
+    {   int net_hall_member(void), nnhid_pilot_on(void); void net_hall_parked(uint64_t chara, int by_pilot);
+        if (find && !arena && net_hall_member()) { hall = 1; net_hall_parked(mine->chara[0], nnhid_pilot_on()); } }
     g_hs_waiting = 1;
     ReleaseSRWLockExclusive(&g_hs_lock);
     if (find) printf("[rbnet] handshake %ld: no room code and no Local Wireless room: asking the lobby for an opponent who starts a rollback match too; own choice ui_chara %016llx colour %d (at most %.0f s; nonce %08x)\n", (long)round,
@@ -557,6 +560,11 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             if (!net_arena_queued()) { snprintf(g_hs_why, sizeof g_hs_why, "you are not in the room's queue any more"); break; }
             if (net_arena_turn()) { ar_wait = 0; t0 = now; net_match_find_rb(); printf("[rbnet] handshake %ld: the room's turn came: asking the lobby for the opponent of the turn\n", (long)round); fflush(stdout); }
         }
+        if (hall && phase == 0 && !ar_wait && !net_arena_turn()) {      /* (2026-11-22) the rival stood up, or the rematch is not said yet: wait again */
+            net_match_get(&mm); if (mm.kind == 2 && (mm.state == MM_ASKING || mm.state == MM_SEARCHING || mm.state == MM_MATCHED)) net_match_cancel();
+            ar_wait = 1; printf("[rbnet] handshake %ld: hall: no rival at the station (or no rematch yet): waiting again\n", (long)round); fflush(stdout);
+        }
+        if (hall && phase == 0 && !ar_wait && (double)(now - t0) > limit) { t0 = now; net_match_find_rb(); printf("[rbnet] handshake %ld: hall: the rival's game is not searching yet: asking the lobby again\n", (long)round); fflush(stdout); }
         if (!ar_wait && (double)(now - t0) > limit) { snprintf(g_hs_why, sizeof g_hs_why, phase ? "no answer from the other player after %.0f s" : "no opponent found in %.0f s", limit / 1000.0); break; }
         if (hs_stop_pressed((double)(now - t0))) { snprintf(g_hs_why, sizeof g_hs_why, "stopped waiting (Esc / B) after %.0f s", (now - t0) / 1000.0); stopped = 1; break; }
         if (phase == 0 && !ar_wait) {                   /* (R3 net3) the lobby's opponent search */
@@ -569,6 +577,9 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
                 printf("[rbnet] handshake %ld: the lobby found an opponent after %.1f s: %s (10.13.%u.%u); this game is the %s\n", (long)round, (now - t0) / 1000.0, mm.peer_name, mm.peer >> 8 & 255, mm.peer & 255, want ? "joiner (player 2)" : "host (player 1)");
                 fflush(stdout);
                 phase = 1; t0 = now; last_note = 0;
+            } else if (hall && (mm.state == MM_TIMEOUT || mm.state == MM_PEER_LEFT || mm.state == MM_EXPIRED)) {      /* (2026-11-22) a hall: the search is made again, the game stays here */
+                printf("[rbnet] handshake %ld: hall: the lobby's search ended (state %d): %s\n", (long)round, (int)mm.state, net_arena_turn() ? "asking again" : "waiting for a rival again"); fflush(stdout);
+                t0 = now; if (net_arena_turn()) net_match_find_rb(); else ar_wait = 1;
             } else if (mm.state == MM_TIMEOUT || mm.state == MM_OLD_LOBBY || mm.state == MM_PEER_LEFT || mm.state == MM_EXPIRED || mm.state == MM_OFFLINE || (mm.kind != 2 && mm.state != MM_ASKING)) {
                 snprintf(g_hs_why, sizeof g_hs_why, "%s", mm.state == MM_TIMEOUT ? "no opponent found in time (nobody with your version and mods searched)" :
                          mm.state == MM_OLD_LOBBY ? "the lobby server is an older version (it cannot find rollback opponents): use a room code" :

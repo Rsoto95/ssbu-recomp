@@ -47,6 +47,12 @@ const char *net_hall_name(const NetHall *h, uint32_t ip) { (void)h; (void)ip; re
 void net_hall_pick_set(const char *internal) { (void)internal; }
 const char *net_hall_pick(void) { return ""; }
 uint64_t net_hall_chara(void) { return 0; }
+int net_hall_member(void) { return 0; }
+void net_hall_get_ready(void) { }
+int net_hall_ready(void) { return 1; }
+void net_hall_ready_set(int on) { (void)on; }
+void net_hall_match_over(void) { }
+void net_hall_parked(uint64_t chara, int by_pilot) { (void)chara; (void)by_pilot; }
 void net_arena_create(void) {}
 void net_arena_close(void) {}
 void net_arena_kick(const char *name) { (void)name; }

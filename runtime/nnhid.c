@@ -180,6 +180,14 @@ static void seq_tick(void) {                              /* once per poll of pl
         if (every > 0 && g_seq_polls % every == 0) printf("input sequence: poll %lld: %ld draws\n", (long long)g_seq_polls, g_frame_draws_seen);
     }
     if (g_seq_index >= g_seq_count) return;
+    if (g_seq[g_seq_index].kind == SEQ_MARK && !strcmp(g_seq[g_seq_index].mark, "hall")) {      /* (test aid) @hall: wait until this game is in a hall */
+        int net_hall_member(void); if (net_hall_member()) { printf("input sequence: poll %lld step %d: in a hall" "%c", (long long)g_seq_polls, g_seq_index, 10); seq_begin(g_seq_index + 1); }
+        return;
+    }
+    if (g_seq[g_seq_index].kind == SEQ_MARK && !strncmp(g_seq[g_seq_index].mark, "pilot:", 6)) {      /* (test aid) @pilot:<mode>: the hall's pilot (below) */
+        void nnhid_pilot(int mode); nnhid_pilot(atoi(g_seq[g_seq_index].mark + 6)); seq_begin(g_seq_index + 1);
+        return;
+    }
     if (g_seq[g_seq_index].kind == SEQ_MARK) {
         if (mark_seen(g_seq[g_seq_index].mark)) { printf("input sequence: poll %lld step %d: %s seen\n", (long long)g_seq_polls, g_seq_index, g_seq[g_seq_index].mark); seq_begin(g_seq_index + 1); }
         return;
@@ -245,6 +253,84 @@ static int seq_key(int vk) {
     for (const char *k = g_seq[g_seq_index].keys; *k; k++) if (script_vk(*k) == vk) return 1;
     return 0;
 }
+/* ---------------------------------------------------------------- (2026-11-22) THE HALL'S PILOT
+ * (owner: "the fights have to start from the hall's screen") Nothing starts a fight but the game's own screens, so in a hall
+ * (graphics.ini hall = on; never without it) the port presses the buttons of those screens itself, as player 1, until the
+ * game is held in the match's handshake (rbn_hs_waiting: "parked"); from there the hall's match starts the moment the rival
+ * is there. Three starts (nnhid_pilot): 1 = a hall's match just ended: A through the results; 2 = from the main menu:
+ * Smash > Smash > the rules; 3 = from the stage or character select. Then, for every new screen (the black or loading
+ * frames of the change, then more than 60 draws per frame for 40 polls: no draw count of a particular screen, they differ
+ * from save to save): hand up and left, A (a stage on the stage select, a fighter on the character select; the hall's
+ * match takes the fighter of the hall's screen anyway), A, A, +. While it runs the real pads and keyboard do not reach the
+ * game. It ends when the game is parked, when a fight begins, when the player is in no hall any more, or after 75 s. */
+int rbn_hs_waiting(void), gfx_hall(void), net_hall_member(void), dm_fight_on(void);
+void menu_popup(const char *title, const char *text);
+enum { PL_OFF = 0, PL_RESULTS, PL_MAIN1, PL_MAIN2, PL_RULES, PL_SETTLE, PL_STAGE, PL_UP, PL_LEFT, PL_PICK, PL_A1, PL_PLUS, PL_WAIT };
+static volatile LONG g_pilot_req, g_pilot_state;
+static int g_pilot_n, g_pilot_run, g_pilot_gap, g_pilot_vk, g_pilot_hold, g_pilot_fight, g_pilot_rounds;
+static ULONGLONG g_pilot_t0;
+void nnhid_pilot(int mode) { InterlockedExchange(&g_pilot_req, mode); }      /* any thread: 1 / 2 / 3 start (above), -1 stop */
+int nnhid_pilot_on(void) { LONG s = g_pilot_state; return g_pilot_req > 0 || s == PL_RESULTS ? 1 : s ? 2 : 0; }      /* 1: through the results, 2: the menus */
+static void pilot_go(int st) { InterlockedExchange(&g_pilot_state, st); g_pilot_n = 0; g_pilot_run = 0; }
+static void pilot_press(int vk, int hold) {
+    g_pilot_vk = vk; g_pilot_hold = hold;
+    {   static int shots; void nvn_front_shot_step(int step);      /* (test aid, SSBU_SHOT_STEPS=1: the frame of every press, step_5xx.bmp) */
+        nvn_front_shot_step(500 + shots); printf("hall pilot: press %d for %d polls in state %d (poll %lld, %ld draws; picture %d)%c", vk, hold, (int)g_pilot_state, (long long)g_seq_polls, g_frame_draws_seen, 500 + shots, 10); shots++; }
+}
+static void pilot_end(const char *why, int tell) {
+    printf("hall pilot: ended after %.1f s (%s) at poll %lld, %ld draws\n", (GetTickCount64() - g_pilot_t0) / 1000.0, why, (long long)g_seq_polls, g_frame_draws_seen); fflush(stdout);
+    InterlockedExchange(&g_pilot_state, PL_OFF); g_pilot_vk = 0; g_pilot_hold = 0;
+    if (tell) menu_popup("Hall", "The game could not get ready by itself.\nGo to Smash, choose a fighter and press start: it then waits for your hall's matches.");
+}
+static void pilot_tick(void) {                           /* once per poll of player 1 */
+    LONG req = InterlockedExchange(&g_pilot_req, 0);
+    if (req < 0 && g_pilot_state) { pilot_end("stopped", 0); return; }
+    if (req > 0 && gfx_hall()) {
+        g_pilot_t0 = GetTickCount64(); g_pilot_vk = 0; g_pilot_hold = 0; g_pilot_fight = 0; g_pilot_rounds = 0;
+        g_pilot_gap = 0;
+        g_pilot_rounds = req == 3;                      /* (1: the stage select is behind) */
+        pilot_go(req == 1 ? PL_RESULTS : req == 2 ? PL_MAIN1 : PL_PLUS);
+        printf("hall pilot: started (%s) at poll %lld, %ld draws\n", req == 1 ? "a hall's match is over: through the results" : req == 2 ? "from the main menu" : "from the select screens", (long long)g_seq_polls, g_frame_draws_seen); fflush(stdout);
+    }
+    if (!g_pilot_state) return;
+    if (g_pilot_hold > 0 && --g_pilot_hold == 0) g_pilot_vk = 0;
+    if (rbn_hs_waiting()) { pilot_end("the game waits for the hall's match", 0); return; }
+    if (!gfx_hall() || !net_hall_member()) { pilot_end("in no hall any more", 0); return; }
+    if (GetTickCount64() - g_pilot_t0 > 75000) { pilot_end("time limit", 1); return; }
+    LONG d = g_frame_draws_seen;
+    int st = g_pilot_state, n = ++g_pilot_n, gap = d <= 60;
+    if (st >= PL_STAGE) { g_pilot_fight = dm_fight_on() ? g_pilot_fight + 1 : 0; if (g_pilot_fight >= 20) { pilot_end("a fight began", 0); return; } }
+    if ((st == PL_STAGE || st == PL_PICK || st == PL_A1 || st == PL_PLUS) && n > 12) {      /* after a press: did the screen change? */
+        g_pilot_run = gap ? g_pilot_run + 1 : 0;
+        if (g_pilot_run >= 5) { printf("hall pilot: the screen changes (poll %lld, %ld draws; state %d)%c", (long long)g_seq_polls, d, st, 10); fflush(stdout); g_pilot_gap = 1; if (st == PL_STAGE) { g_pilot_rounds = 1; pilot_go(PL_SETTLE); } else pilot_go(PL_WAIT); return; }
+    }
+    switch (st) {
+    case PL_RESULTS:                                     /* A every 45 polls until 10 black polls in a row */
+        g_pilot_run = d <= 12 ? g_pilot_run + 1 : 0;
+        if (g_pilot_run >= 10 && n > 90) { void rbg_after_stop(void); rbg_after_stop(); g_pilot_gap = 1; pilot_go(PL_SETTLE); printf("hall pilot: the results are over (poll %lld)\n", (long long)g_seq_polls); fflush(stdout); break; }
+        if (n > 60 && n % 45 == 0) pilot_press('Z', 8);
+        break;
+    case PL_MAIN1: if (n == 20) pilot_press('Z', 8); if (n >= 170) pilot_go(PL_MAIN2); break;      /* Smash */
+    case PL_MAIN2: if (n == 1) pilot_press('Z', 8); if (n >= 60) { g_pilot_gap = 0; pilot_go(PL_RULES); } break;      /* Smash (the first of its menu) */
+    case PL_RULES:                                       /* the rules: the one under the cursor */
+        if (gap) g_pilot_run = 0; else if (n > 60) g_pilot_run++;
+        if (g_pilot_run == 70) pilot_press('Z', 8);
+        if (g_pilot_run >= 80) { g_pilot_gap = 0; pilot_go(PL_SETTLE); }
+        break;
+    case PL_SETTLE:                                      /* a new screen is up and still */
+        if (gap) { g_pilot_gap = 1; g_pilot_run = 0; } else if (g_pilot_gap || n > 200) g_pilot_run++;
+        if (g_pilot_run >= 70) { printf("hall pilot: a screen is up (poll %lld, %ld draws): %s%c", (long long)g_seq_polls, d, g_pilot_rounds ? "the character select: hand up and left, A, A, +" : "the stage select: +", 10); fflush(stdout); pilot_go(g_pilot_rounds ? PL_UP : PL_STAGE); }
+        break;
+    case PL_UP: if (n == 1) pilot_press(VK_UP, 30); if (n >= 50) pilot_go(PL_LEFT); break;
+    case PL_LEFT: if (n == 1) pilot_press(VK_LEFT, 18); if (n >= 48) pilot_go(PL_PICK); break;
+    case PL_PICK: if (n == 1) pilot_press('Z', 8); if (n >= 98) pilot_go(PL_A1); break;      /* the fighter under the hand */
+    case PL_A1: if (n == 1) pilot_press('Z', 8); if (n >= 98) pilot_go(PL_PLUS); break;      /* "Ready to fight" */
+    case PL_STAGE: if (n == 1) pilot_press(VK_RETURN, 8); if (n >= 150) { g_pilot_rounds = 1; pilot_go(PL_UP); } break;      /* + on the stage select goes on with a stage; no change: no stage select in these rules, this is the character select */
+    case PL_PLUS: if (n == 1) pilot_press(VK_RETURN, 8); if (n >= 240) { pilot_end("the match did not start", 1); return; } break;      /* nothing more is tried: a hand moved twice ends on other buttons (test t3: "Back", then the rules' editor) */
+    case PL_WAIT: break;                                 /* the match is being set up: the handshake ends the pilot */
+    }
+}
+static int pilot_key(int vk) { return g_pilot_state && g_pilot_vk && g_pilot_vk == vk; }
 /* The real keyboard counts only while a window of THIS process is the foreground window: GetAsyncKeyState reads the
  * whole desktop, so without this check anything typed in another program (or another running copy of the game, or a
  * test that injects keys) steered the game. With SSBU_SEQ the keyboard is ignored altogether, unless SSBU_SEQ_KEYBOARD
@@ -567,7 +653,7 @@ static int player_connected(uint32_t id) {
     }
     if (g_x_synth == 1 && id == 0) return x_present(g_source[id]);      /* synthetic pad run: player 1 exists only as that pad */
     if (g_x_synth == 2 && id == 1) return x_present(g_source[id]);      /* self-test: player 2 is the test pad, whatever the keyboard player is */
-    if (id == 0 && scripted_run()) return 1;
+    if (id == 0 && (scripted_run() || g_pilot_state)) return 1;
     { int r1_net_on(void); if (id == 1 && r1_net_on()) return 1; }      /* R3 online rollback (SSBU_RB_NET): port 2 is the other game's player */
     if ((int)id == g_keyboard_player) return 1;
     if (id == 0 && sdl_on() && net_merge()) { for (int p = 1; p < 8; p++) if (nnpad_present(p)) return 1; }   /* online: every pad of this PC plays port 1 (fill_pad) */
@@ -579,6 +665,7 @@ static int player_connected(uint32_t id) {
 }
 
 int menu_input_blocked(void);                                 /* U1 (menu.cpp) */
+static int in_blocked(void) { return menu_input_blocked() || g_pilot_state; }      /* (and while the hall's pilot plays the menus) */
 /* U1 TEST ONLY (menu.cpp, SSBU_MENU_TEST): a key of the PC keyboard taken as held for the keyboard's player through its
  * configured binding, whatever the focus or the input sequence (the real keyboard is off in scripted runs); what the game
  * then reads for that player is recorded. 0 = off: nothing changes. */
@@ -589,9 +676,9 @@ long nnhid_test_result(uint64_t *buttons) { *buttons = (uint64_t)g_test_seen; re
 /* Player 1 gets the test scripts (SSBU_PRESS / SSBU_SCRIPT / SSBU_SEQ); the keyboard's player gets the real keys. */
 static int key_for(uint32_t id, int vk, int kbidx) {         /* vk = the fixed key of the test scripts; kbidx = which configurable binding (controllers.ini) the real keyboard uses */
     int down = 0;
-    if (id == 0) down = scripted(vk) || script_key(vk) || seq_key(vk);
+    if (id == 0) down = scripted(vk) || script_key(vk) || seq_key(vk) || pilot_key(vk);
     /* U1 (menu.cpp): while the settings menu is open the real keyboard is its own */
-    if (!down && (int)id == g_keyboard_player && !menu_input_blocked()) {
+    if (!down && (int)id == g_keyboard_player && !in_blocked()) {
         int real = sdl_on() ? nnpad_kb_vk(kbidx) : vk;
         down = real && keyboard_ours() && real_down(real);
         if (!down && g_test_vk && real == g_test_vk) down = 1;      /* U1 test only (nnhid_test_key) */
@@ -626,7 +713,8 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     if (id == 0) { int fight_seq_ticks(void); int nt = fight_seq_ticks();
                    if (r1_on() && r1_poll(mark_seen("fight") ? nt : 0)) nt = 0;                  /* R1 re-run: the sequence waits, the recorded values are given (R1 run-ahead: the speculative poll) */
                    fight_shot_poll(nt); if (mark_seen("fight")) l1_ticks += nt;
-                   for (int n = nt; n > 0; n--) seq_tick(); }     /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
+                   for (int n = nt; n > 0; n--) seq_tick();
+                   pilot_tick(); }     /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
     if (!player_connected(id)) return;
     static const struct { int vk, bit; } map[] = {
         {'Z', BTN_A}, {'X', BTN_B}, {'C', BTN_X}, {'V', BTN_Y}, {'Q', BTN_L}, {'E', BTN_R}, {'A', BTN_ZL}, {'S', BTN_ZR},
@@ -636,7 +724,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     uint64_t buttons = 0;
     int lx = 0, ly = 0, rx = 0, ry = 0, wired = 1;
     if (!(g_x_synth == 1 && id == 0) && !(g_x_synth == 2 && id == 1) &&
-        ((int)id == g_keyboard_player || (id == 0 && scripted_run()))) {    /* keyboard, and the test scripts on player 1 */
+        ((int)id == g_keyboard_player || (id == 0 && (scripted_run() || g_pilot_state)))) {    /* keyboard, and the test scripts (and the hall's pilot) on player 1 */
         for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) if (key_for(id, map[i].vk, map[i].bit)) buttons |= 1ull << map[i].bit;
         lx = (key_for(id, VK_RIGHT, 18) - key_for(id, VK_LEFT, 16)) * STICK_MAX;
         ly = (key_for(id, VK_UP, 17) - key_for(id, VK_DOWN, 19)) * STICK_MAX;
@@ -647,7 +735,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
         NnPadState ps;
         if (!(id >= 1 && net_merge()) && nnpad_get((int)id, &ps)) {      /* (online the pads of players 2..8 play port 1: not twice) */
             wired = ps.wired;
-            if (devices_live() && !menu_input_blocked()) {      /* U1: not while the settings menu is open (menu.cpp) */
+            if (devices_live() && !in_blocked()) {      /* U1: not while the settings menu is open (menu.cpp) */
                 buttons |= ps.buttons;
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
                 if (ps.rx || ps.ry || !rx) { rx = ps.rx; ry = ps.ry; }
@@ -655,7 +743,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                 if (ps.gc) { if ((unsigned)ps.trig_l > gc_l) gc_l = (unsigned)ps.trig_l; if ((unsigned)ps.trig_r > gc_r) gc_r = (unsigned)ps.trig_r; }
             }
         }
-        if (id == 0 && net_merge() && devices_live() && !menu_input_blocked())      /* online: the other pads of this PC play port 1 too */
+        if (id == 0 && net_merge() && devices_live() && !in_blocked())      /* online: the other pads of this PC play port 1 too */
             for (int p = 1; p < 8; p++) if (nnpad_get(p, &ps)) {
                 buttons |= ps.buttons;
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
@@ -666,7 +754,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                 }
                 if (ps.gc) { if ((unsigned)ps.trig_l > gc_l) gc_l = (unsigned)ps.trig_l; if ((unsigned)ps.trig_r > gc_r) gc_r = (unsigned)ps.trig_r; }
             }
-    } else if (x_present(slot) && devices_live() && !menu_input_blocked()) {
+    } else if (x_present(slot) && devices_live() && !in_blocked()) {
         const XGamepad *g = &g_x[slot].st.pad;
         static const struct { WORD x; int pos, label; } xmap[] = {
             {0x1000, BTN_B, BTN_A}, {0x2000, BTN_A, BTN_B}, {0x4000, BTN_Y, BTN_X}, {0x8000, BTN_X, BTN_Y},

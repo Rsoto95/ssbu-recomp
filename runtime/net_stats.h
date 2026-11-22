@@ -150,6 +150,17 @@ const char *net_hall_name(const NetHall *h, uint32_t ip);    /* a member's name 
 void net_hall_pick_set(const char *internal);
 const char *net_hall_pick(void);
 uint64_t net_hall_chara(void);              /* its ui_chara value, 0 = none (not in a hall, halls off, nothing chosen) */
+/* (2026-11-22) matches started from the hall's screen. net_hall_member: in a hall (halls on). net_hall_get_ready: the port
+ * plays the game's screens itself until the game waits for the hall's matches (nnhid.c: the hall's pilot). After a match the
+ * two of a station play again only when each has said so (net_hall_ready_set(1): "Rematch"); a new rival needs no word. */
+int net_hall_member(void);
+void net_hall_get_ready(void);
+int net_hall_ready(void);
+void net_hall_ready_set(int on);
+void net_hall_match_over(void);             /* rollback_controller.c: a rollback match ended */
+void net_hall_parked(uint64_t chara, int by_pilot);      /* net_session.c: the game waits in a hall match's handshake; its own fighter there */
+int nnhid_pilot_on(void);                   /* nnhid.c: 0 off, 1 pressing through the results, 2 through the menus */
+void nnhid_pilot(int mode);
 #ifdef __cplusplus
 }
 #endif

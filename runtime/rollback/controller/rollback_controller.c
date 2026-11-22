@@ -877,6 +877,7 @@ void rbg_fight_off(void) {
     rbg_fibers_reap();                                  /* (the ring is empty: only running fibers and live objects keep theirs) */
     { char w[48]; snprintf(w, sizeof w, "match %d over", rbn_match_number()); rb_mem_report(w); }
     { char mk[24]; snprintf(mk, sizeof mk, "match%dover", g_rbg_in_match == 1 ? rbn_match_number() : 0); if (g_rbg_in_match == 1) input_mark(mk); else input_mark("localmatchover"); }
+    if (g_rbg_in_match == 1) { void net_hall_match_over(void); net_hall_match_over(); }      /* (2026-11-22) in a hall: back to waiting for the next match by itself (nothing without hall = on) */
     { int rbn_agreed(void); int ag = rbn_agreed(); if (ag) g_rbg_agreed_done = ag; }
     g_rbg_in_match = 0; g_rbg_ff_first = -1; g_rbg_ff_reset = g_session.fight_frame; g_rbg_prepad_told = 0;
     g_rbg_rb = 0; memset(g_rbg_k, 0, sizeof g_rbg_k); g_rbg_rerun = g_rbg_miss = g_rbg_stalls = g_rbg_capfail = g_rbg_capskip = g_rbg_lastlocal = g_rbg_real = g_rbg_gone = 0;

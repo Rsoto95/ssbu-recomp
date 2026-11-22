@@ -494,6 +494,13 @@ static int hs_layout(uint64_t st, uint16_t out[11]) {
     }
     return 0;
 }
+/* (2026-11-22, nnhid.c: the hall's pilot) the game's own "the fight is on" (FighterManager's ready-go, as debug_mode_frame) */
+int dm_fight_on(void) {
+    static uint64_t inst;
+    if (!inst) inst = hook_address("_ZN3lib9SingletonIN3app14FighterManagerEE9instance_E");
+    uint64_t mgr = inst ? sr64(inst) : 0, impl = mgr ? sr64(mgr) : 0; uint8_t go = 0;
+    return impl && safe_read(impl + 0xd2, &go, 1) && go;
+}
 int dm_melee_mode(void) { return rd8(MELEE_INFO); }      /* (2026-11-02) the match block's melee mode: 0 local versus, 1 Local Wireless room, 0x14 Battle Arena */
 /* (2026-11-02) a Battle Arena's match: its records are indexed by ARENA SEAT and the two fighters can be any two seats (the
  * others are empty records, type 3); the select screens' per-player table (0x7105307770 + 0x1c8 * seat) + 0x30 is 0 for a
