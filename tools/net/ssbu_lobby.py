@@ -86,6 +86,9 @@ rollback search, 0 outside one): a match in another room starts it again at 0-0,
 are told when their match starts and after each counted result; the game shows it over the fight (menu.cpp).
     28 SCORE        lobby:  the other fighter's address u32, wins u16, losses u16 (the one told), wins u16, losses u16 (the other),
                             name[32] (the one told), name[32] (the other): the ladder name, else the lobby name
+    43 ROOM_SCORE   lobby:  (2026-11-22) the arena u32, rows u8, then per row name[32], wins u16, losses u16, flags u8
+                            (1 = the one told): the table of a Battle Arena, most wins first, to each of its players every
+                            2 s (room_score_send); the game shows it while no fight is on. An older game drops it.
     41 HALL         game:   cookie u64, op u8, argument u32, code[5] (ASCII, NUL padded)        (1.9, 2026-11-21)
     42 HALL_STATE   lobby:  see hall_send
        A HALL is a room where several pairs play rollback matches at the same time (Smash versus, as the 1.6 arena; the
@@ -148,6 +151,8 @@ RELAY_FOR = 30.0                             # s: a relay whose last RELAY_HB is
 ROOM_LEFT = 40                               # 1.8 (29..33: the tournaments and the relay): from nex_server.py on this host (127.0.0.1 only): a player left a Battle Arena
 SCORE = 28                                   # 1.8 (2026-11-07): the session's wins / losses of the two fighters of a rollback match
 SCORE_IDLE = 3600.0                          # a player's score starts again at 0-0 after an hour without a match
+ROOM_SCORE = 43                              # (2026-11-22) a Battle Arena's table: every player of the room with its wins / losses there
+ROOM_SCORE_FOR = 1200.0                      # s: a player is of a room this long after its last search or group message there
 F_STOCKS_FALLS = 4                           # RESULT flag: stocks left = the rule's stocks less the falls (a newer game: its winner is right)
 AR_OUT, AR_WAITING, AR_TURN, AR_PLAYING = range(4)
 HALL, HALL_STATE = 41, 42                    # 1.9 (2026-11-21): a hall, several pairs playing at the same time
@@ -262,6 +267,9 @@ class Client:
         self.arena_streak = 0     # 1.6: wins in a row in the arena
         self.arena_seen = None    # 1.6: when it last asked for the arena's state (it is shown the changes for ARENA_WATCH_FOR s)
         self.rb_group = None      # 1.7: the Battle Arena group it is in (RB_GROUP key), None = none
+        self.room_gid = 0         # (2026-11-22) the Battle Arena it was last seen in (a search with its key, its group), 0 = none
+        self.room_seen = 0.0      # (when)
+        self.room_tx = 0.0        # (when it was last sent the room's table)
         self.hall = None          # 1.9: the Hall it is in
         self.hall_to = None       # (the Client it challenged, and when)
         self.hall_to_at = 0.0
@@ -1252,6 +1260,7 @@ class Lobby(TourneyMixin):
             searching = sum(1 for x in same if x.search_since is not None)
             code = sum(1 for x in self.by_at.values() if x.part[1] == c.part[1])
             self.send(hdr(PONG) + p[12:20] + struct.pack(">HHHH", len(same), len(rooms), searching, code), at)   # (O2: the last two)
+            self.room_score_send(c, now)
         elif kind == LEAVE and len(p) >= 12 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.drop(c, "left")
         elif kind == LIST and len(p) >= 16 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
@@ -1294,6 +1303,8 @@ class Lobby(TourneyMixin):
             if (key or None) != c.rb_group:
                 self.say("arena group: %s %s" % (c.name, "joins the group of arena %u" % key if key else "leaves its arena group"))
             c.rb_group = key or None
+            if key:
+                c.room_gid, c.room_seen = key, now
             if key and len(p) > 20:
                 out = hdr(RB_GROUP) + struct.pack(">I", c.ip) + p[20:]
                 for x in list(self.by_at.values()):
@@ -1436,10 +1447,36 @@ class Lobby(TourneyMixin):
     def score_room_left(self, gid, ip, now):
         for x in list(self.by_at.values()):
             r = self.score.get(self.score_key(x))
+            if x.at[0] == ip and x.room_gid == gid:
+                x.room_gid = 0
             if x.at[0] == ip and r is not None and r[3] == gid:
                 if r[0] or r[1]:
                     self.say("score: %s left room %u: starts again at 0-0 (it was %d-%d)" % (x.name, gid, r[0], r[1]))
                 r[0] = r[1] = 0
+
+    def room_score_send(self, c, now):
+        """(2026-11-22) ROOM_SCORE to c, every 2 s while it is of a Battle Arena: the arena u32, rows u8, then per row
+        name[32], wins u16, losses u16, flags u8 (1 = c itself); most wins first. The players of the room: those last
+        seen in it (a search with its key, a message to its group) that did not leave it (ROOM_LEFT). An older game
+        drops the type."""
+        gid = c.room_gid
+        if not gid or now - c.room_tx < 2.0:
+            return
+        if now - c.room_seen > ROOM_SCORE_FOR:
+            c.room_gid = 0
+            return
+        c.room_tx = now
+        rows = {}
+        for x in self.by_at.values():
+            if x.room_gid == gid and x.part == c.part and now - x.room_seen <= ROOM_SCORE_FOR:
+                r = self.score.get(self.score_key(x))
+                ok = r is not None and r[3] == gid and now - r[2] <= SCORE_IDLE
+                k = self.score_key(x)
+                if k not in rows or x is c:
+                    rows[k] = (x, r[0] if ok else 0, r[1] if ok else 0)
+        order = sorted(rows.values(), key=lambda t: (-t[1], t[2], t[0].name.lower()))[:16]
+        body = b"".join(self.score_name(x) + struct.pack(">HHB", min(w, 65535), min(l, 65535), 1 if x is c else 0) for x, w, l in order)
+        self.send(hdr(ROOM_SCORE) + struct.pack(">IB", gid & 0xFFFFFFFF, len(order)) + body, c.at)
 
     def score_send(self, a, b, now, touch=False):
         """SCORE to both fighters a and b (b may be None: a alone is told nothing)"""
@@ -1692,6 +1729,7 @@ class Lobby(TourneyMixin):
             self.match_end(other, MS_PEER_LEFT, "%s searches again" % c.name)
         c.search_id, c.search_since, c.final, c.kind = sid, now, None, op
         c.match_key = key                           # (2026-11-02) a Battle Arena's match: paired only with the same key
+        c.room_gid, c.room_seen = key, now          # (2026-11-22) the room whose table it is sent (no key: none)
         self.say("match: %s searches an opponent%s (build %s)" % (c.name, " for a rollback match" if op == KIND_ROLLBACK else "", c.part[0].decode("ascii", "replace")))
         waiting = [x for x in self.by_at.values() if x is not c and x.part == c.part and x.search_since is not None and x.match is None and x.kind == op
                    and getattr(x, "match_key", 0) == key]   # (a key: the game's own Online menu, one Battle Arena: its two players only)

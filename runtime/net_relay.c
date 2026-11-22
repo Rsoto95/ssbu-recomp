@@ -1044,6 +1044,31 @@ static void score_rx(const uint8_t *p, int n) {         /* (client thread) a SCO
     ReleaseSRWLockExclusive(&g_ld_lock);
     if (!same) { char a[16]; say("score: %s %d won / %d lost, %s (%s) %d won / %d lost (in this room)", g_score_name[0][0] ? g_score_name[0] : "this player", w0, l0, g_score_name[1][0] ? g_score_name[1] : "the other", ip_text(peer, a), w1, l1); }
 }
+/* (2026-11-22) the Battle Arena's table:
+ *   43 ROOM_SCORE lobby:  the arena u32, rows u8, then per row name[32], wins u16, losses u16, flags u8 (1 = this player)
+ * An older lobby never sends it: no table is shown. */
+#define T_ROOM_SCORE 43
+static NetRoomScore g_room_score;                       /* (g_ld_lock) */
+static uint64_t g_room_score_at;
+static void room_score_rx(const uint8_t *p, int n) {    /* (client thread) a ROOM_SCORE body */
+    if (n < 5) return;
+    NetRoomScore t; memset(&t, 0, sizeof t);
+    t.gid = g32(p); t.n = p[4] > 16 ? 16 : p[4];
+    if (n < 5 + 37 * t.n) return;
+    for (int i = 0; i < t.n; i++) { const uint8_t *r = p + 5 + 37 * i; memcpy(t.row[i].name, r, 32); t.row[i].w = r[32] << 8 | r[33]; t.row[i].l = r[34] << 8 | r[35]; t.row[i].me = r[36] & 1; }
+    AcquireSRWLockExclusive(&g_ld_lock);
+    int was = g_room_score.gid != t.gid || g_room_score.n != t.n;
+    g_room_score = t; g_room_score_at = ms_now();
+    ReleaseSRWLockExclusive(&g_ld_lock);
+    if (was) say("score: the table of arena %u: %d player(s)", t.gid, t.n);
+}
+void net_room_score_get(NetRoomScore *o) {
+    AcquireSRWLockShared(&g_ld_lock);
+    *o = g_room_score;
+    uint64_t age = g_room_score_at ? ms_now() - g_room_score_at : 1000000;
+    o->age_ms = age > 1000000 ? 1000000 : (int)age;
+    ReleaseSRWLockShared(&g_ld_lock);
+}
 void net_ladder_get(NetLadder *o) {
     AcquireSRWLockShared(&g_ld_lock);
     *o = g_ld;
@@ -2556,6 +2581,9 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             break;
         case T_SCORE:                                    /* (lobby 1.8) the score of this match's two fighters */
             if (g_joined) score_rx(buf + 4, n - 4);
+            break;
+        case T_ROOM_SCORE:                               /* (2026-11-22) the Battle Arena's table */
+            if (g_joined) room_score_rx(buf + 4, n - 4);
             break;
         case T_REJECT:
             if (n >= 12 && g64(buf + 4) == g_nonce) {

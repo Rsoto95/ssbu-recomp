@@ -77,6 +77,10 @@ typedef struct {
     char score_name[2][33];                 /* their names: the ladder name, else the lobby name */
 } NetLadder;
 void net_ladder_get(NetLadder *out);        /* never blocks */
+/* (2026-11-22) a Battle Arena's table as the lobby last said it (ROOM_SCORE, every 2 s while this player is of the room):
+ * every player of the room, most wins first. n = 0 or age_ms large: none to show. */
+typedef struct { int n, age_ms; unsigned gid; struct { char name[33]; int w, l, me; } row[16]; } NetRoomScore;
+void net_room_score_get(NetRoomScore *out); /* never blocks */
 enum { NET_LADDER_F_ABANDON = 1, NET_LADDER_F_DISCONNECT = 2, NET_LADDER_F_STOCKS_FALLS = 4 };   /* 4 (2026-11-07): stocks left = the rule's stocks less the falls */
 typedef struct {
     uint64_t seed;                          /* the match handshake's seed: the same on both games */

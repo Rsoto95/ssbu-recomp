@@ -82,6 +82,7 @@ extern "C" void display_refresh_switched(int *from, int *to);       /* display.c
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 int rbg_score_slot(void);                                            /* rollback_controller.c: this game's player in an online fight, -1 = none */
+int dm_fight_on(void);                                               /* debug_mode.c: a fight is on (this game's or one it watches) */
 }
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_HOME, B_CAPTURE };
@@ -2253,6 +2254,40 @@ static void draw_hall(void) {
     }
     ImGui::End();
 }
+/* (2026-11-22) the Battle Arena's table over the game while no fight is on: every player of the room, most wins first */
+static int room_score_on(void) {
+    NetRoomScore t; net_room_score_get(&t);
+    return t.n > 0 && t.age_ms < 7000 && !g_open && !g_hall_open && rbg_score_slot() < 0 && !hall_hud_on() && !dm_fight_on();
+}
+static void draw_room_score(void) {
+    if (!room_score_on()) return;
+    NetRoomScore t; net_room_score_get(&t);
+    ImGuiIO &io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 12.0f, io.DisplaySize.y * 0.14f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.72f);
+    if (ImGui::Begin("##roomscore", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove)) {
+        const ImVec4 gold(1.0f, 0.75f, 0.25f, 1);
+        ImGui::TextColored(gold, "Arena ranking");
+        { static unsigned said; if (said != t.gid) { said = t.gid; printf("menu: the ranking of arena %u drawn over the game: %d players, first %.20s %d-%d%c", t.gid, t.n, t.row[0].name, t.row[0].w, t.row[0].l, 10); fflush(stdout); } }
+        if (ImGui::BeginTable("##roomscoret", 4, ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("#"); ImGui::TableSetupColumn("Player"); ImGui::TableSetupColumn("Won"); ImGui::TableSetupColumn("Lost");
+            ImGui::TableHeadersRow();
+            int place = 0;
+            for (int i = 0; i < t.n; i++) {
+                if (i == 0 || t.row[i].w != t.row[i - 1].w || t.row[i].l != t.row[i - 1].l) place = i + 1;      /* the same numbers: the same place */
+                ImGui::TableNextRow();
+                ImVec4 c = t.row[i].me ? gold : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                ImGui::TableNextColumn(); ImGui::TextColored(c, "%d", place);
+                ImGui::TableNextColumn(); ImGui::TextColored(c, "%.20s", t.row[i].name);
+                ImGui::TableNextColumn(); ImGui::TextColored(c, "%d", t.row[i].w);
+                ImGui::TableNextColumn(); ImGui::TextColored(c, "%d", t.row[i].l);
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::End();
+}
 static void sec_arena(void) {
     NetArena a;
     net_arena_get(&a);
@@ -3240,9 +3275,9 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
 #endif
     NetLadder score_ld;
 #ifdef _WIN32
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld) && !hall_hud_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld) && !hall_hud_on() && !room_score_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
 #else
-    if (!g_open && !osk_active() && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld) && !hall_hud_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !osk_active() && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !toast_on() && !score_get(&score_ld) && !hall_hud_on() && !room_score_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
 #endif
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
@@ -3287,6 +3322,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     if (S.overlay) draw_overlay();
     draw_score();
     draw_hall();
+    draw_room_score();
     draw_hall_screen();
     if (S.stats) draw_stats();
     if (g_notice_on && !g_hall_open) {                   /* R3: the online match's message, in the middle (the hall's screen says it itself) */

@@ -304,3 +304,15 @@ It is not a damaged replay. Since 2026-11-07 the error code is written to the lo
 Design adapted from SNO2207/WindowSmash, used with the author's permission.
 
 Online play adapts parts of SNO2207/WindowSmash's network code (used with its author's agreement); the lobby protocol and the room code are ours.
+
+**The score of a Battle Arena** (2026-11-22). Two faults of the game's result (ladder_report.c), both fixed: (1) it read the
+fighters of entries 0 and 1, but in an arena of three or more the two fighters are their seats (0 and 2, 1 and 2...):
+such a match had no sample and sent no result; now the seats of the match (dm_arena_fighters). (2) The fall of the last
+KO was never in the last sample (the fight is off from that frame on), so a match counted only when the winner had more
+stocks before the last KO (both on their last stock: "no winner"); now the falls the game holds when the match is over
+are taken when they are the sample's plus one. The lobby takes the first RESULT with a winner, so one updated game of the
+two is enough. New: the arena's table (lobby ROOM_SCORE 43, every 2 s to each player last seen in the room; menu.cpp
+draw_room_score): every player of the room with won / lost, most wins first, shown over the game while no fight is on
+(not over a fight, not while F1 or a hall's box is shown). Needs the lobby of this date; an older one sends nothing.
+Tried with two games on one PC (1 stock: three matches counted 1-0, 2-0, 3-0; the table received and drawn); the
+three-seat case and the look of the table on a real arena are not tried yet.
