@@ -232,7 +232,11 @@ static void om_nsd_ResolveEx(Ctx *c) {
 /* ---------------------------------------------------------------- (2026-11-02) which Battle Arena this player is in
  * tools/net/nex_server.py UDP 39599: "ARENA?" + pid u64 -> "ARENA!" + gid u32 + n u8 + n x pid u64 (little-endian). For the
  * rollback of an arena's match (net_session.c): the opponent is looked for in the lobby with the arena as the key. 1 = asked
- * and answered (gid 0: in none); 0 = the Online menu is off or the server did not answer (3 tries, 300 ms each). */
+ * and answered (gid 0: in none); 0 = the Online menu is off or the server did not answer (8 tries, 300 ms each).
+ * (2026-11-23, owner: "with my opponent the handshake fails several times") a player's game got NO answer to 3 tries in 10 of
+ * its ~40 fights of one evening although the server answered every one of them (its log): each time the fight lost its
+ * rollback. So: 8 tries (2.4 s; the other fighter waits 10 s in the lobby), and when none is answered, the last answer of
+ * the last 10 minutes is used (the same arena and seat as in the fight before, unless this player changed arena since). */
 static int g_om_on;
 /* nnnet_c4a.inc so_sendto_player: 1 = openers for this address: the Online menu is on our servers and the address is a
  * player's public one (not our servers', not a private, loopback, link-local, virtual 198.18/15 or multicast address) */
@@ -439,6 +443,7 @@ int online_menu_stations(char sala[6], OmStation *rows, int cap, int *n) {
     return st;
 }
 int online_menu_arena(uint32_t *gid, int *players, int *own_seat) {
+    static uint32_t last_gid; static int last_players, last_seat; static ULONGLONG last_at;        /* (the last answer) */
     *gid = 0; *players = 0; *own_seat = -1;
     if (!g_om_on) return 0;
     SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -448,7 +453,9 @@ int online_menu_arena(uint32_t *gid, int *players, int *own_seat) {
     DWORD to = 300; setsockopt(u, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
     uint8_t q[14] = {'A', 'R', 'E', 'N', 'A', '?'}; uint64_t me = om_nsa_id(); memcpy(q + 6, &me, 8);
     int ok = 0;
-    for (int k = 0; k < 3 && !ok; k++) {
+    int tries = 0;
+    for (int k = 0; k < 8 && !ok; k++) {
+        tries++;
         sendto(u, (const char *)q, sizeof q, 0, (struct sockaddr *)&a, sizeof a);
         uint8_t b[256]; int n = recv(u, (char *)b, sizeof b, 0);
         if (n >= 11 && !memcmp(b, "ARENA!", 6)) {
@@ -459,7 +466,13 @@ int online_menu_arena(uint32_t *gid, int *players, int *own_seat) {
         }
     }
     closesocket(u);
-    om_log("arena of this player (pid %llu): %s, arena %u, %d players, this player's seat %d", (unsigned long long)me, ok ? "answered" : "NO ANSWER from our NEX server", *gid, *players, *own_seat);
+    om_log("arena of this player (pid %llu): %s (%d tries), arena %u, %d players, this player's seat %d", (unsigned long long)me, ok ? "answered" : "NO ANSWER from our NEX server", tries, *gid, *players, *own_seat);
+    ULONGLONG now = GetTickCount64();
+    if (ok) { last_gid = *gid; last_players = *players; last_seat = *own_seat; last_at = now; }
+    else if (last_at && last_gid && now - last_at < 600000) {
+        *gid = last_gid; *players = last_players; *own_seat = last_seat; ok = 1;
+        om_log("arena of this player: the answer of %d s ago is used instead (arena %u, %d players, seat %d)", (int)((now - last_at) / 1000), *gid, *players, *own_seat);
+    }
     return ok;
 }
 
