@@ -308,7 +308,7 @@ static void pilot_tick(void) {                           /* once per poll of pla
     case PL_RESULTS:                                     /* A every 45 polls until 10 black polls in a row */
         g_pilot_run = d <= 12 ? g_pilot_run + 1 : 0;
         if (g_pilot_run >= 10 && n > 90) { void rbg_after_stop(void); rbg_after_stop(); g_pilot_gap = 1; pilot_go(PL_SETTLE); printf("hall pilot: the results are over (poll %lld)\n", (long long)g_seq_polls); fflush(stdout); break; }
-        if (n > 60 && n % 45 == 0) pilot_press('Z', 8);
+        if (n > 60 && n % 45 == 0 && !getenv("SSBU_RESULTS_AUTO_TEST")) pilot_press('Z', 8);      /* (test aid: left to results_auto_tick) */
         break;
     case PL_MAIN1: if (n == 20) pilot_press('Z', 8); if (n >= 170) pilot_go(PL_MAIN2); break;      /* Smash */
     case PL_MAIN2: if (n == 1) pilot_press('Z', 8); if (n >= 60) { g_pilot_gap = 0; pilot_go(PL_RULES); } break;      /* Smash (the first of its menu) */
@@ -331,6 +331,35 @@ static void pilot_tick(void) {                           /* once per poll of pla
     }
 }
 static int pilot_key(int vk) { return g_pilot_state && g_pilot_vk && g_pilot_vk == vk; }
+/* ---------------------------------------------------------------- (2026-11-23) A BATTLE ARENA'S RESULTS PASS BY THEMSELVES
+ * (owner: "if a fighter or a spectator does not press A on the results the whole room waits for him, for minutes") After
+ * a Battle Arena's match (the match block's melee mode 0x14, fighter or spectator), a game still on the results screen
+ * 15 s after the fight's end presses A itself, as player 1, every 45 polls until the screen is left (at most 90 s). "Still
+ * on the results": the fighters' script modules are loaded (nnro.c; the game unloads them the moment the results are
+ * left: 6 of 6 matches of the owner's log) and no fight is on. The player's own pad works all the while. In a hall the
+ * hall's pilot does it. SSBU_RESULTS_AUTO=0: off, =<seconds>: another wait (5 .. 600). */
+int dm_melee_mode(void), nnro_fighter_modules(void);
+static int g_ra_hold;                                    /* polls of A still to give */
+static void results_auto_tick(void) {                    /* once per poll of player 1 */
+    static int secs = -1, fought, arena, armed, n, pressed, test; static ULONGLONG t_end;
+    if (secs < 0) { const char *e = getenv("SSBU_RESULTS_AUTO"); secs = e && *e ? atoi(e) : 15; if (secs && secs < 5) secs = 5; if (secs > 600) secs = 600; test = getenv("SSBU_RESULTS_AUTO_TEST") != NULL; }      /* (test aid: any fight counts, also in a hall) */
+    if (g_ra_hold > 0) g_ra_hold--;
+    if (!secs) return;
+    if (dm_fight_on()) { if (fought < 100000) fought++; arena = test || dm_melee_mode() == 0x14; armed = 0; return; }
+    if (fought >= 180 && arena && !armed) { armed = 1; n = 0; pressed = 0; t_end = GetTickCount64(); }      /* (a fight of 3 s or more just ended) */
+    fought = 0;
+    if (!armed) return;
+    ULONGLONG t = GetTickCount64() - t_end;
+    if (nnro_fighter_modules() <= 0 || t > (ULONGLONG)secs * 1000 + 90000) {
+        if (pressed) { printf("results: the Battle Arena's results %s %.1f s after the fight: A was pressed %d times by the game itself\n", nnro_fighter_modules() <= 0 ? "were left" : "are still up", t / 1000.0, pressed); fflush(stdout); }
+        armed = 0; g_ra_hold = 0; return;
+    }
+    if ((g_pilot_state && !test) || t < (ULONGLONG)secs * 1000) return;
+    if (n++ % 45 == 0) {
+        if (!pressed) { printf("results: still on the Battle Arena's results %d s after the fight: the game presses A itself until they are left (SSBU_RESULTS_AUTO=0: off)\n", secs); fflush(stdout); }
+        pressed++; g_ra_hold = 8;
+    }
+}
 /* The real keyboard counts only while a window of THIS process is the foreground window: GetAsyncKeyState reads the
  * whole desktop, so without this check anything typed in another program (or another running copy of the game, or a
  * test that injects keys) steered the game. With SSBU_SEQ the keyboard is ignored altogether, unless SSBU_SEQ_KEYBOARD
@@ -714,7 +743,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
                    if (r1_on() && r1_poll(mark_seen("fight") ? nt : 0)) nt = 0;                  /* R1 re-run: the sequence waits, the recorded values are given (R1 run-ahead: the speculative poll) */
                    fight_shot_poll(nt); if (mark_seen("fight")) l1_ticks += nt;
                    for (int n = nt; n > 0; n--) seq_tick();
-                   pilot_tick(); }     /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
+                   pilot_tick(); results_auto_tick(); }     /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
     if (!player_connected(id)) return;
     static const struct { int vk, bit; } map[] = {
         {'Z', BTN_A}, {'X', BTN_B}, {'C', BTN_X}, {'V', BTN_Y}, {'Q', BTN_L}, {'E', BTN_R}, {'A', BTN_ZL}, {'S', BTN_ZR},
@@ -778,6 +807,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
         if (gc_l > 0x7fff / 4) buttons |= 1ull << BTN_L;
         if (gc_r > 0x7fff / 4) buttons |= 1ull << BTN_R;
     }
+    if (id == 0 && g_ra_hold > 0) buttons |= 1ull << BTN_A;       /* (2026-11-23) a Battle Arena's results passed by the game itself (results_auto_tick) */
     if (id == 0) record_or_replay(&buttons, &lx, &ly);
     if (id == 0 && r1_on()) r1_pad(&buttons, &lx, &ly, &rx, &ry);
     if (id == 1 && r1_on()) { void r1_pad_id(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); r1_pad_id(1, &buttons, &lx, &ly, &rx, &ry); }      /* R3: port 2 in an online rollback match */

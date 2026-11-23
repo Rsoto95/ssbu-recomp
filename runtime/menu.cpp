@@ -1736,6 +1736,7 @@ static void draw_score(void) {
 }
 
 /* ------------------------------------------------------------------ the stats overlay (F2), top right */
+static float g_stats_bottom; static int g_stats_frame = -10;      /* (render thread) its bottom edge and the frame it was drawn in */
 static void draw_stats(void) {
     float sum = 0;
     int n = 0;
@@ -1761,6 +1762,7 @@ static void draw_stats(void) {
         ImGui::Text("rollback %d / %d f", ns.rollback_last, ns.rollback_max);
     }
     ImGui::Text("run-ahead %s", !ra_cfg ? "off" : r1_ra_phase() ? "on (running)" : "on");
+    g_stats_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y; g_stats_frame = ImGui::GetFrameCount();      /* (2026-11-23) the arena's ranking goes below it */
     ImGui::End();
 }
 
@@ -2263,7 +2265,9 @@ static void draw_room_score(void) {
     if (!room_score_on()) return;
     NetRoomScore t; net_room_score_get(&t);
     ImGuiIO &io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 12.0f, io.DisplaySize.y * 0.14f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    float ry = io.DisplaySize.y * 0.14f;
+    if (ImGui::GetFrameCount() - g_stats_frame <= 1 && g_stats_bottom + 8.0f > ry) ry = g_stats_bottom + 8.0f;      /* (2026-11-23, owner: it lay over the ping / rollback box) below the stats */
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 12.0f, ry), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.72f);
     if (ImGui::Begin("##roomscore", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove)) {

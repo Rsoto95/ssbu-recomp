@@ -305,6 +305,8 @@ Design adapted from SNO2207/WindowSmash, used with the author's permission.
 
 Online play adapts parts of SNO2207/WindowSmash's network code (used with its author's agreement); the lobby protocol and the room code are ours.
 
+**A Battle Arena's results pass by themselves** (2026-11-23). The room waits for every fighter and spectator to press A on the results screen; a player who forgets holds everyone for minutes. A game still on the results 15 s after a Battle Arena's fight ended presses A itself, as player 1, every 45 polls until the screen is left (at most 90 s more). "Still on the results" = the fighters' script modules are loaded (the game unloads them the moment the results are left) and no fight is on. The player's own pad works all the while; in a hall the hall's pilot does it. `SSBU_RESULTS_AUTO=0`: off, `=<seconds>`: another wait. Only the game of the player who forgot needs this runtime. Tested with two games on one PC (a match's results left 12.7 s after the fight with a wait of 8 s, on both); NOT tested: a real arena, a spectator. `runtime/nnhid.c` (`results_auto_tick`), `runtime/nnro.c` (`nnro_fighter_modules`).
+
 **The score of a Battle Arena** (2026-11-22). Two faults of the game's result (ladder_report.c), both fixed: (1) it read the
 fighters of entries 0 and 1, but in an arena of three or more the two fighters are their seats (0 and 2, 1 and 2...):
 such a match had no sample and sent no result; now the seats of the match (dm_arena_fighters). (2) The fall of the last
