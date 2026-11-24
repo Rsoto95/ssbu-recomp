@@ -229,6 +229,7 @@ typedef struct {
     uint64_t tls[64];                                   /* nn::os thread-local storage slots (nnsdk.c: one host table), as at the capture */
     int quiet, qset;                                    /* every worker at a usual pause when it was taken (snapshot_ring.c rg_best_state) */
     uint8_t *gstk; size_t gstk_used, gstk_com;
+    unsigned long long nex_cyc;                         /* (2026-11-23) the NEX threads' CPU cycles at the capture, 0 = none (runahead.c ra_nex_cycles) */
     uint8_t *opg; size_t opg_used, opg_com;             /* the pages committed outside the ring, as at the capture */          /* the fibers' guest stacks, [sp, top) each, as at the capture */
 } RgSlot;
 

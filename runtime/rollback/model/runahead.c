@@ -136,6 +136,64 @@ int ra_nex_hold(double limit_ms) {
     if (waited) { double w = now_ms() - t0; g_nex_waits++; g_nex_wait_ms += w; if (w > g_nex_wait_max) g_nex_wait_max = w; }
     return 1;
 }
+/* (2026-11-23, the owner's game ended twice in Battle Arena fights with many rollbacks: c0000005 in NetSystem inside the
+ * NEX code (a call through a null object) and in "NEX TransportBufferThread(send)" (a copy of a garbage length), one pass
+ * after a ring load; the load itself held the NEX threads, none running.) The NEX threads are free at CAPTURES (ra_free):
+ * one that runs while the pages are copied leaves a torn picture of the NEX objects in that state, which a later load puts
+ * back. Now a capture holds them like a load does, for its copy only: blocked in a system call = held; one that runs is
+ * waited for up to `limit_ms`, then the capture goes on without them as before (counted). SSBU_RB_NEX_CAP_HOLD=0: off.
+ * A fix of the torn picture only: a load still rewinds the NEX objects over what those threads did since the capture
+ * (ra_nex_cycles measures how often that is). */
+/* (TEST ONLY) SSBU_RB_NEX_TEST=<prefix>: the threads whose name starts so stand in for the NEX threads here (a test without
+ * a Battle Arena has none), and the Online menu need not be on. */
+static const char *nex_test(void) { static const char *t; static int got; if (!got) { t = getenv("SSBU_RB_NEX_TEST"); if (t && !*t) t = NULL; got = 1; } return t; }
+static int nex_name(const char *nm) { const char *t = nex_test(); return nm && !strncmp(nm, t ? t : "NEX ", t ? strlen(t) : 4); }
+static HANDLE g_nex_cheld[16]; static int g_nex_ncheld;
+long long g_nex_cap_holds, g_nex_cap_waits, g_nex_cap_busy; double g_nex_cap_wait_max;
+void ra_nex_cap_release(void) {
+#ifdef _WIN32
+    for (int i = 0; i < g_nex_ncheld; i++) ResumeThread(g_nex_cheld[i]);
+#endif
+    g_nex_ncheld = 0;
+}
+int ra_nex_cap_hold(double limit_ms) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_RB_NEX_CAP_HOLD"), *m = getenv("SSBU_ONLINE_MENU"); on = !(e && e[0] == '0') && ((m && m[0] == '1') || nex_test()); }
+    g_nex_ncheld = 0;
+    if (!on) return 1;
+#ifdef _WIN32
+    DWORD me = GetCurrentThreadId(); Ctx *tc; const char *nm; HANDLE h; double t0 = now_ms(); int waited = 0;
+    for (int i = 0; guest_thread_info(i, &tc, &nm, &h); i++) {
+        if (!h || !nm || !nex_name(nm) || GetThreadId(h) == me) continue;
+        for (;;) {
+            if (SuspendThread(h) == (DWORD)-1) break;
+            if (th_blocked(h)) { if (g_nex_ncheld < 16) g_nex_cheld[g_nex_ncheld++] = h; else ResumeThread(h); break; }
+            ResumeThread(h); waited = 1;
+            if (now_ms() - t0 > limit_ms) { ra_nex_cap_release(); g_nex_cap_busy++; return 0; }
+            SwitchToThread();
+        }
+    }
+    g_nex_cap_holds++;
+    if (waited) { double w = now_ms() - t0; g_nex_cap_waits++; if (w > g_nex_cap_wait_max) g_nex_cap_wait_max = w; }
+#else
+    (void)limit_ms;
+#endif
+    return 1;
+}
+/* the CPU cycles the NEX threads used so far (0: none, or the Online menu is off). A capture notes it, a load compares:
+ * the difference is what those threads did between the two, which the load rewinds under them. (A suspension costs the
+ * thread a few thousand cycles itself: only a large difference is work.) */
+long long g_nex_ran_loads, g_nex_ran_small; unsigned long long g_nex_ran_max;
+unsigned long long ra_nex_cycles(void) {
+    unsigned long long sum = 0;
+#ifdef _WIN32
+    static int om = -1; if (om < 0) { const char *m = getenv("SSBU_ONLINE_MENU"); om = (m && m[0] == '1') || nex_test(); }
+    if (!om) return 0;
+    Ctx *tc; const char *nm; HANDLE h;
+    for (int i = 0; guest_thread_info(i, &tc, &nm, &h); i++) { ULONG64 q = 0; if (h && nex_name(nm) && QueryThreadCycleTime(h, &q)) sum += q; }
+#endif
+    return sum;
+}
 /* save: every other guest thread held inside a waiting import (its place and registers noted); 0 = one was not there in time */
 /* (R3 hs16, TEST ONLY) SSBU_RB_HOLD_PROF=1: where a hold's time goes, per thread (suspend + context + retries), and the
  * fiber check; printed in the rollback report */
