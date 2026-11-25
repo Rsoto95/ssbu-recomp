@@ -1093,26 +1093,58 @@ static void gp_msg(long long newest, uint64_t at) {
 /* (2026-11-05, owner) Auto learns from the opponent: a match in which many of the other player's pads came more than 2 frames
  * late (its PC or connection hitched: 10% of the frames in a friend's match) makes the next matches against the same
  * opponent in this session start from one frame more (at most 7). my_delay sends it as this game's own choice, so the host
- * takes it whichever game measured the late pads. */
+ * takes it whichever game measured the late pads.
+ * (2026-11-25, owner: "seguimos a 7f") the floor only went up: matches through the lobby relay with a VPN at 215 ms raised it to
+ * 7, and once the friend's VPN was off and the match went direct at 63 ms (auto 3) it was still 7 for the rest of the session.
+ * Now it comes down again: (a) the floor remembers the delay its connection's round trip gave when it was learned (rtt_d); a
+ * set-up whose measured round trip gives 2+ frames less (another path, another connection) forgets it; (b) a clean match at the
+ * floor (under 0.5% of the pads 2+ frames late) lowers it by one frame, and to nothing once it is not above the measured auto. */
 #define OPP_N 16
-static struct { char name[64]; int floor; } g_opp[OPP_N];
+static struct { char name[64]; int floor, rtt_d; } g_opp[OPP_N];
+static int rtt_auto_now(void) { int n; long mid = rtt_mid_us(&n); return n >= 10 ? delay_for_rtt(mid) : -1; }   /* -1 = not measured yet */
 static int opp_find(const char *name, int make) {
     for (int i = 0; i < OPP_N; i++) if (g_opp[i].name[0] && !strcmp(g_opp[i].name, name)) return i;
     if (!make) return -1;
     for (int i = 0; i < OPP_N; i++) if (!g_opp[i].name[0]) { snprintf(g_opp[i].name, sizeof g_opp[i].name, "%s", name); return i; }
     return -1;
 }
-static int opp_floor(void) { int i = g_hs_opp[0] ? opp_find(g_hs_opp, 0) : -1; return i >= 0 ? g_opp[i].floor : 0; }
+static int opp_floor(void) {
+    int i = g_hs_opp[0] ? opp_find(g_hs_opp, 0) : -1;
+    if (i < 0 || g_opp[i].floor <= 0) return 0;
+    int a = rtt_auto_now();
+    if (a > 0 && g_opp[i].rtt_d > 0 && a <= g_opp[i].rtt_d - 2) {        /* (a) the connection changed: the floor was for another one */
+        printf("[rbnet] auto delay: the round trip to %s now gives delay %d (the floor %d was learned when it gave %d): another connection, the floor is forgotten\n",
+               g_hs_opp, a, g_opp[i].floor, g_opp[i].rtt_d);
+        fflush(stdout);
+        g_opp[i].floor = 0; g_opp[i].rtt_d = 0;
+    }
+    return g_opp[i].floor;
+}
 static void opp_learn(void) {                           /* at the match's end (rbn_report with the match's frames) */
     static uint32_t done_id;
     if (!g_hs_opp[0] || g_lt_n < 1800 || done_id == g_match_id || g_delay_cfg >= 0 || gfx_input_delay() > 0) return;
     long long late = g_lt_hist[0];
-    if (late * 100 < g_lt_n * 2) return;                /* (2% of the frames more than 2 frames late) */
+    if (late * 100 < g_lt_n * 2) {                      /* (2% of the frames more than 2 frames late) */
+        int i = opp_find(g_hs_opp, 0);
+        if (i < 0 || g_opp[i].floor <= 0 || g_hs_delay < g_opp[i].floor || late * 1000 >= g_lt_n * 5) return;
+        done_id = g_match_id;                           /* (b) a clean match at the floor: one frame less, nothing once auto covers it */
+        int a = rtt_auto_now(), f = g_opp[i].floor - 1;
+        if (f <= a || f <= 0) { f = 0; g_opp[i].rtt_d = 0; }
+        if (f) printf("[rbnet] auto delay: %s's pads came on time at delay %d (%lld of %lld frames 2+ frames late): the next matches against them start from delay %d\n",
+                      g_hs_opp, g_hs_delay, late, g_lt_n, f);
+        else printf("[rbnet] auto delay: %s's pads came on time at delay %d (%lld of %lld frames 2+ frames late): the floor is gone, the next matches use auto (measured now %d)\n",
+                    g_hs_opp, g_hs_delay, late, g_lt_n, a);
+        fflush(stdout);
+        g_opp[i].floor = f;
+        return;
+    }
     done_id = g_match_id;
     int i = opp_find(g_hs_opp, 1); if (i < 0) return;
     int f = g_hs_delay + 1; if (f > 7) f = 7;
     if (f > g_opp[i].floor) {
+        int a = rtt_auto_now();
         g_opp[i].floor = f;
+        g_opp[i].rtt_d = a > 0 ? a : g_hs_delay;
         printf("[rbnet] auto delay: %s's pads came more than 2 frames late in %lld of %lld frames (%.1f%%): the next matches against them start from delay %d\n", g_hs_opp, late, g_lt_n, 100.0 * late / g_lt_n, f);
         fflush(stdout);
     }
