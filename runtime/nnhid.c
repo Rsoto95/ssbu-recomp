@@ -345,7 +345,16 @@ static void results_auto_tick(void) {                    /* once per poll of pla
     if (secs < 0) { const char *e = getenv("SSBU_RESULTS_AUTO"); secs = e && *e ? atoi(e) : 15; if (secs && secs < 5) secs = 5; if (secs > 600) secs = 600; test = getenv("SSBU_RESULTS_AUTO_TEST") != NULL; }      /* (test aid: any fight counts, also in a hall) */
     if (g_ra_hold > 0) g_ra_hold--;
     if (!secs) return;
-    if (dm_fight_on()) { if (fought < 100000) fought++; arena = test || dm_melee_mode() == 0x14; armed = 0; return; }
+    /* (2026-11-24) an arena's rollback match is played as a local versus match: its melee mode is 0x14 -> 0 at the
+     * handshake (debug_mode.c, "room match: melee mode 20 -> 0"), so in the fight the mode alone never said "arena" and
+     * the results never passed by themselves (owner's 5-member arena, 2026-11-24: no "results:" line in any log). The
+     * arena seen at the set-up (dm_arena_fighters >= 0), with this match a rollback one (fighter or spectator), says it. */
+    if (dm_fight_on()) {
+        int dm_arena_fighters(int seat_of_rank[2]), rbn_started(void), rbn_spectating(void), s[2];
+        if (fought < 100000) fought++;
+        arena = test || dm_melee_mode() == 0x14 || (dm_arena_fighters(s) >= 0 && (rbn_started() || rbn_spectating()));
+        armed = 0; return;
+    }
     if (fought >= 180 && arena && !armed) { armed = 1; n = 0; pressed = 0; t_end = GetTickCount64(); }      /* (a fight of 3 s or more just ended) */
     fought = 0;
     if (!armed) return;
