@@ -24,6 +24,7 @@ long long rbn_desyncs(void);
 int dm_ladder_match(int *rule_kind, int *stock, uint64_t chara[2], uint32_t *stage);      /* debug_mode.c */
 int dm_ladder_stocks(int entry);
 int dm_ladder_deaths(int entry);
+int dm_arena_fighters(int seat_of_rank[2]);            /* debug_mode.c: the seats of players 1 and 2 ({0, 1} outside a Battle Arena) */
 
 #define LR_RING 512                                     /* frames kept (more than any rollback window) */
 #define LR_TIME_LIMIT (7 * 60 * 60)                     /* the ladder's 7 minutes, in fight frames */
@@ -37,15 +38,19 @@ static int lr_on(void) {
     if (g_lr_on < 0) { const char *e = getenv("SSBU_LADDER"); g_lr_on = !(e && e[0] == '0'); }
     return g_lr_on;
 }
+/* (2026-11-22) the fighter entry of player 1 / 2 of the rollback match: its seat. In a Battle Arena of three or more the
+ * fighters are not always seats 0 and 1 (seats 0 and 2: entry 1 has no record, so no sample was ever final and no result
+ * was sent: those matches were never counted). */
+static int lr_entry(int k) { int s[2]; dm_arena_fighters(s); return s[k] >= 0 && s[k] < 8 ? s[k] : k; }
 int ladder_wants_damage(void) { return lr_on() && rbn_started(); }
 /* fighter_host.c, the fighters' frame line of every pass: entry 0 / 1 = player 1 / 2 */
-void ladder_note_damage(int entry, float dmg) { if (entry == 0 || entry == 1) g_lr_dmg[entry] = dmg; }
+void ladder_note_damage(int entry, float dmg) { for (int k = 0; k < 2; k++) if (entry == lr_entry(k)) g_lr_dmg[k] = dmg; }
 /* net_session.c rbn_pass_hash: pass f is over */
 void ladder_pass(long long f) {
     if (f <= 0 || !lr_on() || !rbn_started()) return;
     LrSample *s = &g_lr_ring[f % LR_RING];
     s->frame = f;
-    for (int k = 0; k < 2; k++) { s->stocks[k] = dm_ladder_stocks(k); s->deaths[k] = dm_ladder_deaths(k); s->dmg[k] = g_lr_dmg[k]; }
+    for (int k = 0; k < 2; k++) { int e = lr_entry(k); s->stocks[k] = dm_ladder_stocks(e); s->deaths[k] = dm_ladder_deaths(e); s->dmg[k] = g_lr_dmg[k]; }
 }
 /* net_session.c rbn_finalize: frame f is final */
 void ladder_final(long long f) {
@@ -72,6 +77,16 @@ void ladder_fight_off(void) {
     memset(&r, 0, sizeof r);
     if (!dm_ladder_match(&r.rule_kind, &r.stock, r.chara, &r.stage)) { printf("[online] result: not an agreed online match (nothing sent)\n"); fflush(stdout); return; }
     r.seed = rbn_match_seed();
+    /* (2026-11-22) the last fall: the fight is off from the frame of the last KO on, so no pass of the fight ever sampled
+     * it (the last sample said 2 falls each of 3 stocks: "no winner", and a match counted only when the winner had more
+     * stocks left before the last KO). The falls as the game holds them now, the match over, have it: taken when they are
+     * the sample's plus that one fall (anything else: the sample alone, as before). */
+    {   int now[2] = {dm_ladder_deaths(lr_entry(0)), dm_ladder_deaths(lr_entry(1))};
+        int more = now[0] >= 0 && now[1] >= 0 && s.deaths[0] >= 0 && s.deaths[1] >= 0 ? (now[0] - s.deaths[0]) + (now[1] - s.deaths[1]) : -1;
+        printf("[online] result: falls at the last final frame %d / %d, now that the match is over %d / %d (%s)%c", s.deaths[0], s.deaths[1], now[0], now[1],
+               more == 1 && now[0] >= s.deaths[0] && now[1] >= s.deaths[1] ? "the last fall counted" : "the last final frame's kept", 10);
+        if (more == 1 && now[0] >= s.deaths[0] && now[1] >= s.deaths[1]) { s.deaths[0] = now[0]; s.deaths[1] = now[1]; }
+        fflush(stdout); }
     r.slot = rbn_local_player();
     for (int k = 0; k < 2; k++) { r.stocks[k] = s.stocks[k]; r.dmg10[k] = dmg10(s.dmg[k]); }
     /* (2026-11-07, the score) a stock match: the stocks left are the rule's stocks less the falls (dead_count), so a fighter

@@ -35,12 +35,25 @@ void net_match_find(void) {}
 void net_match_find_rb(void) {}
 void net_match_cancel(void) {}
 void net_match_get(NetMatch *o) { memset(o, 0, sizeof *o); o->state = MM_OFFLINE; o->players = o->searching = o->code_players = -1; }
+void net_room_score_get(NetRoomScore *o) { memset(o, 0, sizeof *o); o->age_ms = 1 << 30; }
 void net_ladder_get(NetLadder *o) { memset(o, 0, sizeof *o); o->state = NET_LADDER_OFF; o->last_outcome = -1; }   /* (ladder: off without online play) */
 void net_ladder_result(const NetLadderResult *r) { (void)r; }
 void net_arena_get(NetArena *o) { memset(o, 0, sizeof *o); }            /* (arena: nothing without online play) */
 void net_arena_join(int in) { (void)in; }
 int net_arena_turn(void) { return 0; }
 int net_arena_queued(void) { return 0; }
+void net_hall_get(NetHall *out) { memset(out, 0, sizeof *out); }
+void net_hall_op(int op, uint32_t arg, const char *code) { (void)op; (void)arg; (void)code; }
+const char *net_hall_name(const NetHall *h, uint32_t ip) { (void)h; (void)ip; return ""; }
+void net_hall_pick_set(const char *internal) { (void)internal; }
+const char *net_hall_pick(void) { return ""; }
+uint64_t net_hall_chara(void) { return 0; }
+int net_hall_member(void) { return 0; }
+void net_hall_get_ready(void) { }
+int net_hall_ready(void) { return 1; }
+void net_hall_ready_set(int on) { (void)on; }
+void net_hall_match_over(void) { }
+void net_hall_parked(uint64_t chara, int by_pilot) { (void)chara; (void)by_pilot; }
 void net_arena_create(void) {}
 void net_arena_close(void) {}
 void net_arena_kick(const char *name) { (void)name; }

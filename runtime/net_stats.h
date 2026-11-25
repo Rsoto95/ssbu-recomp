@@ -77,6 +77,10 @@ typedef struct {
     char score_name[2][33];                 /* their names: the ladder name, else the lobby name */
 } NetLadder;
 void net_ladder_get(NetLadder *out);        /* never blocks */
+/* (2026-11-22) a Battle Arena's table as the lobby last said it (ROOM_SCORE, every 2 s while this player is of the room):
+ * every player of the room, most wins first. n = 0 or age_ms large: none to show. */
+typedef struct { int n, age_ms; unsigned gid; struct { char name[33]; int w, l, me; } row[16]; } NetRoomScore;
+void net_room_score_get(NetRoomScore *out); /* never blocks */
 enum { NET_LADDER_F_ABANDON = 1, NET_LADDER_F_DISCONNECT = 2, NET_LADDER_F_STOCKS_FALLS = 4 };   /* 4 (2026-11-07): stocks left = the rule's stocks less the falls */
 typedef struct {
     uint64_t seed;                          /* the match handshake's seed: the same on both games */
@@ -118,6 +122,49 @@ int net_arena_queued(void);                 /* 1 = in the room's queue, its turn
 void net_arena_create(void);                /* make a room and be its host (and in its queue) */
 void net_arena_close(void);                 /* the host closes its room */
 void net_arena_kick(const char *name);      /* the host removes a player from its room */
+
+/* (2026-11-21, lobby 1.9) A HALL: a room where several pairs play rollback matches at the same time (Smash versus). It
+ * has a code of 5 characters and stations of two players, who play each other until one stands up. A player sits at a
+ * station (and waits there for a rival) or challenges a free player; when the other accepts both sit at a new station.
+ * While this player sits at a station a Smash (versus) match waits for the rival and searches the lobby for it by itself
+ * (net_session.c rbn_handshake, through net_arena_queued / net_arena_turn). */
+enum { NET_HALL_OUT = 0, NET_HALL_IN, NET_HALL_NONE, NET_HALL_FULL };                 /* status */
+enum { NET_HP_FREE = 0, NET_HP_SEATED, NET_HP_MATCHED, NET_HP_PLAYING };              /* a player's state */
+enum { NET_HALL_LEAVE = 0, NET_HALL_ENTER = 1, NET_HALL_MAKE = 3, NET_HALL_CHALLENGE, NET_HALL_ACCEPT, NET_HALL_DECLINE, NET_HALL_SIT, NET_HALL_STAND, NET_HALL_CANCEL };
+typedef struct { uint32_t ip; char name[33]; int state, station; } NetHallMember;
+typedef struct { int number, playing; uint32_t p1, p2; int w1, w2; } NetHallStation;
+typedef struct {
+    int known;                              /* the lobby answered lately (0: not yet, or an older lobby without halls) */
+    int asked;                              /* this game asks to be in a hall */
+    int status;                             /* NET_HALL_* */
+    char code[6];
+    uint32_t me;                            /* this player's lobby address */
+    int state, station, secs;               /* NET_HP_*, its station (0 none), seconds in that state */
+    uint32_t opp; char opp_name[33];        /* the other player of its station */
+    uint32_t from; char from_name[33];      /* who challenges this player (0 nobody) */
+    uint32_t to;                            /* whom this player challenges (0 nobody) */
+    int nmembers; NetHallMember members[30];
+    int nstations; NetHallStation stations[16];
+} NetHall;
+void net_hall_get(NetHall *out);            /* never blocks */
+void net_hall_op(int op, uint32_t arg, const char *code);    /* NET_HALL_*: arg = a player's address or a station number; code for ENTER */
+const char *net_hall_name(const NetHall *h, uint32_t ip);    /* a member's name ("" unknown) */
+/* the fighter chosen in the hall's screen (its internal name, as in ui_chara_<name>; "" = the one of the game's own
+ * character select): used for this player's side of a hall's match (debug_mode.c hs_apply, net_session.c) */
+void net_hall_pick_set(const char *internal);
+const char *net_hall_pick(void);
+uint64_t net_hall_chara(void);              /* its ui_chara value, 0 = none (not in a hall, halls off, nothing chosen) */
+/* (2026-11-22) matches started from the hall's screen. net_hall_member: in a hall (halls on). net_hall_get_ready: the port
+ * plays the game's screens itself until the game waits for the hall's matches (nnhid.c: the hall's pilot). After a match the
+ * two of a station play again only when each has said so (net_hall_ready_set(1): "Rematch"); a new rival needs no word. */
+int net_hall_member(void);
+void net_hall_get_ready(void);
+int net_hall_ready(void);
+void net_hall_ready_set(int on);
+void net_hall_match_over(void);             /* rollback_controller.c: a rollback match ended */
+void net_hall_parked(uint64_t chara, int by_pilot);      /* net_session.c: the game waits in a hall match's handshake; its own fighter there */
+int nnhid_pilot_on(void);                   /* nnhid.c: 0 off, 1 pressing through the results, 2 through the menus */
+void nnhid_pilot(int mode);
 #ifdef __cplusplus
 }
 #endif

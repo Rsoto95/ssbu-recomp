@@ -18,6 +18,62 @@ fighters through the lobby). While it is on, Local Wireless rooms are not availa
 plus the lobby 1.7, installed by `tools/net/deploy_arenas.sh` (Oracle Cloud ports: `tools/net/oci_arenas_ports.sh`);
 reverse-engineering notes: [ONLINE_MENU_RE.md](ONLINE_MENU_RE.md). Quickplay is not done.
 
+**Salas** (2026-11-21, not yet tried with games): a room with several stations, so several pairs fight at the same time.
+The game runs one fight per Battle Arena, so a sala is a group of arenas under one 5-character code: each station is an
+arena, with the game's own queue, spectators and netcode. F1 > Experimental > Sala: **Make a sala** gives the code,
+**Enter the sala** takes a friend's (graphics.ini `online_sala`, applied at once). For a member, Online > Battle Arenas
+lists only the sala's stations, **Create Arena** opens the next station, and every station shows the sala's code as its
+Arena ID; whoever types that code in the game (any version of the port) is sent to a station where one player waits for a
+rival, else to the one with the fewest players. F1 shows the stations and who sits at each. A station closes when its
+host leaves; the sala and its code stay (10 minutes with nobody in it). The score of a pair starts again at another
+station. Players in no sala see the arenas of no sala, as before. Server only: `tools/net/nex_server.py`
+(test: `tools/net/test_nex_sala.py`); the lobby is unchanged.
+
+**Halls** (2026-11-21, lobby 1.9, not yet tried with games; OFF by default: graphics.ini `hall = on`, F1 > Arena, or
+`SSBU_HALL=1`; while it is off nothing of it is sent, shown or asked and every other online path is as without it; the
+lobby's `--no-halls` turns its side off): a room of the port's own where several pairs play at the same
+time, without the game's Online menu: the matches are Smash (versus) with rollback, through the lobby, so a player whose
+router keeps it out of Battle Arenas can play too, and nothing closes when the one who made it leaves. F1 > Arena > Hall:
+**Make a hall** gives a 5-character code, **Enter the hall** takes a friend's. Inside, a hall has **stations** of two
+players: **Sit at a station** (you wait there for a rival; **Sit here** takes the seat in front of a waiting player), or
+**Challenge** a free player, who gets Accept / Decline (30 s); two who accept sit at a new station. The two of a station
+then go to Smash, choose their fighters and start: their games find each other by themselves, and several stations play
+at once. After a match both stay seated (start again for a rematch; the station keeps their score) until one presses
+**Stand up**. The hall has a screen of its own over the game, driven with the controller (stations with their two seats on
+the left, the players on the right, the challenge to answer or what to do next under them): it opens by itself when the
+player enters a hall and when a challenge comes, and with Capture / Share, F3 or - held for 1 s; A sits or challenges (or
+accepts), B closes (or declines), Y stands up, X takes a challenge back, - twice leaves the hall. F1 > Arena has the same
+actions. While both are closed a small box over the game shows the stations and scores. Not done yet: watching another
+station's match. The fighter can be chosen in the hall's screen (X: a list of names; no Mii fighters or Random; the ones
+with * need their add-on content): it replaces this player's fighter of the character select when the match is set up.
+A Smash match started while in a hall WAITS for the hall's match (no time limit, the hall's screen opens over it), and
+(2026-11-22) the matches start from the hall's screen: nothing but the game's own screens starts a fight, so the port
+presses their buttons itself (`runtime/nnhid.c`, "the hall's pilot": only with hall = on, as player 1, the real pads off
+meanwhile). **+ (Get ready)** at the game's main menu: Smash > Smash > the rules under the cursor > + on the stage select
+> on the character select hand up and left, A, A; the game is then held in the match's handshake and the match starts the
+moment the rival is there (about 20 s from the main menu). After a match the pilot presses A through the results and does
+the same again (about 25 s to the next fight), and the two of a station play again only when each pressed **A: Rematch**
+in the hall's screen (Y stands up); a new rival needs no word. The fighter is the one of the hall's screen (asked for
+before anything else; the pilot's own pick on the character select is never used). The pilot knows a screen only by the
+change of screen before it (black or loading frames, then a still screen), not by its draw count; it stops when the game
+is held in the handshake, when a fight begins, after 75 s, or when the match did not start (then a box says to do it by
+hand: Smash > any fighter > start). The stage is the one + gives on the stage select. Test (two games and a lobby on one
+PC, 2026-11-22): six matches in a row with no hand on either game, 0 desyncs. NOT tested: other saves and rules (rules
+without a stage select, custom orders of the screens), "Get ready" from the select screens after a wait was stopped, a
+rival that stands up while the other waits. The same test showed why a second match by hand did not start before: the A's
+given to port 2 on the results screen went on into the character select (the select screen's opening did not end them in
+this flow), so the A that picks the fighter made a second player join there; the pilot ends them when the results are
+over. (2026-11-22, second fix) A Smash (versus) match agreed by the handshake (a hall's match, a room code) gave
+each player only its name-tag words, not its buttons: player 1 played with the controls of the PC's own profile on each
+game, so two players with different controls never saw the same fight (owner against Kaine in a hall: 1469 of 1567
+frames differed, from the first button on; the day before from frame 184). Now, as in a room's match, each game sends its
+own player's controls (LAYOUT) and both games write both players' (`runtime/debug_mode.c` hs_apply, controls_fill_hook);
+an older game does not answer and the match is as before. Test: two games with different controls, buttons pressed, 0
+desyncs. The word for the rematch is asked only against the rival of the station's last match (it was set by itself
+when the lobby's states changed after a result). Server:
+`tools/net/ssbu_lobby.py` (HALL 41 / HALL_STATE 42; test: `tools/net/test_lobby_hall.py`); game: `runtime/net_relay.c`
+(hall_*), `runtime/menu.cpp` (sec_hall, draw_hall).
+
 Online play is experimental and ON by default: the game joins the project's public lobby
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).
@@ -248,3 +304,19 @@ It is not a damaged replay. Since 2026-11-07 the error code is written to the lo
 Design adapted from SNO2207/WindowSmash, used with the author's permission.
 
 Online play adapts parts of SNO2207/WindowSmash's network code (used with its author's agreement); the lobby protocol and the room code are ours.
+
+**A Battle Arena's results pass by themselves** (2026-11-23). The room waits for every fighter and spectator to press A on the results screen; a player who forgets holds everyone for minutes. A game still on the results 15 s after a Battle Arena's fight ended presses A itself, as player 1, every 45 polls until the screen is left (at most 90 s more). "Still on the results" = the fighters' script modules are loaded (the game unloads them the moment the results are left) and no fight is on. The player's own pad works all the while; in a hall the hall's pilot does it. `SSBU_RESULTS_AUTO=0`: off, `=<seconds>`: another wait. Only the game of the player who forgot needs this runtime. Tested with two games on one PC (a match's results left 12.7 s after the fight with a wait of 8 s, on both); NOT tested: a real arena, a spectator. `runtime/nnhid.c` (`results_auto_tick`), `runtime/nnro.c` (`nnro_fighter_modules`).
+
+**Fix (2026-11-24): it never worked in a real arena.** A rollback arena match is played as a local versus match: the handshake writes the melee mode 0x14 -> 0, so in the fight the mode never said "arena" (the test used `SSBU_RESULTS_AUTO_TEST`, which skips that check). 5-member arena of 2026-11-24: no `results:` line in any of 6 players' logs. Now it also counts as an arena when the set-up saw one (`dm_arena_fighters` >= 0) and the match is a rollback one, fighter (`rbn_started`) or spectator (`rbn_spectating`).
+
+**The score of a Battle Arena** (2026-11-22). Two faults of the game's result (ladder_report.c), both fixed: (1) it read the
+fighters of entries 0 and 1, but in an arena of three or more the two fighters are their seats (0 and 2, 1 and 2...):
+such a match had no sample and sent no result; now the seats of the match (dm_arena_fighters). (2) The fall of the last
+KO was never in the last sample (the fight is off from that frame on), so a match counted only when the winner had more
+stocks before the last KO (both on their last stock: "no winner"); now the falls the game holds when the match is over
+are taken when they are the sample's plus one. The lobby takes the first RESULT with a winner, so one updated game of the
+two is enough. New: the arena's table (lobby ROOM_SCORE 43, every 2 s to each player last seen in the room; menu.cpp
+draw_room_score): every player of the room with won / lost, most wins first, shown over the game while no fight is on
+(not over a fight, not while F1 or a hall's box is shown). Needs the lobby of this date; an older one sends nothing.
+Tried with two games on one PC (1 stock: three matches counted 1-0, 2-0, 3-0; the table received and drawn); the
+three-seat case and the look of the table on a real arena are not tried yet.

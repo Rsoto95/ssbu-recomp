@@ -85,6 +85,32 @@ only logs them (no answer): the game shows "loading", then an error (2618-0006 b
 Next: answer the NAT check (the client's address as seen, per request type), then Pia's own session / mesh between
 two games; then route the arena's fight into our rollback match (plan phase 3).
 
+## Salas (2026-11-21): several arenas under one code
+
+Our own addition, in `tools/net/nex_server.py` (the comment above `SALAS`) and `runtime/online_menu.inc`. What changes in
+the methods above, for a member of a sala only:
+
+- 38 (create): the arena is the sala's next station (the lowest number free).
+- 52 (search): the sala's stations only, in their order. Players in no sala get the arenas of no sala.
+- 55 (code): the sala's code, for every station. (Also fixed: an arena asked twice got a new code each time.)
+- 56 (typed code): a sala's code makes the player a member and answers the gid of a station (one player waiting first,
+  then the fewest members; 0 when no station is open). Any other code: the arena of no sala that has it.
+- 39 (join): entering a station makes the player a member of its sala.
+- A player is in one arena at a time: entering or making one takes it out of the others, and closes one it had made.
+
+On the arena query port (UDP 39599, little-endian):
+
+- `"SALA?"` + version u8 (1) + op u8 (0 still here, 1 enter, 2 leave, 3 make) + pid u64 + code[5] + name length u8 + name
+  -> `"SALA!"` + version u8 + status u8 (0 member, 1 no such sala, 2 in none, 3 no more salas) + code[5] + stations u8 +
+  members u8. Never 16 bytes long (a 16-byte datagram there is a NAT check).
+- `"STATUS?"` + version u8 (2) + pid u64 -> `"SALAST!"` + online u16 + sala[5] + rows u8 + per row: gid u32 + station u8
+  (0: an arena of no sala) + code[5] + members u8 + most u8 + fighting seats u8 (0: not known) + n u8 + n x (seat u8 +
+  name[10]). The plain `"STATUS?"` answers as before, with the arenas of no sala only.
+
+Not known until tried with games: whether the game accepts a gid from 56 whose arena shows another code, or two arenas
+with the same code (55); what it shows for an empty or shortened list (52), for a station that closed under it, and for a
+full one; whether a host that leaves sends UnregisterGathering; the characters of the game's Arena ID keypad.
+
 ## Open
 
 - The `%` in the host names (`lp1` on a console): harmless while we answer every name.

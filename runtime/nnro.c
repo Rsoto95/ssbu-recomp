@@ -650,6 +650,12 @@ static void ro_GetBufferSize(Ctx *c) {           /* (size_t *out, const void *nr
     c->x[0] = RO_OK;
 }
 
+/* (2026-11-23, nnhid.c: the results screen that passes by itself) the fighters' script modules loaded now (lua2cpp_<fighter>;
+ * not lua2cpp_common / lua2cpp_item, which stay): the game loads them for a match and unloads them when its results
+ * screen is left */
+static volatile LONG g_ro_fighters;
+static int ro_fighter_name(const char *n) { return n && !strncmp(n, "lua2cpp_", 8) && strcmp(n, "lua2cpp_common") && strcmp(n, "lua2cpp_item"); }
+int nnro_fighter_modules(void) { return (int)g_ro_fighters; }
 static void ro_LoadModule(Ctx *c) {              /* (Module *out, const void *nro, void *bss, size_t bssSize, int flag) */
     uint64_t out = c->x[0], nro = c->x[1], bss = c->x[2], bss_size = c->x[3];
     int flag = (int)c->x[4];
@@ -722,6 +728,7 @@ static void ro_LoadModule(Ctx *c) {              /* (Module *out, const void *nr
         if (data_off && data_off <= in->file_size) VirtualProtect((void *)(uintptr_t)in->base, data_off, PAGE_READONLY, &oldp);
     }
     m->loaded = 1;
+    if (ro_fighter_name(in->name)) InterlockedIncrement(&g_ro_fighters);
     for (uint64_t s = 0; s < (span + (1u << NRO_SLOT_SHIFT) - 1) >> NRO_SLOT_SHIFT; s++)
         g_slot[((in->base - NRO_BASE) >> NRO_SLOT_SHIFT) + s] = m;
     published = publish_exports(m, 1);
@@ -770,6 +777,7 @@ static void ro_UnloadModule(Ctx *c) {            /* (Module *) */
     sky_module_unloaded(m);
     publish_exports(m, 0);
     m->loaded = 0;
+    if (ro_fighter_name(m->info->name)) InterlockedDecrement(&g_ro_fighters);
     size_t span = ((size_t)m->info->image_size + 0xffff) & ~(size_t)0xffff;
     for (uint64_t s = 0; s < (span + (1u << NRO_SLOT_SHIFT) - 1) >> NRO_SLOT_SHIFT; s++)
         g_slot[((m->info->base - NRO_BASE) >> NRO_SLOT_SHIFT) + s] = NULL;

@@ -167,6 +167,12 @@ int rbg_on(void) { if (g_rbg < 0) g_rbg = rbn_on() > 0; return g_rbg; }
 static long long g_rbg_rb, g_rbg_k[RG_MAXSLOT + 2], g_rbg_rerun, g_rbg_miss, g_rbg_stalls, g_rbg_capfail, g_rbg_capskip, g_rbg_lastlocal, g_rbg_real, g_rbg_gone;
 static double g_rbg_stall_ms, g_rbg_load_ms, g_rbg_tick0, g_rbg_next, g_rbg_last_go;
 static double g_rbg_disp_debt; static long long g_rbg_disp_n, g_rbg_disp_held, g_rbg_disp_free, g_rbg_disp_lock;      /* (2026-11-07) passes paced on the display's ticks (rbg_step) */
+/* (2026-11-19, display.c "THE TICK WAITS FOR THE FRAME AFTER A ROLLBACK") 1 = a rollback was made and the first real pass after
+ * it has not ended (its picture is still to come: the display may move a tick for it), 2 = that pass ended and gave its
+ * picture (rbg_step then starts the next pass at the tick that shows it), 0 = nothing owed. Read by the display's tick thread:
+ * only for 60 ms after the rollback, so a pass that never comes (a wait for the other player) holds no tick back. */
+static volatile LONG g_rbg_owe; static volatile double g_rbg_owe_t; static long long g_rbg_slip_waits;
+int rbg_frame_owed(void) { return g_rbg_owe && g_rbg_in_match == 1 && now_ms() - g_rbg_owe_t < 60.0; }
 static volatile LONG g_rbg_last_k, g_rbg_max_k;
 
 static float *g_rbg_work, *g_rbg_gap, *g_rbg_wcyc; static ULONG64 g_rbg_cyc_go; static unsigned char *g_rbg_wk; static int g_rbg_nw, g_rbg_ng, g_rbg_pace = -1, g_rbg_tick_k;
@@ -239,6 +245,7 @@ static int rbg_rollback(Ctx *c, long long i, int m) {
     g_rbg_load_ms += now_ms() - t0; g_rbg_t_load += now_ms() - t0; g_rbg_recap_first = -1; g_rbg_t_pass0 = now_ms();
     int k = (int)(i - best);
     g_rgs_left = k; g_rgs_next = best + 1; g_ra_phase = 2; g_rbg_cur_k = k;
+    g_rbg_owe_t = now_ms(); InterlockedExchange(&g_rbg_owe, 1);      /* the next real pass's picture is late by this rollback: its tick may wait for it */
     g_rbg_rb++; g_rbg_k[k < RG_MAXSLOT + 1 ? k : RG_MAXSLOT + 1]++; g_rbg_rerun += k; g_rbg_tick_k += k;
     InterlockedExchange(&g_rbg_last_k, k); if (k > g_rbg_max_k) InterlockedExchange(&g_rbg_max_k, k);
     if (g_rbg_rb <= 20 || g_rbg_rb % 200 == 0 || g_rbg_detail > 0) LOG("r1: RB NET: rollback %lld at frame %lld: wrong guess at %d, state of frame %lld loaded in %.3f ms, %d frames again\n", g_rbg_rb, i, m, best, now_ms() - t0, k);
@@ -406,6 +413,7 @@ static void rbg_step_body(Ctx *c) {
         else rbg_fallback_try_recover(i, c);              /* after a fallback: rollback comes back once things have been quiet for a while */
     } else {                                            /* a real pass ended */
         g_rgs_next = i + 1; g_rbg_real++;
+        if (g_rbg_owe == 1) InterlockedExchange(&g_rbg_owe, 2);      /* the first one after a rollback: its picture was given at its submission, just before this safe point */
         rbn_drain(i);
         int m = rbg_sched(i, rbn_take_mismatch());
         if (m > 0 && m <= i) {
@@ -462,7 +470,7 @@ static void rbg_step_body(Ctx *c) {
         if (g_rgs_next - rbn_confirmed() <= (g_rbg_noring || g_rg_short ? 0 : rbn_ahead())) break;
         if (!g_rbg_noring && g_rg_short && g_rgs_next - rbn_confirmed() <= rbn_ahead() && !stalled) g_rbg_short_waits++;
         if (rbn_peer_gone()) { if (!g_rbg_gone++) LOG("r1: RB NET: no message from the other player for 5 s at frame %lld: going on alone (guesses)\n", i); break; }
-        if (!stalled) { stalled = 1; ts = now_ms(); g_rbg_stalls++; r1_ring_let_go(); }
+        if (!stalled) { stalled = 1; ts = now_ms(); g_rbg_stalls++; r1_ring_let_go(); InterlockedExchange(&g_rbg_owe, 0); }      /* (waiting for the other player: no tick waits for a pass that is not running) */
         if (rbn_spectating() && rbn_spec_wait(now_ms() - ts)) {     /* (2026-11-02) a spectator: a notice after 1 s; after 30 s this view is given up */
             g_rbg_stall_ms += now_ms() - ts; stalled = 0;
             LOG("r1: RB NET: spectator: the fighters' pads stopped coming for 30 s at frame %lld: this view is given up (player 1 walks off)\n", i);
@@ -521,7 +529,16 @@ static void rbg_step_body(Ctx *c) {
                 if (seen < 0 || g_rbg_disp_n == 0 || nd < seen) seen = nd;       /* (a new match: its own count from 0) */
                 if (nd != seen) { seen = nd; if (lead >= tper * 0.75) { tick += tper; g_rbg_disp_held++; } }
             }
-            if (tick < now) g_rbg_disp_free++;
+            /* (2026-11-19) the first real pass after a rollback ended after its tick: the display moved that tick for its
+             * picture (display.c g_slip_n). The next pass starts at the moved tick and the schedule goes on from there, the
+             * fight that much behind: before, the passes ran back to back to meet the old schedule again, and the late
+             * picture and the next one came to the same tick (one of them never shown) */
+            if (g_rbg_owe == 2 && tick < now) {
+                double display_wait_planned_tick(double max_ms);
+                double shown = display_wait_planned_tick(2.0 * tper);
+                if (shown > 0) { tick = shown; g_rbg_slip_waits++; }
+            }
+            if (tick < now_ms()) g_rbg_disp_free++;
             rbg_wait_until(tick);
             g_rbg_next = tick + tper; g_rbg_disp_n++; if (dk == 2) g_rbg_disp_lock++;
         } else {
@@ -529,6 +546,7 @@ static void rbg_step_body(Ctx *c) {
         rbg_wait_until(g_rbg_next);
         g_rbg_next += period;
         }
+        if (g_rbg_owe == 2) InterlockedExchange(&g_rbg_owe, 0);
         /* (2026-11-05) the other player's messages that came during the wait are taken now, before the next pass reads its pad:
          * before, they waited for the next safe point (up to a frame), and a pad there in time was guessed and rolled back */
         if (!rbn_loop()) rbn_drain(i);
@@ -845,7 +863,7 @@ void rbg_fight_off(void) {
             }
         } else if (n >= 1800) LOG("r1: RB NET: this PC's work per frame: %d of %d frames over 16.7 ms (%.1f%%)\n", over, n, 100.0 * over / n);
     }
-    if (g_rbg_in_match == 1 && g_rbg_disp_n) LOG("r1: RB NET: pacing on the display's ticks: %lld passes (%lld on the display lock's vblanks, the rest on its own 60 Hz clock), %lld ticks held for the time sync, %lld passes already late at their tick (after a hitch or a slow pass)\n", g_rbg_disp_n, g_rbg_disp_lock, g_rbg_disp_held, g_rbg_disp_free);
+    if (g_rbg_in_match == 1 && g_rbg_disp_n) LOG("r1: RB NET: pacing on the display's ticks: %lld passes (%lld on the display lock's vblanks, the rest on its own 60 Hz clock), %lld ticks held for the time sync, %lld passes already late at their tick (after a hitch or a slow pass), %lld passes after a rollback started at the tick the display moved for their picture (SSBU_RB_TICK_SLIP=0: never)\n", g_rbg_disp_n, g_rbg_disp_lock, g_rbg_disp_held, g_rbg_disp_free, g_rbg_slip_waits);
     if (g_rbg_in_match == 1) padlog_dump(rbn_match_number());
     else g_padlog_n = 0;
     { void nnpad_stick_report(const char *when); char w[32]; snprintf(w, sizeof w, "up to the end of match %d", rbn_match_number()); nnpad_stick_report(w); }     /* (2026-11-07) the sticks as SDL gave them in the match (nnpad_sdl.c) */
@@ -859,11 +877,12 @@ void rbg_fight_off(void) {
     rbg_fibers_reap();                                  /* (the ring is empty: only running fibers and live objects keep theirs) */
     { char w[48]; snprintf(w, sizeof w, "match %d over", rbn_match_number()); rb_mem_report(w); }
     { char mk[24]; snprintf(mk, sizeof mk, "match%dover", g_rbg_in_match == 1 ? rbn_match_number() : 0); if (g_rbg_in_match == 1) input_mark(mk); else input_mark("localmatchover"); }
+    if (g_rbg_in_match == 1) { void net_hall_match_over(void); net_hall_match_over(); }      /* (2026-11-22) in a hall: back to waiting for the next match by itself (nothing without hall = on) */
     { int rbn_agreed(void); int ag = rbn_agreed(); if (ag) g_rbg_agreed_done = ag; }
     g_rbg_in_match = 0; g_rbg_ff_first = -1; g_rbg_ff_reset = g_session.fight_frame; g_rbg_prepad_told = 0;
     g_rbg_rb = 0; memset(g_rbg_k, 0, sizeof g_rbg_k); g_rbg_rerun = g_rbg_miss = g_rbg_stalls = g_rbg_capfail = g_rbg_capskip = g_rbg_lastlocal = g_rbg_real = g_rbg_gone = 0;
     g_rbg_stall_ms = g_rbg_load_ms = g_rbg_tick0 = g_rbg_next = g_rbg_last_go = 0;
-    g_rbg_disp_debt = 0; g_rbg_disp_n = g_rbg_disp_held = g_rbg_disp_free = g_rbg_disp_lock = 0;
+    g_rbg_disp_debt = 0; g_rbg_disp_n = g_rbg_disp_held = g_rbg_disp_free = g_rbg_disp_lock = 0; g_rbg_slip_waits = 0; InterlockedExchange(&g_rbg_owe, 0);
     g_rbg_last_k = 0; g_rbg_max_k = 0; g_rbg_short_waits = 0; g_rg_short = 0; g_rg_need = -1; g_rbg_nw = g_rbg_ng = g_rbg_tick_k = 0; g_rbg_rb_unheld = 0; g_rbg_recap_first = 0;
     g_rbg_t_pre = g_rbg_t_load = g_rbg_t_rerun = g_rbg_t_recap = g_rbg_t_pass0 = 0; g_rbg_n_rerun = g_rbg_n_recap = 0;
     g_rbg_wd_before = g_ra_wd_fired;
@@ -894,6 +913,9 @@ void rbg_report(void) {
     { extern long long g_nex_holds, g_nex_waits, g_nex_busy, g_nex_forced; extern double g_nex_wait_ms, g_nex_wait_max;
       if (g_nex_holds || g_nex_busy) LOG("r1: RB NET report: NEX threads (the arena's connection) held at loads %lld; of them %lld had to be waited for (%.2f ms mean, %.2f ms longest); still running after 4 ms %lld (load refused), loaded anyway after 3 refusals %lld (since the process start)\n",
           g_nex_holds, g_nex_waits, g_nex_waits ? g_nex_wait_ms / g_nex_waits : 0.0, g_nex_wait_max, g_nex_busy, g_nex_forced); }
+    { extern long long g_nex_cap_holds, g_nex_cap_waits, g_nex_cap_busy, g_nex_ran_loads, g_nex_ran_small; extern double g_nex_cap_wait_max; extern unsigned long long g_nex_ran_max;
+      if (g_nex_cap_holds || g_nex_cap_busy) LOG("r1: RB NET report: NEX threads held at captures %lld; of them %lld had to be waited for (%.2f ms longest); still running after 1 ms %lld (captured without them); loads after which they had worked since the capture %lld (under 200 thousand cycles: %lld; most %llu thousand) (since the process start)\n",
+          g_nex_cap_holds, g_nex_cap_waits, g_nex_cap_wait_max, g_nex_cap_busy, g_nex_ran_loads, g_nex_ran_small, g_nex_ran_max / 1000); }
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_guest_fibers.live_skipped, g_guest_fibers.live_seen, g_guest_fibers.teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);
     { void nnunwind_catch_stats(long long *, long long *, long long *, long long *, long long *); long long l, d, cr, fu, mp; nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
       LOG("r1: RB NET report: catch table (hs15): %lld live records, %lld removed slots, %lld puts found no free slot in their window, %lld table full, longest probe %lld; dead records dropped at loads %lld (host fiber stacks known %zu)\n", l, d, cr, fu, mp, g_rgc_dead, g_nbf); }

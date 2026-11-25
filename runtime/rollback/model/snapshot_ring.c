@@ -539,7 +539,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
         g_rg_ready = 1;
         if (audio_off_wanted()) { InterlockedExchange(&g_rb_audio_off, 1); LOG("r1: RING: SSBU_RB_AUDIO_OFF: the audio threads stop at their next SDK call until the fight is over\n"); }   /* (hostrt.c rb_audio_off_gate) */
         audio_gate_fight();
-        RgSlot *s = &g_rg[0]; g_rg_head = 0; g_rg_count = 1;
+        RgSlot *s = &g_rg[0]; g_rg_head = 0; g_rg_count = 1; s->nex_cyc = 0;
         s->frame = frame; s->nent = 0;
         rg_meta_capture(s, &g_ctx_save);
         LOG("r1: RING: base state (frame %lld): full save in %.1f ms\n", frame, now_ms() - t0);
@@ -554,10 +554,12 @@ int r1_ring_capture(long long frame, Ctx *c) {
         return 0;
     }
     if (!ra_hold_quiet(g_rg_park_ms)) { g_rgp_seg = seg_was; g_rg_cap_fail++; if (g_rg_cap_fail <= 20 || g_rg_cap_fail % 100 == 0) LOG("r1: RING: capture %lld (frame %lld) skipped: %s not at a wait within %.1f ms\n", g_rg_cap_fail, frame, g_ra_busy_first_save(), g_rg_park_ms); return 0; }
+    int ra_nex_cap_hold(double); void ra_nex_cap_release(void); unsigned long long ra_nex_cycles(void);
+    ra_nex_cap_hold(1.0);                                 /* (2026-11-23) the NEX threads too, for the copy (runahead.c) */
     double t1 = now_ms();
     if (g_rg_count == g_rg_cap) { rg_slot_drop(rg_slot(0), 1); g_rg_head = (g_rg_head + 1) % g_rg_cap; g_rg_count--; }
     RgSlot *s = rg_slot(g_rg_count);
-    s->frame = frame; s->nent = 0; s->pages = 0; s->xpages = 0;
+    s->frame = frame; s->nent = 0; s->pages = 0; s->xpages = 0; s->nex_cyc = ra_nex_cycles();
     g_rg_cur = s; g_rg_fail_now = 0;
     static uint8_t *xdiff; static size_t xdn; if (xdn < g_rg_nx + 1) { free(xdiff); xdn = g_rg_nx + 1; xdiff = calloc(xdn, 1); }   /* (hs12: the extras can change at a rebase) */
     static uint32_t *xjob; static size_t xjn; size_t nxj = 0;
@@ -586,6 +588,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
         size_t undone = s->nent;
         for (size_t n = s->nent; n-- > 0;) { uint32_t id = s->ent[2 * n], old = s->ent[2 * n + 1]; rg_pool_put(g_rg_idx[id]); g_rg_idx[id] = old; rg_remark(id); }
         s->nent = 0; s->frame = -1; s->pages = s->xpages = 0;
+        ra_nex_cap_release();
         if (g_rg_keep) g_rg_kept = 1; else unpark();
         g_rg_short = 1; g_rg_short_n++; g_rgp_seg = seg_was;
         if (g_rg_short_n <= 20 || g_rg_short_n % 100 == 0) LOG("r1: RING: capture at frame %lld GIVEN UP: out of pool memory (pool %u buffers made, %u free; %lld old states freed so far; test refusals %lld): %zu pages put back, nothing lost; states kept %d (frames %lld .. %lld), needed from frame %lld\n",
@@ -602,6 +605,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
     osobj_capture(frame);                                   /* (SSBU_STATE_OBJS) events and semaphores at this capture */
     sm_capture(frame);                                      /* (debug, SSBU_STATE_MEASURE) fingerprints of the threads and objects at this capture */
     double t4 = now_ms();
+    ra_nex_cap_release();
     if (g_rg_keep) g_rg_kept = 1;                          /* a load follows at once (r1_ring_load / r1_ring_let_go lets them go) */
     else { unpark(); if (g_ra_phase != 2) nnaudio_grant(2); }      /* every thread, the audio ones too (a real pass follows); the mixer's turn (2 buffers a frame: the game needs ~1.6) */
     double t5 = now_ms();
@@ -928,6 +932,13 @@ int r1_ring_load(long long frame, Ctx *c) {
             g_rgp_seg = 1;
             return -1;
         } else { nex_row = 0; g_nex_forced++; LOG("r1: RING load of frame %lld (k %d): a NEX thread still running after 3 refusals: loaded anyway (%lld so far)\n", frame, k, g_nex_forced); }
+    }
+    {   /* (2026-11-23) did the NEX threads work between that capture and now? This load rewinds their objects under them. */
+        unsigned long long ra_nex_cycles(void); extern long long g_nex_ran_loads, g_nex_ran_small; extern unsigned long long g_nex_ran_max;
+        unsigned long long nowc = g->nex_cyc ? ra_nex_cycles() : 0, d = nowc > g->nex_cyc ? nowc - g->nex_cyc : 0;
+        if (d > g_nex_ran_max) g_nex_ran_max = d;
+        if (d >= 200000) { g_nex_ran_loads++; if (g_nex_ran_loads <= 40 || g_nex_ran_loads % 50 == 0) LOG("r1: RING load of frame %lld (k %d): the NEX threads (the arena's connection) used %llu thousand CPU cycles since that capture: their objects are rewound under them (%lld loads like this so far)\n", frame, k, d / 1000, g_nex_ran_loads); }
+        else if (d) g_nex_ran_small++;
     }
     double t1 = now_ms();
     sm_load(frame);                                        /* (debug, SSBU_STATE_MEASURE) what differs from the capture, before anything is restored */

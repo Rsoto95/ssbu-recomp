@@ -35,6 +35,11 @@ void gfx_set_input_delay(int d) { gfx_options(); g_gfx_input_delay = d; }
  * the arenas' rollback, <server>:39500) at the start by gfx_online_menu_env (boot.c), when SSBU_ONLINE_MENU is not set. */
 static int g_gfx_online_menu = 1; static char g_gfx_online_menu_server[64] = GFX_ONLINE_MENU_SERVER_DEFAULT;
 int gfx_online_menu(void) { gfx_options(); return g_gfx_online_menu; }
+/* (2026-11-21) online_sala = <5 characters>: the sala (a room with several stations, tools/net/nex_server.py) this player
+ * is a member of at the start; F1 > Experimental writes it (online_menu.inc). "" = none. */
+#include <ctype.h>
+static char g_gfx_online_sala[6];
+const char *gfx_online_sala(void) { gfx_options(); return g_gfx_online_sala; }
 static int gfx_ipv4(const char *v) { int a, b, c, d; char x; return sscanf(v, "%d.%d.%d.%d%c", &a, &b, &c, &d, &x) == 4 && a >= 0 && a < 256 && b >= 0 && b < 256 && c >= 0 && c < 256 && d >= 0 && d < 256; }
 void gfx_online_menu_env(void) {
     gfx_options();
@@ -60,6 +65,12 @@ void gfx_set_fight_sound(int on) { gfx_options(); g_gfx_fight_sound = on; }
  * from the ping for both games) and saves the ring's ~3 GB; the other game keeps its rollback. Read at the start only (a
  * ring made earlier in the session is not undone): F1 > Online writes it for the next start. */
 static int g_gfx_rb_delay_only;
+/* (2026-11-21) hall = on | off (OFF when the key is missing; SSBU_HALL=0 / 1 wins): the lobby's halls (net_relay.c hall_*,
+ * menu.cpp sec_hall and the hall's own screen). OFF: nothing of it is sent, shown or asked, and every other online path is
+ * exactly as without it. The F1 menu changes it while running. */
+static volatile int g_gfx_hall;
+int gfx_hall(void) { const char *e = getenv("SSBU_HALL"); gfx_options(); return e && *e ? e[0] == '1' : g_gfx_hall; }
+void gfx_set_hall(int on) { gfx_options(); g_gfx_hall = on != 0; }
 int gfx_rb_delay_only(void) { gfx_options(); return g_gfx_rb_delay_only; }
 /* (2026-11-05) the game turned the sound off by itself for this session (a PC at its limit, rollback_controller.c); a player's
  * own choice in F1 (gfx_fight_sound_chosen) is never overridden */
@@ -521,8 +532,11 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "unlock_all")) g_gfx_unlock_all = !_stricmp(val, "on") || !strcmp(val, "1");      /* unlock_all.c */
         else if (!_stricmp(key, "input_delay")) { }    /* (2026-11-05, owner) not read: every start is Auto (F1 > Gameplay changes it for the session) */
         else if (!_stricmp(key, "fight_sound")) g_gfx_fight_sound = !_stricmp(val, "on") || !strcmp(val, "1");      /* snapshot_ring.c */
+        else if (!_stricmp(key, "hall")) g_gfx_hall = !_stricmp(val, "on") || !strcmp(val, "1");      /* net_relay.c, menu.cpp */
         else if (!_stricmp(key, "rollback_delay_only")) g_gfx_rb_delay_only = !_stricmp(val, "on") || !strcmp(val, "1");      /* rollback_controller.c */
         else if (!_stricmp(key, "online_menu")) g_gfx_online_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* gfx_online_menu_env */
+        else if (!_stricmp(key, "online_sala")) { int k = 0; for (; k < 5 && isalnum((unsigned char)val[k]); k++) g_gfx_online_sala[k] = (char)toupper((unsigned char)val[k]);
+                                                   g_gfx_online_sala[k == 5 && !val[5] ? 5 : 0] = 0; }      /* online_menu.inc */
         else if (!_stricmp(key, "online_menu_server")) { if (gfx_ipv4(val)) snprintf(g_gfx_online_menu_server, sizeof g_gfx_online_menu_server, "%s", val); }
         else if (!_stricmp(key, "refresh_switch")) g_gfx_refresh_switch = !(!_stricmp(val, "off") || !strcmp(val, "0"));      /* display.c */
         else if (!_stricmp(key, "sharpening")) { int v = atoi(val); g_gfx_sharpening = v < 0 ? 0 : v > 100 ? 100 : v; }      /* nvn_vk_draw.c */
