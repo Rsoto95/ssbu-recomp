@@ -46,6 +46,10 @@ typedef struct {
     int slot, wireless, dropped, nbtn, naxes, nhats, gtype, has_accel, has_gyro, virt, gca;      /* gca: a port of the GameCube adapter (nnpad_gca.c) */
     char guid[40], name[80];
     Uint16 rl, rh; ULONGLONG rsent;
+    /* (2026-11-28) presses between two of the game's reads (latch_sample / nnpad_get_game): the buttons at the last sample,
+     * the ones that went down / up since the game's last read, what that read gave, and for the other reads of the same
+     * frame what the latch added / took away */
+    uint64_t lp_prev, lp_down, lp_up, lp_out, lp_add, lp_cut; LONGLONG lp_t;
 } Dev;
 
 static const char *const g_pro[16] = {"A", "B", "X", "Y", "STICK_L", "STICK_R", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
@@ -470,6 +474,7 @@ static void reassign_all(void) {                  /* [players] changed in the fi
         say("nn::pad: \"%s\" -> player %d\n", g_dev[i].name, g_dev[i].slot + 1);
     }
 }
+static void latch_all(void);
 static void poll_devices(void) {                  /* lock held */
     int n = 0;
     SDL_UpdateJoysticks();
@@ -491,6 +496,7 @@ static void poll_devices(void) {                  /* lock held */
         g_dev[i].slot = assign_slot(&g_dev[i]);
         if (g_dev[i].slot >= 0) { remember(g_dev[i].guid, g_dev[i].slot); apply_player_index(&g_dev[i]); say("nn::pad: \"%s\" -> player %d\n", g_dev[i].name, g_dev[i].slot + 1); }
     }
+    latch_all();
 }
 static void check_config(int force) {             /* lock held */
     ULONGLONG now = GetTickCount64();
@@ -503,6 +509,61 @@ static void check_config(int force) {             /* lock held */
     cfg_load(0);
     say("nn::pad: %s changed, reloaded\n", g_cfg.path);
     if (memcmp(before, g_cfg.pguid, sizeof before) || memcmp(bn, g_cfg.pnone, sizeof bn)) reassign_all();
+}
+
+/* ================================================================ presses between two reads
+ * (2026-11-28, friends: "el juego come inputs por veces") the game takes ONE picture of each pad per frame (fill_pad,
+ * nnhid.c): a button pressed and released between two pictures never reached it. With a read every 16.7 ms only the
+ * quickest taps fell in between, but a read comes 20 ms or more after the one before whenever the frame is late or
+ * held for the online time sync (up to 4 % of the reads of some players on 2026-11-27, logs "passes 20 ms or more"),
+ * and a short hop or a quick A in such a gap was lost. Now a thread looks at every pad about once per millisecond
+ * (latch_thread -> nnpad_poll -> latch_all) and remembers which buttons went down and up since the game's last read;
+ * the game's read (nnpad_get_game) then gives:
+ *   - a button pressed and already released since the last read: pressed for this read (the next read sees it up);
+ *   - a button held at the last read, released and pressed again since: UP for this read and down at the next one (the
+ *     game would otherwise see it held all along and miss the second press, e.g. mashing A).
+ * The game may read the same pad more than once in a frame (several styles, the online merge): reads less than 4 ms
+ * after the first read of the frame get the same answer. Everything happens before the pad is recorded for an online
+ * match, so both games see the same presses (rollback is unchanged). Only the game's reads use it: the menus, the
+ * Controls page and the motion sensors read the plain state (nnpad_get). SSBU_PAD_LATCH=0: off (the old reads). */
+static long long g_lp_saved, g_lp_regrab;
+static uint64_t dev_buttons(const Dev *d);
+static int latch_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("SSBU_PAD_LATCH"); on = !(e && e[0] == '0'); } return on; }
+static int bits_n(uint64_t v) { int n = 0; while (v) { v &= v - 1; n++; } return n; }
+static void latch_sample(Dev *d, uint64_t b) {                /* lock held */
+    d->lp_down |= b & ~d->lp_prev;
+    d->lp_up |= d->lp_prev & ~b;
+    d->lp_prev = b;
+}
+static void latch_all(void) {                                   /* lock held: every pad now (nnpad_poll, at most once per ms) */
+    if (!latch_on()) return;
+    for (int i = 0; i < MAXDEV; i++) { Dev *d = &g_dev[i]; if (d->used && !d->ignored && !d->dropped && d->slot >= 0) latch_sample(d, dev_buttons(d)); }
+}
+static DWORD WINAPI latch_thread(LPVOID arg) {
+    (void)arg;
+    for (;;) { Sleep(1); nnpad_poll(0); }                      /* (display.c asks for a 1 ms system timer) */
+}
+static void latch_start(void) {                                 /* lock held */
+    if (!latch_on() || g_only_virtual) return;                  /* (the self-test drives its virtual pads itself: settle polls) */
+    HANDLE h = CreateThread(NULL, 0, latch_thread, NULL, 0, NULL);
+    if (h) { SetThreadPriority(h, THREAD_PRIORITY_ABOVE_NORMAL); CloseHandle(h); say("nn::pad: presses between two reads of the game are kept (every pad looked at about once per ms; SSBU_PAD_LATCH=0: off)\n"); }
+}
+static void latch_read(Dev *d, uint64_t *buttons) {             /* lock held: the game's read of this pad */
+    LARGE_INTEGER t;
+    uint64_t cur = *buttons;
+    QueryPerformanceCounter(&t);
+    latch_sample(d, cur);
+    if (!d->lp_t || (t.QuadPart - d->lp_t) * 1000 >= 4 * g_qpf.QuadPart) {     /* the first read of a frame */
+        uint64_t regrab = d->lp_up & d->lp_out & (cur | d->lp_down);           /* held, let go and pressed again since */
+        uint64_t add = d->lp_down & ~cur & ~regrab;                            /* pressed and let go since */
+        g_lp_saved += bits_n(add); g_lp_regrab += bits_n(regrab);
+        d->lp_add = add; d->lp_cut = regrab;
+        d->lp_down = regrab;                                                   /* (the second press: given at the next read even if let go by then) */
+        d->lp_up = 0;
+        d->lp_t = t.QuadPart;
+        d->lp_out = (cur | add) & ~regrab;
+    }
+    *buttons = (cur | d->lp_add) & ~d->lp_cut;
 }
 
 int nnpad_init(void) {
@@ -518,6 +579,7 @@ int nnpad_init(void) {
     g_sdl_ok = 1;
     if (!g_only_virtual) gca_start();                    /* the GameCube adapter over WinUSB (nnpad_gca.c); its ports come in as virtual gamepads */
     poll_devices();
+    latch_start();
     say("nn::pad: SDL %d.%d.%d ready (no video); %s\n", SDL_GetVersion() / 1000000, SDL_GetVersion() / 1000 % 1000, SDL_GetVersion() % 1000, g_cfg.path);
     unlock();
     return 1;
@@ -674,6 +736,10 @@ static void stick_log(const Dev *d, float x, float y) {      /* lock held; Npad 
     stick_log_axis(s, y, &s->py, &s->py2, &s->chy, 1);
 }
 void nnpad_stick_report(const char *when) {
+    lock();
+    if (latch_on()) printf("nn::pad: presses between two reads of the game (%s): %lld pressed and let go between two reads, given to the game at the next read; %lld let go and pressed again, given as up then down\n", when, g_lp_saved, g_lp_regrab);
+    g_lp_saved = g_lp_regrab = 0;
+    unlock();
     if (!stick_log_on()) return;
     lock();
     for (int i = 0; i < MAXDEV; i++) {
@@ -691,11 +757,9 @@ void nnpad_stick_report(const char *when) {
     unlock();
     fflush(stdout);
 }
-static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
-    float dz = EFF(d, dz), outer = EFF(d, outer), trig = EFF(d, trig);
-    float v[4];
-    memset(o, 0, sizeof *o);
-    o->wired = !d->wireless;
+static uint64_t dev_buttons(const Dev *d) {               /* lock held: the Pro buttons (bits 0..15) the device holds now */
+    float trig = EFF(d, trig);
+    uint64_t r = 0;
     for (int b = 0; b < 16; b++) {
         Src s[4]; int n = prof_map(d, b, s, NULL);
         for (int k = 0; k < n; k++) {
@@ -703,9 +767,17 @@ static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
             float x = src_val(d, s[k]);
             int axis = s[k].kind == SK_AXP || s[k].kind == SK_AXN || s[k].kind == SK_AXF;
             float thr = axis && (b == 8 || b == 9 || (!s[k].raw && s[k].idx >= 4)) ? trig : 0.5f;
-            if (x > 0 && x >= thr) o->buttons |= 1ull << b;
+            if (x > 0 && x >= thr) r |= 1ull << b;
         }
     }
+    return r;
+}
+static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
+    float dz = EFF(d, dz), outer = EFF(d, outer);
+    float v[4];
+    memset(o, 0, sizeof *o);
+    o->wired = !d->wireless;
+    o->buttons = dev_buttons(d);
     for (int i = 0; i < 4; i++) {
         Src s;
         v[i] = stick_src(d, i, &s) ? src_val(d, s) : 0;
@@ -778,6 +850,16 @@ int nnpad_get(int player, NnPadState *out) {
     lock();
     Dev *d = dev_of(player);
     if (d && !d->dropped) { dev_state(d, out); if (d->gca) gca_sample(d->id); r = 1; }
+    unlock();
+    return r;
+}
+int nnpad_get_game(int player, NnPadState *out) {
+    int r = 0;
+    if (!g_sdl_ok || player < 0 || player > 7) return 0;
+    nnpad_poll(0);
+    lock();
+    Dev *d = dev_of(player);
+    if (d && !d->dropped) { dev_state(d, out); if (d->gca) gca_sample(d->id); if (latch_on()) latch_read(d, &out->buttons); r = 1; }
     unlock();
     return r;
 }
@@ -1032,7 +1114,7 @@ static SDL_JoystickID vj_make(int idx, int pid, int gamepad, int sensors_on) {
     if (sensors_on) { d.nsensors = 2; d.sensors = sd; }
     return SDL_AttachVirtualJoystick(&d);
 }
-static void settle(void) { Sleep(3); nnpad_poll(1); }
+static void settle(void) { Sleep(5); nnpad_poll(1); }      /* (5 ms: each read below is a new frame for the press latch, which takes reads less than 4 ms apart as one frame) */
 static void vj_clear(SDL_Joystick *j, int n_btn, int n_ax) { for (int i = 0; i < n_btn; i++) SDL_SetJoystickVirtualButton(j, i, false); for (int i = 0; i < n_ax; i++) SDL_SetJoystickVirtualAxis(j, i, n_ax == 6 && (i == 4 || i == 5) ? -32768 : 0); }   /* a virtual trigger rests at the bottom of its raw range */
 static void write_text(const char *path, const char *text) { FILE *f = fopen(path, "wb"); if (f) { fputs(text, f); fclose(f); } }
 static int near_(int a, int b, int tol) { return abs(a - b) <= tol; }
@@ -1160,6 +1242,25 @@ int nnpad_selftest(const NnHidHooks *h) {
         SDL_SetJoystickVirtualButton(js[0], SDL_GAMEPAD_BUTTON_GUIDE, true); settle(); h->state(0, &btn, st, &attr);
         check(btn == 0, "guide/home is not mapped (no Pro bit)");
         vj_clear(js[0], SDL_GAMEPAD_BUTTON_COUNT, 6);
+        {   /* (2026-11-28) presses between two of the game's reads (latch_read): the self-test's settle polls stand for the 1 ms thread */
+            int got[5];
+            h->state(0, &btn, st, &attr);
+            SDL_SetJoystickVirtualButton(js[0], SDL_GAMEPAD_BUTTON_EAST, true); settle();
+            SDL_SetJoystickVirtualButton(js[0], SDL_GAMEPAD_BUTTON_EAST, false); settle();
+            h->state(0, &btn, st, &attr); got[0] = (int)(btn & 1);
+            h->state(0, &btn, st, &attr); got[1] = (int)(btn & 1);           /* the same frame (less than 4 ms later): the same answer */
+            settle(); h->state(0, &btn, st, &attr); got[2] = (int)(btn & 1);
+            check(got[0] == 1 && got[1] == 1 && got[2] == 0, "press latch: A pressed and let go between two reads reaches the game once (both reads of that frame), then up");
+            SDL_SetJoystickVirtualButton(js[0], SDL_GAMEPAD_BUTTON_EAST, true); settle(); h->state(0, &btn, st, &attr); got[0] = (int)(btn & 1);
+            SDL_SetJoystickVirtualButton(js[0], SDL_GAMEPAD_BUTTON_EAST, false); settle();
+            SDL_SetJoystickVirtualButton(js[0], SDL_GAMEPAD_BUTTON_EAST, true); settle();
+            h->state(0, &btn, st, &attr); got[1] = (int)(btn & 1);
+            settle(); h->state(0, &btn, st, &attr); got[2] = (int)(btn & 1);
+            SDL_SetJoystickVirtualButton(js[0], SDL_GAMEPAD_BUTTON_EAST, false); settle(); h->state(0, &btn, st, &attr); got[3] = (int)(btn & 1);
+            settle(); h->state(0, &btn, st, &attr); got[4] = (int)(btn & 1);
+            check(got[0] == 1 && got[1] == 0 && got[2] == 1 && got[3] == 0 && got[4] == 0, "press latch: A held, let go and pressed again between two reads: up for one read, then down (the second press is not lost)");
+            vj_clear(js[0], SDL_GAMEPAD_BUTTON_COUNT, 6); settle(); h->state(0, &btn, st, &attr);
+        }
     }
 
     /* ---- axes */

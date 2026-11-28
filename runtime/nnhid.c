@@ -771,7 +771,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     int slot = g_source[id];
     if (sdl_on()) {
         NnPadState ps;
-        if (!(id >= 1 && net_merge()) && nnpad_get((int)id, &ps)) {      /* (online the pads of players 2..8 play port 1: not twice) */
+        if (!(id >= 1 && net_merge()) && nnpad_get_game((int)id, &ps)) {      /* (online the pads of players 2..8 play port 1: not twice) */
             wired = ps.wired;
             if (devices_live() && !in_blocked()) {      /* U1: not while the settings menu is open (menu.cpp) */
                 buttons |= ps.buttons;
@@ -782,7 +782,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
             }
         }
         if (id == 0 && net_merge() && devices_live() && !in_blocked())      /* online: the other pads of this PC play port 1 too */
-            for (int p = 1; p < 8; p++) if (nnpad_get(p, &ps)) {
+            for (int p = 1; p < 8; p++) if (nnpad_get_game(p, &ps)) {
                 buttons |= ps.buttons;
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
                 if (ps.rx || ps.ry) { rx = ps.rx; ry = ps.ry; }

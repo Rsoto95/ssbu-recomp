@@ -22,6 +22,7 @@ int  nnpad_gc_native(void);                      /* controllers.ini gamecube_sty
 void nnpad_poll(int force);                      /* hot-plug, config reload; cheap when called often (at most once per ms) */
 int  nnpad_present(int player);                  /* a device is assigned to this player slot */
 int  nnpad_get(int player, NnPadState *out);     /* 0 = none */
+int  nnpad_get_game(int player, NnPadState *out);/* the game's own read (nnhid.c fill_pad): presses since its last read are kept (nnpad_sdl.c) */
 void nnpad_rumble(int player, float low, float high);   /* amplitudes 0..1 of the low and high band */
 void nnpad_disconnect(int player);               /* DisconnectNpad: hidden until one of its buttons is pressed */
 void nnpad_swap(int a, int b);                   /* SwapNpadAssignment */
