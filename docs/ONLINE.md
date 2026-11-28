@@ -132,6 +132,10 @@ The host's router must let the port in:
 
 - `SSBU_ONLINE=<host:port>`, or `online_server = <host:port>`.
 - Players connect directly by UDP hole punching. If that fails, the lobby relays the traffic.
+- Before punching the second port, the game asks two STUN servers (`online_stun`, and Cloudflare's) which outside port
+  its router gives, and tells the opponent that port. A router that gives every destination its own port is helped with
+  short-lived openers and spare sockets ("the spread"). `online_stun = off` turns this off.
+- A relay closer to the players can carry the matches that still go through the lobby: see [RELAY.md](RELAY.md).
 - `online_direct = off` (or `SSBU_ONLINE_DIRECT=0`): relay only. The lobby does not give anyone your address.
 
 To run the lobby you need Python 3.8 or newer. It uses the standard library only, so there is nothing to install.

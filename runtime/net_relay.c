@@ -473,6 +473,8 @@ static void mods_scan(void) {
 static int g_mode, g_auto, g_upnp = 1, g_list_other = 1;     /* g_list_other: online_list_other (O1) */
 static uint16_t g_host_port;                    /* HOST mode: the in-game lobby's UDP port (default 39500) */
 static char g_join[64], g_peer[256], g_stun[128] = "stun.l.google.com:19302";
+#define NET_RELAY_DEFAULT ""                            /* (2026-11-27) the project's relay (T_RLY_PING): none yet; online_relay = host:port sets one */
+static char g_relay_name[128] = NET_RELAY_DEFAULT;
 
 static void configure(void) {
     if (g_cfg >= 0) return;
@@ -512,6 +514,8 @@ static void configure(void) {
     if ((e = getenv("SSBU_ONLINE_UPNP"))) g_upnp = !is_off(e); else if (ini_value("online_upnp", v, sizeof v)) g_upnp = !is_off(v);
     if ((e = getenv("SSBU_ONLINE_STUN"))) snprintf(g_stun, sizeof g_stun, "%s", is_off(e) ? "" : e);
     else if (ini_value("online_stun", v, sizeof v)) snprintf(g_stun, sizeof g_stun, "%s", is_off(v) ? "" : v);
+    if ((e = getenv("SSBU_ONLINE_RELAY"))) snprintf(g_relay_name, sizeof g_relay_name, "%s", is_off(e) ? "" : e);         /* (2026-11-27) see T_RLY_PING */
+    else if (ini_value("online_relay", v, sizeof v)) snprintf(g_relay_name, sizeof g_relay_name, "%s", is_off(v) ? "" : v);
     if (!g_host_port && ini_value("online_port", v, sizeof v) && atoi(v) > 0 && atoi(v) < 65536) g_host_port = (uint16_t)atoi(v);
     if (!g_host_port) g_host_port = VNET_DEFAULT_PORT;
     if (g_mode == NET_MODE_JOIN && !g_join[0]) { printf("[online] join mode without a room code (SSBU_ONLINE=join:<code> or online_join): online play off\n"); fflush(stdout); return; }
@@ -743,12 +747,40 @@ static void rbn_rx_one(const uint8_t *p, int n) { AcquireSRWLockExclusive(&g_rbr
  * taken or not free: any port, punched, as before. */
 static volatile LONG g_rbf_fwd;                         /* the open second socket is on the forwarded port: wait for the rival, no openers */
 static int rbf_wanted(void) { static int v = -1; if (v < 0) { const char *e = getenv("SSBU_ONLINE_PORT2"); v = !(e && e[0] == '0'); } return v; }
+/* (2026-11-27, 1930 matches since 2026-11-22: 29 % went through the lobby at Queretaro, ~200 ms between two players of
+ * Honduras; the second port told the opponent this PC's LOCAL port, which is not the outside one behind a router that does
+ * not keep ports, an ISP's shared NAT (CGNAT) above all) THE NAT CHECK. Right after the second socket opens, rbf_probe asks two
+ * STUN servers (online_stun, default Google, and NAT_STUN_B) from it at once: the outside port each one sees.
+ *   the same port twice  -> EASY: the router keeps one outside port per socket; the opponent is told THAT port
+ *   two ports 1..64 apart -> HARD, in turn ("seq"): a new outside port per destination, handed out in order; the next one is told
+ *   farther apart          -> HARD, random
+ * The two games tell each other through the lobby (rollback message 0xF5 'N' 'A' 'T' kind u8, port to A u16, port to B u16,
+ * step i16, lobby round trip u16, relay round trip u16; an older game counts it as a bad message and goes on) and then
+ * (nat_spread) the EASY side opens its router for many of the HARD side's possible ports with short-lived packets (they die
+ * before the other router), while the HARD side sends from up to NAT_SPARES spare sockets, each with an outside port of its
+ * own: one of them is let in, and becomes the second socket. Two HARD routers: the lobby (or the relay) carries the match.
+ * online_stun = off: no NAT check (as before). */
+#define NAT_STUN_B "stun.cloudflare.com:3478"
+enum { NAT_UNKNOWN = 0, NAT_EASY = 1, NAT_HARD_SEQ = 2, NAT_HARD_RANDOM = 3 };
+typedef struct { int kind; uint32_t ip; uint16_t pa, pb; int step; } NatInfo;
+static volatile LONG g_rbf_probing;                     /* the second socket's NAT check runs: no openers, nothing told yet */
+static NatInfo g_rbf_nat, g_rbf_peer_nat;               /* (g_rbd_lock) this side's (second socket) / the opponent's, as it told */
+static volatile LONG g_rbf_peer_nat_set;                /* the opponent's NAT message came */
+static uint16_t g_rbf_tell;                             /* (g_rbd_lock) the port the opponent is told: the outside one when known */
+static volatile LONG64 g_rbf_peer_nat_at;               /* when the opponent's NAT message first came (the spread's clock) */
+static void nat_spread_tick(uint64_t t);
+static void nat_tell(uint32_t mp);
+static void nat_spares_close(void);
+static volatile LONG g_nat_spreading;                   /* the EASY side is opening its router for the HARD side's ports: not live yet */
 static void rbf_close_locked(void) {                    /* (g_rbd_lock held exclusively) */
     if (g_rbf_sock != INVALID_SOCKET) { InterlockedIncrement(&g_rbf_gen); closesocket(g_rbf_sock); g_rbf_sock = INVALID_SOCKET; }
     g_rbf_port = 0; memset(&g_rbf_at, 0, sizeof g_rbf_at);
     InterlockedExchange64(&g_rbf_last_rx, 0); InterlockedExchange64(&g_rbf_opened, 0); InterlockedExchange(&g_rbf_said, 0);
     InterlockedExchange(&g_rbf_out, 0); InterlockedExchange(&g_rbf_peer_out, 0); InterlockedExchange(&g_rbf_live, 0);
     InterlockedExchange(&g_rbf_fwd, 0);
+    InterlockedExchange(&g_rbf_probing, 0); InterlockedExchange(&g_rbf_peer_nat_set, 0); InterlockedExchange64(&g_rbf_peer_nat_at, 0);
+    memset(&g_rbf_nat, 0, sizeof g_rbf_nat); memset(&g_rbf_peer_nat, 0, sizeof g_rbf_peer_nat); g_rbf_tell = 0;
+    nat_spares_close();
 }
 static void rbf_go_live(SOCKET s, const char *why) {    /* the openers are over: normal time to live, the match's messages go there */
     if (InterlockedExchange(&g_rbf_live, 1)) return;
@@ -770,33 +802,41 @@ static void rbd_set(uint32_t peer, uint32_t ip, uint16_t port) {   /* (client th
         InterlockedExchange64(&g_rbd_first_tx, 0); InterlockedExchange64(&g_rbd_last_tx, 0); InterlockedExchange(&g_rbm_ever, 0);
         say("match: the opponent's address for a direct connection: %s:%u", ip_text(ntohl(g_rbd_at.sin_addr.s_addr), a), port); }
 }
+static void rbf_handle(SOCKET s, const uint8_t *b, int n, const struct sockaddr_in *pfrom) {     /* one datagram that came to the second socket s */
+    struct sockaddr_in from = *pfrom;
+    /* (an 8-byte packet: an opener or a hello of the opponent's spare sockets, see nat_spread: it proves the path, so it counts) */
+    if (n < 8 || b[0] != 'S' || b[1] != 'U' || b[2] != PROTO || b[3] != T_RB_DIRECT || !g_joined) return;
+    int moved = 0; uint16_t was = 0;
+    AcquireSRWLockExclusive(&g_rbd_lock);
+    int ok = g_rbf_sock == s && g_rbd_at.sin_port && from.sin_addr.s_addr == g_rbd_at.sin_addr.s_addr && g32(b + 4) == g_rbd_peer && g_rbd_peer == g_rb_match_peer;
+    if (ok && g_rbf_at.sin_port != from.sin_port) { moved = 1; was = ntohs(g_rbf_at.sin_port); g_rbf_at = from; }      /* (answered where it came from) */
+    ReleaseSRWLockExclusive(&g_rbd_lock);
+    if (!ok) return;
+    if (moved && was) say("match: second port: the opponent's packets come from port %u, not %u: answered there", ntohs(from.sin_port), was);
+    if (!g_rbf_live) rbf_go_live(s, "a message of the opponent arrived on it");
+    LONG64 t = (LONG64)ms_now();
+    InterlockedExchange64(&g_rbf_last_rx, t); InterlockedExchange64(&g_rbd_last_rx, t); InterlockedIncrement64(&g_rbf_rx); InterlockedIncrement64(&g_rbd_rx);
+    if (!g_rbf_said) { InterlockedExchange(&g_rbf_said, 1); char a[16];
+        say("match: DIRECT connection with the opponent through the SECOND PORT (%s:%u): the match no longer goes through the lobby", ip_text(ntohl(from.sin_addr.s_addr), a), ntohs(from.sin_port)); }
+    if (n == 8) return;                                 /* (an opener or a hello: no message in it) */
+    g_rb_peer = g32(b + 4);
+    rbn_rx_one(b + 8, n - 8);
+}
+static void rbf_probe(SOCKET s, LONG gen);             /* (2026-11-27) the NAT check of the second socket, see NAT_STUN_B */
 static DWORD WINAPI rbf_thread(LPVOID arg) {            /* the second socket's receiver, until the socket is replaced */
     SOCKET s = ((RbfArg *)arg)->s;
     LONG gen = ((RbfArg *)arg)->gen;
     free(arg);
     uint8_t *b = malloc(2048);
     if (!b) return 0;
+    rbf_probe(s, gen);                                  /* (first: its public port, then the openers may begin) */
     for (;;) {
         struct sockaddr_in from;
         int flen = sizeof from;
         int n = recvfrom(s, (char *)b, 2048, 0, (struct sockaddr *)&from, &flen);
         if (g_rbf_gen != gen) break;                    /* (the socket was closed: another opponent) */
         if (n < 0) { Sleep(1); continue; }              /* (the 200 ms wait ran out, or an error: never a busy loop) */
-        if (n <= 8 || b[0] != 'S' || b[1] != 'U' || b[2] != PROTO || b[3] != T_RB_DIRECT || !g_joined) continue;
-        int moved = 0; uint16_t was = 0;
-        AcquireSRWLockExclusive(&g_rbd_lock);
-        int ok = g_rbf_sock == s && g_rbd_at.sin_port && from.sin_addr.s_addr == g_rbd_at.sin_addr.s_addr && g32(b + 4) == g_rbd_peer && g_rbd_peer == g_rb_match_peer;
-        if (ok && g_rbf_at.sin_port != from.sin_port) { moved = 1; was = ntohs(g_rbf_at.sin_port); g_rbf_at = from; }      /* (answered where it came from) */
-        ReleaseSRWLockExclusive(&g_rbd_lock);
-        if (!ok) continue;
-        if (moved && was) say("match: second port: the opponent's packets come from port %u, not %u: answered there", ntohs(from.sin_port), was);
-        if (!g_rbf_live) rbf_go_live(s, "a message of the opponent arrived on it");
-        LONG64 t = (LONG64)ms_now();
-        InterlockedExchange64(&g_rbf_last_rx, t); InterlockedExchange64(&g_rbd_last_rx, t); InterlockedIncrement64(&g_rbf_rx); InterlockedIncrement64(&g_rbd_rx);
-        if (!g_rbf_said) { InterlockedExchange(&g_rbf_said, 1); char a[16];
-            say("match: DIRECT connection with the opponent through the SECOND PORT (%s:%u): the match no longer goes through the lobby", ip_text(ntohl(from.sin_addr.s_addr), a), ntohs(from.sin_port)); }
-        g_rb_peer = g32(b + 4);
-        rbn_rx_one(b + 8, n - 8);
+        rbf_handle(s, b, n, &from);
     }
     free(b);
     return 0;
@@ -822,10 +862,12 @@ static void rbf_open(void) {                            /* (client thread) the s
         if ((!fwd && bind(s, (struct sockaddr *)&a, sizeof a)) || getsockname(s, (struct sockaddr *)&a, &len)) { closesocket(s); s = INVALID_SOCKET; }
         else if (fwd) port = ntohs(a.sin_port);         /* (no openers, the normal time to live: this game answers only) */
         else {
-            int ttl = 0, tl = sizeof ttl, low = rbf_ttl();
+            int ttl = 0, tl = sizeof ttl;
             port = ntohs(a.sin_port);
             if (!getsockopt(s, IPPROTO_IP, IP_TTL, (char *)&ttl, &tl) && ttl > 0) g_rbf_ttl0 = ttl;
-            setsockopt(s, IPPROTO_IP, IP_TTL, (const char *)&low, sizeof low);      /* (the openers: see RBF_TTL) */
+            /* (2026-11-27) the short time to live of the openers (RBF_TTL) is set by rbf_probe, after the NAT check: STUN's
+             * questions must reach the servers */
+            InterlockedExchange(&g_rbf_probing, 1);
         }
     }
     RbfArg *ra = s != INVALID_SOCKET ? malloc(sizeof *ra) : NULL;
@@ -876,6 +918,9 @@ static void rbf_tick(uint64_t t) {                      /* (client thread) opens
         last_told = 0;
     }
     if (main_ok || fresh_ok) return;                    /* (a path answers: nothing to tell) */
+    if (g_rbf_probing) return;                          /* (2026-11-27) the NAT check (at most ~1 s): its outside port first */
+    AcquireSRWLockShared(&g_rbd_lock); if (g_rbf_tell) port = g_rbf_tell; ReleaseSRWLockShared(&g_rbd_lock);
+    nat_spread_tick(t);
     if (!g_rbf_live && !g_rbf_fwd) {                    /* the openers: 8 bytes (a receiver ignores them), every 100 ms, short time to live */
         static uint64_t last_opener;
         if (t - last_opener >= 100) {
@@ -888,7 +933,7 @@ static void rbf_tick(uint64_t t) {                      /* (client thread) opens
             if (sent) sendto(fs, (const char *)o, sizeof o, 0, (const struct sockaddr *)&g_rbf_at, sizeof g_rbf_at);
             ReleaseSRWLockShared(&g_rbd_lock);
             if (sent && g_rbf_out < RBF_OPENERS && InterlockedIncrement(&g_rbf_out) == RBF_OPENERS) say("match: second port: this game's openers are out");
-            if (sent && g_rbf_out >= RBF_OPENERS && g_rbf_peer_out) rbf_go_live(fs, "both games' openers are out");
+            if (sent && g_rbf_out >= RBF_OPENERS && g_rbf_peer_out && !g_nat_spreading) rbf_go_live(fs, "both games' openers are out");
         }
     }
     uint64_t every = t - (uint64_t)g_rbf_opened < 30000 ? 300 : 5000;
@@ -898,7 +943,399 @@ static void rbf_tick(uint64_t t) {                      /* (client thread) opens
     hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, mp);
     b[16] = 0xF5; b[17] = 'F'; b[18] = 'R'; b[19] = '2'; s16(b + 20, port); b[22] = g_rbf_out >= RBF_OPENERS;
     tx(b, sizeof b, &g_lobby);
+    nat_tell(mp);                                       /* (2026-11-27) and what the NAT check found, see NAT_STUN_B */
 }
+/* ---------------------------------------------------------------- the NAT check and the spread (see NAT_STUN_B) */
+static int lookup(const char *text, uint16_t default_port, struct sockaddr_in *out);
+static SOCKET udp_socket_any(void) {                    /* a UDP socket on any port, 200 ms receive wait, no reset reports */
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return s;
+    struct sockaddr_in a = {0};
+    DWORD bytes = 0; BOOL off = FALSE;
+    a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY;
+    net_set_rcvtimeo(s, 200);
+    WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
+    if (bind(s, (struct sockaddr *)&a, sizeof a)) { closesocket(s); return INVALID_SOCKET; }
+    return s;
+}
+static const char *nat_name(int k) {
+    return k == NAT_EASY ? "EASY (one outside port per socket)" : k == NAT_HARD_SEQ ? "HARD, in turn (a new outside port per destination, handed out in order)"
+         : k == NAT_HARD_RANDOM ? "HARD, random (a new outside port per destination)" : "unknown (one STUN server answered)";
+}
+/* a STUN Binding answer to the question q (RFC 5389: 0x20 XOR-MAPPED-ADDRESS, 0x01 MAPPED-ADDRESS): 1 = *ip / *port set */
+static int stun_parse(const uint8_t *r, int n, const uint8_t *q, uint32_t *ip, uint16_t *port) {
+    if (n < 20 || r[0] != 1 || r[1] != 1 || memcmp(r + 4, q + 4, 16)) return 0;
+    for (int o = 20; o + 4 <= n;) {
+        int type = g16(r + o), len = g16(r + o + 2);
+        if (o + 4 + len > n) break;
+        if ((type == 0x20 || type == 0x01) && len >= 8 && r[o + 5] == 1) {
+            *port = g16(r + o + 6); *ip = g32(r + o + 8);
+            if (type == 0x20) { *port ^= 0x2112; *ip ^= 0x2112a442u; }
+            return 1;
+        }
+        o += 4 + ((len + 3) & ~3);
+    }
+    return 0;
+}
+static int nat_servers(struct sockaddr_in *a, struct sockaddr_in *b) {     /* the two STUN servers (two addresses), looked up once */
+    static SRWLOCK lk = SRWLOCK_INIT; static int ok; static uint64_t tried; static struct sockaddr_in sa, sb;
+    AcquireSRWLockExclusive(&lk);
+    if (!ok && g_stun[0] && (!tried || ms_now() - tried > 60000)) {
+        tried = ms_now();
+        ok = lookup(g_stun, 3478, &sa) && lookup(NAT_STUN_B, 3478, &sb) && sa.sin_addr.s_addr != sb.sin_addr.s_addr;
+    }
+    if (ok) { *a = sa; *b = sb; }
+    ReleaseSRWLockExclusive(&lk);
+    return ok;
+}
+static void rbf_handle(SOCKET s, const uint8_t *b, int n, const struct sockaddr_in *pfrom);
+/* asks both servers from s at once and waits up to wait_ms for both answers (s waits at most 200 ms per receive); other
+ * datagrams that come meanwhile go to rbf_handle when s is the second socket. 1 = at least one answer. */
+static int nat_check(SOCKET s, NatInfo *ni, int wait_ms, int second) {
+    struct sockaddr_in sa, sb;
+    memset(ni, 0, sizeof *ni);
+    if (!nat_servers(&sa, &sb)) return 0;
+    uint8_t qa[20] = {0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42}, qb[20];
+    for (int i = 8; i < 20; i++) qa[i] = (uint8_t)rnd64();
+    memcpy(qb, qa, 8);
+    for (int i = 8; i < 20; i++) qb[i] = (uint8_t)rnd64();
+    uint8_t *r = malloc(2048);
+    if (!r) return 0;
+    int ga = 0, gb = 0;
+    uint32_t ipa = 0, ipb = 0;
+    uint64_t start = ms_now(), asked = 0;
+    while (!(ga && gb) && ms_now() - start < (uint64_t)wait_ms) {
+        if (ms_now() - asked >= 300) {                  /* (again every 300 ms: a lost question) */
+            asked = ms_now();
+            if (!ga) sendto(s, (const char *)qa, sizeof qa, 0, (const struct sockaddr *)&sa, sizeof sa);
+            if (!gb) sendto(s, (const char *)qb, sizeof qb, 0, (const struct sockaddr *)&sb, sizeof sb);
+        }
+        struct sockaddr_in from; int fl = sizeof from;
+        int n = recvfrom(s, (char *)r, 2048, 0, (struct sockaddr *)&from, &fl);
+        if (n <= 0) continue;
+        uint32_t ip; uint16_t port;
+        if (!ga && stun_parse(r, n, qa, &ip, &port)) { ga = 1; ipa = ip; ni->pa = port; continue; }
+        if (!gb && stun_parse(r, n, qb, &ip, &port)) { gb = 1; ipb = ip; ni->pb = port; continue; }
+        if (second) rbf_handle(s, r, n, &from);
+    }
+    free(r);
+    if (ga && gb) {
+        int d = (int)ni->pb - (int)ni->pa;
+        ni->ip = ipb; ni->step = d;
+        ni->kind = !d ? NAT_EASY : (d >= -64 && d <= 64) ? NAT_HARD_SEQ : NAT_HARD_RANDOM;
+    } else if (ga || gb) {
+        ni->ip = ga ? ipa : ipb;
+        if (!ni->pb) ni->pb = ni->pa;
+        if (!ni->pa) ni->pa = ni->pb;
+    }
+    return ga || gb;
+}
+static void rbf_probe(SOCKET s, LONG gen) {            /* (the second socket's thread, first) */
+    if (!g_rbf_probing) return;
+    NatInfo ni;
+    int got = nat_check(s, &ni, 1200, 1);
+    uint16_t local, tell = 0;
+    AcquireSRWLockExclusive(&g_rbd_lock);
+    int mine = g_rbf_sock == s && g_rbf_gen == gen;
+    local = g_rbf_port;
+    if (mine) {
+        g_rbf_nat = ni;
+        /* EASY or one answer: the outside port it saw. HARD in turn: the next one (the opponent is the next destination). */
+        if (got) tell = ni.kind == NAT_HARD_SEQ ? (uint16_t)(ni.pb + ni.step) : ni.kind == NAT_HARD_RANDOM ? 0 : ni.pb;
+        g_rbf_tell = tell;
+    }
+    ReleaseSRWLockExclusive(&g_rbd_lock);
+    if (!mine) return;
+    if (!g_rbf_live && !g_rbf_fwd) { int low = rbf_ttl(); setsockopt(s, IPPROTO_IP, IP_TTL, (const char *)&low, sizeof low); }      /* (the openers: see RBF_TTL) */
+    InterlockedExchange(&g_rbf_probing, 0);
+    char a[16];
+    if (got) say("match: NAT check of the second port (local UDP %u): %s; outside address %s, port %u toward STUN A and %u toward STUN B (%s); the opponent is told port %u",
+                 local, nat_name(ni.kind), ip_text(ni.ip, a), ni.pa, ni.pb, ni.pb == local ? "the router keeps the local port" : "NOT the local port", tell ? tell : local);
+    else say("match: NAT check of the second port: no STUN answer (online_stun = off, or blocked): the opponent is told the local port %u, as before", local);
+}
+static void nat_tell(uint32_t mp) {                     /* (client thread, with the 'F' 'R' '2' message) */
+    int relay_rtt(void);
+    if (g_rbf_probing) return;
+    NatInfo ni;
+    AcquireSRWLockShared(&g_rbd_lock); ni = g_rbf_nat; ReleaseSRWLockShared(&g_rbd_lock);
+    LONG lp = g_ping;
+    int rr = relay_rtt();
+    uint8_t b[16 + 15];
+    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, mp);
+    b[16] = 0xF5; b[17] = 'N'; b[18] = 'A'; b[19] = 'T'; b[20] = (uint8_t)ni.kind;
+    s16(b + 21, ni.pa); s16(b + 23, ni.pb); s16(b + 25, (uint16_t)(int16_t)ni.step);
+    s16(b + 27, lp >= 0 && lp < 0xffff ? (uint16_t)lp : 0xffff); s16(b + 29, rr >= 0 && rr < 0xffff ? (uint16_t)rr : 0xffff);
+    tx(b, sizeof b, &g_lobby);
+}
+static volatile LONG g_peer_lobby_rtt = -1, g_peer_relay_rtt = -1;     /* the opponent's round trips, as its NAT message said */
+static void nat_peer_rx(uint32_t src, const uint8_t *p) {      /* (client thread) the opponent's 0xF5 'N' 'A' 'T' message: p = its body */
+    NatInfo ni = {0};
+    ni.kind = p[0] <= NAT_HARD_RANDOM ? p[0] : NAT_UNKNOWN;
+    ni.pa = g16(p + 1); ni.pb = g16(p + 3); ni.step = (int16_t)g16(p + 5);
+    uint16_t lr = g16(p + 7), rr = g16(p + 9);
+    InterlockedExchange(&g_peer_lobby_rtt, lr == 0xffff ? -1 : lr); InterlockedExchange(&g_peer_relay_rtt, rr == 0xffff ? -1 : rr);
+    AcquireSRWLockExclusive(&g_rbd_lock);
+    int ok = g_rbd_at.sin_port && g_rbd_peer == src, first = 0;
+    if (ok) { ni.ip = ntohl(g_rbd_at.sin_addr.s_addr); g_rbf_peer_nat = ni; first = !g_rbf_peer_nat_set; }
+    ReleaseSRWLockExclusive(&g_rbd_lock);
+    if (!ok || !first) return;
+    InterlockedExchange64(&g_rbf_peer_nat_at, (LONG64)ms_now());
+    InterlockedExchange(&g_rbf_peer_nat_set, 1);
+    say("match: the opponent's NAT check: %s, outside ports %u / %u (step %d)", nat_name(ni.kind), ni.pa, ni.pb, ni.step);
+}
+
+/* once per session, after the lobby is joined (a socket of its own; the router's way, for the logs' statistics) */
+static DWORD WINAPI nat_session_thread(LPVOID u) {
+    (void)u;
+    SOCKET s = udp_socket_any();
+    if (s == INVALID_SOCKET) return 0;
+    struct sockaddr_in a = {0}; int len = sizeof a;
+    getsockname(s, (struct sockaddr *)&a, &len);
+    NatInfo ni; char t[16];
+    if (nat_check(s, &ni, 1500, 0))
+        say("lobby: NAT check: %s; outside address %s, port %u toward STUN A and %u toward STUN B, local port %u (%s)", nat_name(ni.kind), ip_text(ni.ip, t), ni.pa, ni.pb,
+            ntohs(a.sin_port), ni.pb == ntohs(a.sin_port) ? "kept by the router" : "changed by the router");
+    else say("lobby: NAT check: no STUN answer (online_stun = off, or blocked)");
+    closesocket(s);
+    return 0;
+}
+static void nat_session_check(void) {
+    static volatile LONG done;
+    if (!g_direct || !g_stun[0] || InterlockedExchange(&done, 1)) return;
+    HANDLE th = CreateThread(NULL, 0, nat_session_thread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
+}
+
+/* The spread. HARD against EASY (or unknown): the HARD side opens NAT_SPARES_* spare sockets that send a hello (8 bytes,
+ * RB_DIRECT + this game's lobby address) to the opponent's second port every 200 ms; each leaves its router with an outside
+ * port of its own. The EASY side meanwhile sends short-lived openers (RBF_TTL hops: they open its own router and die before
+ * the other) from its second socket to the HARD side's possible ports: around the told one, in steps, for HARD in turn;
+ * NAT_SPRAY_RANDOM random ports for HARD random. A hello that gets in reaches the EASY side's second socket (rbf_handle: it
+ * answers where it came from); its answer reaches that spare, which then becomes the second socket (nat_adopt). */
+#define NAT_SPREAD_MS 9000
+#define NAT_SPARES_SEQ 8
+#define NAT_SPARES_RANDOM 64
+#define NAT_SPRAY_RANDOM 3000
+#define NAT_SEQ_AHEAD 24                                /* HARD in turn: this many steps ahead of the told port, 24 ports each side */
+#define NAT_MAX_SPARES 64
+static SRWLOCK g_nat_sp_lock = SRWLOCK_INIT;
+static SOCKET g_nat_sp[NAT_MAX_SPARES];
+static int g_nat_nsp;
+static volatile LONG g_nat_sp_gen;
+static uint16_t *g_nat_spray;                           /* (client thread) the EASY side's list of the opponent's ports */
+static int g_nat_nspray, g_nat_spray_at;
+static void nat_spares_close(void) {
+    AcquireSRWLockExclusive(&g_nat_sp_lock);
+    InterlockedIncrement(&g_nat_sp_gen);
+    for (int i = 0; i < g_nat_nsp; i++) if (g_nat_sp[i] != INVALID_SOCKET) closesocket(g_nat_sp[i]);
+    g_nat_nsp = 0;
+    ReleaseSRWLockExclusive(&g_nat_sp_lock);
+    free(g_nat_spray); g_nat_spray = NULL; g_nat_nspray = g_nat_spray_at = 0;
+    InterlockedExchange(&g_nat_spreading, 0);
+}
+static void nat_adopt(int i, const uint8_t *b, int n, const struct sockaddr_in *from) {      /* (spares thread) spare i was answered */
+    AcquireSRWLockExclusive(&g_nat_sp_lock);
+    SOCKET s = i < g_nat_nsp ? g_nat_sp[i] : INVALID_SOCKET;
+    if (s != INVALID_SOCKET) g_nat_sp[i] = INVALID_SOCKET;
+    ReleaseSRWLockExclusive(&g_nat_sp_lock);
+    if (s == INVALID_SOCKET) return;
+    struct sockaddr_in a = {0}; int len = sizeof a;
+    getsockname(s, (struct sockaddr *)&a, &len);
+    net_set_rcvtimeo(s, 200);
+    RbfArg *ra = malloc(sizeof *ra);
+    AcquireSRWLockExclusive(&g_rbd_lock);
+    int ok = ra && g_rbd_at.sin_port && from->sin_addr.s_addr == g_rbd_at.sin_addr.s_addr && g32(b + 4) == g_rbd_peer;
+    if (ok) {                                           /* (the old second socket goes: its thread ends with the generation) */
+        if (g_rbf_sock != INVALID_SOCKET) { InterlockedIncrement(&g_rbf_gen); closesocket(g_rbf_sock); }
+        g_rbf_sock = s; g_rbf_port = ntohs(a.sin_port); g_rbf_at = *from;
+        ra->s = s; ra->gen = g_rbf_gen;
+        InterlockedExchange(&g_rbf_live, 1); InterlockedExchange(&g_rbf_probing, 0);
+    }
+    ReleaseSRWLockExclusive(&g_rbd_lock);
+    if (!ok) { free(ra); closesocket(s); return; }
+    say("match: NAT spread: spare socket %d (local UDP %u) was answered by the opponent from port %u: it is the second port now", i + 1, ntohs(a.sin_port), ntohs(from->sin_port));
+    rbf_handle(s, b, n, from);                          /* (the message in it, and the DIRECT notice) */
+    HANDLE th = CreateThread(NULL, 0, rbf_thread, ra, 0, NULL);
+    if (th) CloseHandle(th); else free(ra);
+}
+static DWORD WINAPI nat_spares_thread(LPVOID arg) {    /* receives on the spare sockets until one is answered or the spread is over */
+    LONG gen = (LONG)(intptr_t)arg;
+    uint8_t b[2048];
+    WSAPOLLFD fds[NAT_MAX_SPARES];
+    uint64_t until = ms_now() + NAT_SPREAD_MS + 4000;
+    while (g_nat_sp_gen == gen && ms_now() < until) {
+        int nf = 0, map[NAT_MAX_SPARES];
+        AcquireSRWLockShared(&g_nat_sp_lock);
+        for (int i = 0; i < g_nat_nsp; i++) if (g_nat_sp[i] != INVALID_SOCKET) { fds[nf].fd = g_nat_sp[i]; fds[nf].events = POLLRDNORM; fds[nf].revents = 0; map[nf++] = i; }
+        ReleaseSRWLockShared(&g_nat_sp_lock);
+        if (!nf) break;
+        if (WSAPoll(fds, (unsigned)nf, 50) <= 0) continue;
+        if (g_nat_sp_gen != gen) break;
+        for (int k = 0; k < nf; k++) {
+            if (!(fds[k].revents & POLLRDNORM)) continue;
+            struct sockaddr_in from; int fl = sizeof from;
+            int n = recvfrom(fds[k].fd, (char *)b, sizeof b, 0, (struct sockaddr *)&from, &fl);
+            if (n < 8 || b[0] != 'S' || b[1] != 'U' || b[2] != PROTO || b[3] != T_RB_DIRECT) continue;
+            nat_adopt(map[k], b, n, &from);
+            nat_spares_close();                         /* (the other spares: not needed) */
+            return 0;
+        }
+    }
+    return 0;
+}
+static void nat_spares_open(int count) {                /* (client thread) */
+    AcquireSRWLockExclusive(&g_nat_sp_lock);
+    if (g_nat_nsp) { ReleaseSRWLockExclusive(&g_nat_sp_lock); return; }
+    for (int i = 0; i < count && i < NAT_MAX_SPARES; i++) {
+        SOCKET s = udp_socket_any();
+        if (s == INVALID_SOCKET) break;
+        g_nat_sp[g_nat_nsp++] = s;
+    }
+    LONG gen = g_nat_sp_gen;
+    int n = g_nat_nsp;
+    ReleaseSRWLockExclusive(&g_nat_sp_lock);
+    if (!n) return;
+    HANDLE th = CreateThread(NULL, 0, nat_spares_thread, (LPVOID)(intptr_t)gen, 0, NULL);
+    if (th) CloseHandle(th);
+    say("match: NAT spread: %d spare socket(s) send hellos to the opponent's second port for %d s (this router gives every destination its own port)", n, NAT_SPREAD_MS / 1000);
+}
+static void nat_spray_list(const NatInfo *peer) {       /* (client thread) the opponent's possible outside ports */
+    free(g_nat_spray); g_nat_spray = NULL; g_nat_nspray = g_nat_spray_at = 0;
+    int cap = peer->kind == NAT_HARD_SEQ ? (NAT_SEQ_AHEAD + 1) * 49 : NAT_SPRAY_RANDOM;
+    uint16_t *l = malloc(sizeof *l * (size_t)cap);
+    if (!l) return;
+    int n = 0;
+    if (peer->kind == NAT_HARD_SEQ) {                   /* (each step ahead of the port it saw last, 24 ports each side of it) */
+        static uint8_t seen[65536 / 8];
+        memset(seen, 0, sizeof seen);
+        for (int k = 1; k <= NAT_SEQ_AHEAD; k++)
+            for (int w = -24; w <= 24 && n < cap; w++) {
+                int p = (int)peer->pb + k * peer->step + w;
+                if (p < 1 || p > 65535 || seen[p >> 3] & (1 << (p & 7))) continue;
+                seen[p >> 3] |= (uint8_t)(1 << (p & 7)); l[n++] = (uint16_t)p;
+            }
+    } else
+        for (; n < cap; n++) l[n] = (uint16_t)(1024 + rnd64() % (65536 - 1024));
+    g_nat_spray = l; g_nat_nspray = n;
+}
+static void nat_spread_tick(uint64_t t) {               /* (client thread, rbf_tick: no path answers, the NAT check is over) */
+    static LONG said_gen = -1, spray_gen = -1;
+    static uint64_t last_hello, last_spray;
+    LONG gen = g_rbf_gen;
+    NatInfo me, peer; SOCKET s; struct sockaddr_in at;
+    AcquireSRWLockShared(&g_rbd_lock);
+    me = g_rbf_nat; peer = g_rbf_peer_nat; s = g_rbf_sock; at = g_rbf_at;
+    ReleaseSRWLockShared(&g_rbd_lock);
+    if (s == INVALID_SOCKET || !at.sin_port) return;
+    int me_hard = me.kind >= NAT_HARD_SEQ, peer_set = g_rbf_peer_nat_set, peer_hard = peer_set && peer.kind >= NAT_HARD_SEQ;
+    uint64_t since = peer_set ? t - (uint64_t)g_rbf_peer_nat_at : t - (uint64_t)g_rbf_opened;
+    if (me_hard && peer_hard) {
+        if (said_gen != gen) { said_gen = gen; say("match: NAT: both routers give every destination its own port: no direct path is likely; the match goes through the lobby or the relay"); }
+        return;
+    }
+    if (!me_hard && peer_hard) {                        /* the EASY side: its router is opened for the opponent's ports */
+        if (g_rbf_live || since > NAT_SPREAD_MS) { InterlockedExchange(&g_nat_spreading, 0); return; }
+        if (spray_gen != gen) {
+            spray_gen = gen; nat_spray_list(&peer);
+            if (!g_nat_spray) return;
+            say("match: NAT spread: the opponent's router is HARD, this one is not: short-lived openers toward %d of its possible ports for %d s", g_nat_nspray, NAT_SPREAD_MS / 1000);
+        }
+        InterlockedExchange(&g_nat_spreading, 1);
+        if (!g_nat_spray || t - last_spray < 100) return;
+        last_spray = t;
+        uint8_t o[8];
+        hdr(o, T_RB_DIRECT); s32(o + 4, g_ip);
+        struct sockaddr_in to = at;
+        int chunk = g_nat_nspray / 10 + 1;              /* (the whole list once a second) */
+        for (int k = 0; k < chunk; k++) {
+            to.sin_port = htons(g_nat_spray[g_nat_spray_at]);
+            sendto(s, (const char *)o, sizeof o, 0, (const struct sockaddr *)&to, sizeof to);
+            if (++g_nat_spray_at >= g_nat_nspray) g_nat_spray_at = 0;
+        }
+        return;
+    }
+    if (me_hard && (peer_set || since > 3000)) {        /* the HARD side (an older opponent never says: after 3 s anyway) */
+        if (since > NAT_SPREAD_MS + 3000 || (g_rbf_live && g_rbf_last_rx && t - (uint64_t)g_rbf_last_rx < RBD_STALE_MS)) return;
+        nat_spares_open(me.kind == NAT_HARD_SEQ ? NAT_SPARES_SEQ : NAT_SPARES_RANDOM);
+        if (since < 400 || t - last_hello < 200) return;      /* (the EASY side's openers first) */
+        last_hello = t;
+        uint8_t o[8];
+        hdr(o, T_RB_DIRECT); s32(o + 4, g_ip);
+        AcquireSRWLockShared(&g_nat_sp_lock);
+        for (int i = 0; i < g_nat_nsp; i++) if (g_nat_sp[i] != INVALID_SOCKET) sendto(g_nat_sp[i], (const char *)o, sizeof o, 0, (const struct sockaddr *)&at, sizeof at);
+        ReleaseSRWLockShared(&g_nat_sp_lock);
+    }
+}
+
+/* (2026-11-27) THE RELAY. A match that no direct path carries went through the lobby at Queretaro: ~90 ms from Honduras each
+ * way, ~200 ms between two players there. A relay closer to them (online_relay = host:port, SSBU_ONLINE_RELAY; tools/net/
+ * ssbu_relay.py) carries the rollback messages instead when it is the shorter way for BOTH players: each game measures its
+ * round trip to the relay (RLY_PING every 2 s) and to the lobby (PING), the NAT message tells the opponent's, and the
+ * relay is used when (mine + the opponent's) through it is at least RELAY_GAIN_MS shorter than through the lobby; both
+ * games decide alike. 1 message in 30 still goes through the lobby (the room sees the match). Wire (UDP, big-endian):
+ *   60 RLY_PING  client: time u64                     61 RLY_PONG relay: time u64
+ *   62 RLY_REG   client: lobby ip u32, mine u32, the opponent's u32   (every second while used: the relay notes this sender)
+ *   63 RLY_DATA  both:   lobby ip u32, from u32, to u32, rollback message   (the relay passes it to the "to" player's sender)
+ * The relay knows nothing else: it pairs the senders of one (lobby, a, b) and drops what it cannot pair. */
+#define T_RLY_PING 60
+#define T_RLY_PONG 61
+#define T_RLY_REG 62
+#define T_RLY_DATA 63
+#define RELAY_GAIN_MS 15
+int net_rb_direct(void);
+static struct sockaddr_in g_relay;                      /* sin_port 0 = no relay (not set, or not found) */
+static volatile LONG g_relay_rtt_ms = -1, g_relay_used;
+static volatile LONG64 g_relay_last_pong, g_relay_tx, g_relay_rx;
+int relay_rtt(void) { return g_relay.sin_port && g_relay_last_pong && ms_now() - (uint64_t)g_relay_last_pong < 6000 ? g_relay_rtt_ms : -1; }
+static DWORD WINAPI relay_lookup_thread(LPVOID u) {
+    (void)u;
+    struct sockaddr_in a;
+    if (lookup(g_relay_name, 39600, &a)) { char t[24]; g_relay = a; say("relay: %s = %s (used when it is the shorter way for both players of a match)", g_relay_name, at_text(&a, t)); }
+    else say("relay: %s not found: matches without a direct path go through the lobby", g_relay_name);
+    return 0;
+}
+static int relay_from(const struct sockaddr_in *from) { return g_relay.sin_port && same_at(from, &g_relay); }
+static int relay_better(void) {                         /* both games compute the same from the same four numbers */
+    int a = relay_rtt(), b = g_peer_relay_rtt, c = g_ping, d = g_peer_lobby_rtt;
+    return a >= 0 && b >= 0 && c >= 0 && d >= 0 && a + b + RELAY_GAIN_MS < c + d;
+}
+static void relay_tick(uint64_t t) {                    /* (client thread, joined) */
+    static uint64_t last_ping, last_reg;
+    static int started;
+    if (!g_relay_name[0]) return;
+    if (!started) { started = 1; HANDLE th = CreateThread(NULL, 0, relay_lookup_thread, NULL, 0, NULL); if (th) CloseHandle(th); }
+    if (!g_relay.sin_port) return;
+    if (t - last_ping >= 2000) { uint8_t p[12]; hdr(p, T_RLY_PING); s64(p + 4, t); last_ping = t; tx(p, sizeof p, &g_relay); }
+    uint32_t mp = g_rb_match_peer;
+    int use = mp && !net_rb_direct() && relay_better() && t - (uint64_t)g_rbd_last_tx < 2000;
+    if (use != (int)g_relay_used) {
+        InterlockedExchange(&g_relay_used, use);
+        say(use ? "relay: the match goes through the relay %s (round trips: relay %d + %d ms, lobby %d + %d ms)" : "relay: the match no longer goes through the relay %s (%d + %d / %d + %d ms)",
+            g_relay_name, relay_rtt(), (int)g_peer_relay_rtt, (int)g_ping, (int)g_peer_lobby_rtt);
+    }
+    if (use && t - last_reg >= 1000) {
+        uint8_t p[16]; hdr(p, T_RLY_REG); s32(p + 4, ntohl(g_lobby.sin_addr.s_addr)); s32(p + 8, g_ip); s32(p + 12, mp);
+        last_reg = t; tx(p, sizeof p, &g_relay);
+    }
+}
+static int relay_send(uint32_t dst, const void *msg, int n) {  /* 1 = sent through the relay */
+    if (!g_relay_used || !g_relay.sin_port || dst != g_rb_match_peer || n > 1400) return 0;
+    uint8_t b[1500];
+    hdr(b, T_RLY_DATA); s32(b + 4, ntohl(g_lobby.sin_addr.s_addr)); s32(b + 8, g_ip); s32(b + 12, dst);
+    memcpy(b + 16, msg, (size_t)n);
+    tx(b, 16 + n, &g_relay); InterlockedIncrement64(&g_relay_tx);
+    return 1;
+}
+static void relay_rx(const uint8_t *b, int n) {         /* (client thread) a datagram of the relay */
+    if (b[3] == T_RLY_PONG && n >= 12) { uint64_t t = ms_now(), sent = g64(b + 4); if (sent <= t) { InterlockedExchange(&g_relay_rtt_ms, (LONG)(t - sent)); InterlockedExchange64(&g_relay_last_pong, (LONG64)t); } return; }
+    if (b[3] != T_RLY_DATA || n <= 16 || !g_joined) return;
+    uint32_t from = g32(b + 8), to = g32(b + 12);
+    if (to != g_ip || !from || from != g_rb_match_peer) return;
+    InterlockedIncrement64(&g_relay_rx);
+    g_rb_peer = from;
+    rbn_rx_one(b + 16, n - 16);
+}
+
 static void rbd_rx(const uint8_t *b, int n, const struct sockaddr_in *from) {      /* (client thread) RB_DIRECT */
     if (n <= 8 || !g_joined) return;
     AcquireSRWLockShared(&g_rbd_lock);
@@ -944,6 +1381,10 @@ int net_rb_send(const void *p, int n) {
             static unsigned keep;                       /* (the other way works too: the lobby is not needed; 1 in 30 still goes through it, so the */
             if (net_rb_direct() && ++keep % 30) return 1;   /* room sees the match being played: net_minilobby.c rb_seen / ml_arena_playing) */
         }
+    }
+    if (relay_send(dst, p, n)) {                        /* (2026-11-27) the relay is the shorter way: 1 in 30 still through the lobby */
+        static unsigned rk;
+        if (++rk % 30) return 1;
     }
     hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
     memcpy(b + 16, p, (size_t)n);
@@ -2548,10 +2989,12 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         if (g_joined) hall_tick(t);                                                                       /* hall (lobby 1.9) */
         if (g_joined) arena_tick(t);                                                                      /* arena (lobby 1.6) */
         if (g_joined) rbf_tick(t);                                                                        /* the second port of a rollback match */
+        if (g_joined && g_mode == NET_MODE_LOBBY) relay_tick(t);                                           /* (2026-11-27) the relay */
         struct sockaddr_in from;
         int flen = sizeof from;
         int n = recvfrom(g_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
         if (n < 4 || buf[0] != 'S' || buf[1] != 'U' || buf[2] != PROTO) continue;
+        if (relay_from(&from)) { relay_rx(buf, n); continue; }          /* (2026-11-27) the relay */
         if (!same_at(&from, &g_lobby)) { if (buf[3] == T_RB_DIRECT) rbd_rx(buf, n, &from); else if (g_joined && g_direct) from_player(buf, n, &from); continue; }
         switch (buf[3]) {
         case T_DATA:
@@ -2570,6 +3013,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             {   static int shown; const char *ssbu_version(void);      /* the version on screen once, to compare with the others' */
                 if (!g_joined && !shown) { char t[96]; shown = 1; snprintf(t, sizeof t, "Version %s", ssbu_version()); menu_popup("Online: connected", t); } }
             InterlockedExchange(&g_joined, 1);
+            if (g_mode == NET_MODE_LOBBY) nat_session_check();      /* (2026-11-27) the router's way, once (see NAT_STUN_B) */
             if (n > 24) {                              /* (ladder: an unknown id signs up at once; a copied one, with its new identity) */
                 int reg = g_ld_registered, copied = n - 24 >= 3 && buf[24] == 'L' && buf[25] == 'D' && buf[26] == 3;
                 ladder_welcome(buf + 24, n - 24);
@@ -2639,6 +3083,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             if (n > 8 && g_joined) { uint32_t src = g32(buf + 4), mp = g_rb_match_peer;
                 if (mp && src != mp && !nnldn_other_ip()) { InterlockedIncrement64(&g_rb_rx_other); break; }     /* (R3 net3) not our opponent */
                 if (src && src != g_ip && n == 8 + 7 && buf[8] == 0xF5 && buf[9] == 'F' && buf[10] == 'R' && buf[11] == '2') { rbf_peer_port(src, g16(buf + 12), buf[14]); break; }      /* (the opponent's second port) */
+                if (src && src != g_ip && n == 8 + 15 && buf[8] == 0xF5 && buf[9] == 'N' && buf[10] == 'A' && buf[11] == 'T') { nat_peer_rx(src, buf + 12); break; }      /* (2026-11-27: its NAT check) */
                 if (src && src != g_ip) { g_rb_peer = src; InterlockedIncrement64(&g_rbl_rx); rbn_rx_one(buf + 8, n - 8); } }
             break;
         }
