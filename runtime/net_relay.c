@@ -1268,8 +1268,8 @@ static void nat_spread_tick(uint64_t t) {               /* (client thread, rbf_t
 }
 
 /* (2026-11-27) THE RELAY. A match that no direct path carries went through the lobby at Queretaro: ~90 ms from Honduras each
- * way, ~200 ms between two players there. A relay closer to them (online_relay = host:port, SSBU_ONLINE_RELAY; tools/net/
- * ssbu_relay.py) carries the rollback messages instead when it is the shorter way for BOTH players: each game measures its
+ * way, ~200 ms between two players there. A relay closer to them (online_relay = host:port, SSBU_ONLINE_RELAY;
+ * tools/net/ssbu_relay_v2.py, docs/RELAY.md) carries the rollback messages instead when it is the shorter way for BOTH players: each game measures its
  * round trip to the relay (RLY_PING every 2 s) and to the lobby (PING), the NAT message tells the opponent's, and the
  * relay is used when (mine + the opponent's) through it is at least RELAY_GAIN_MS shorter than through the lobby; both
  * games decide alike. 1 message in 30 still goes through the lobby (the room sees the match). Wire (UDP, big-endian):

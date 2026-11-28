@@ -1,110 +1,156 @@
 #!/usr/bin/env python3
-"""The relay of online rollback matches (runtime/net_relay.c, T_RLY_PING).
+"""ssbu_relay.py: a relay for online rollback matches, on a machine near the players (2026-11-05).
 
-A match that no direct path carries goes through the lobby (Oracle, Queretaro): ~90 ms each way from Honduras. This relay,
-run close to the players (Miami: ~30 ms from Honduras), carries the rollback messages of such a match instead, when both
-games find it the shorter way. It knows nothing of the lobby: it pairs the senders of one (lobby, a, b) and passes their
-messages to each other.
+The central lobby (ssbu_lobby.py, Oracle VM in Querétaro) pairs the players; a match that cannot go player to player went
+through that VM (~80 ms from each player: ~157 ms round trip). This relay, on a machine nearer the players (the owner's
+mini PC: ~45 ms from them), carries such a match's messages instead. It never sees anything but those messages.
 
-Wire (UDP, big-endian; every packet starts 'S' 'U' 1 <type>):
-  60 RLY_PING  client: time u64                      -> 61 RLY_PONG: the same time u64
-  62 RLY_REG   client: lobby ip u32, mine u32, the opponent's u32  (every second while used: notes the sender's address)
-  63 RLY_DATA  both:   lobby ip u32, from u32, to u32, rollback message
-                       (passed as it came to the address "to" registered for (lobby, to, from); dropped otherwise)
+  - Every 10 s it tells the lobby it is up: RELAY_HB (32) = unix time u64, public port u16, LAN address u32, LAN port u16,
+    signed with the shared key (the first 16 bytes of HMAC-SHA256). The lobby takes the relay's public address from where it
+    comes, so a home connection whose address changes needs nothing more.
+  - The lobby gives both games of a match the relay's address, a match id and its tag (HMAC of the id). A game sends:
+        RELAY (33): 'S' 'U' 1 33 | match id u64 | tag u64 | its lobby address u32 | kind u8 | data
+    kind 0 (hello): echoed back to the sender as 'S' 'U' 1 33 | 0 u32 | 0 | data (its round trip to the relay);
+    kind 1 / 2 (a rollback message / path info): sent to the other game of the same match id as
+        'S' 'U' 1 33 | sender's lobby address u32 | kind | data.
+    A packet whose tag is wrong is dropped: only the lobby's matches use the relay. At most 2 games per match id, the first
+    two seen; a match unheard of for 120 s is forgotten. At most 300 packets per second per match id.
 
-Run:  python3 ssbu_relay.py [--port 39600]      (a systemd unit: see docs/RELAY.md)
+Run: python3 ssbu_relay.py --lobby 160.34.219.118:39500 --secret-file /etc/ssbu-relay.key [--port 39500]
+The router must forward UDP --port to this machine. SPDX-License-Identifier: GPL-3.0-or-later
 """
 import argparse
-import asyncio
-import logging
+import hashlib
+import hmac
+import select
+import socket
 import struct
+import sys
 import time
 
-T_PING, T_PONG, T_REG, T_DATA = 60, 61, 62, 63
-EXPIRE_S = 30            # a registration not renewed for this long is dropped
-MAX_PER_S = 1500         # datagrams per second from one address (a match sends ~120); more are dropped
-MAX_LEN = 1500
-
-log = logging.getLogger('relay')
+PROTO, RELAY_HB, RELAY = 1, 32, 33
+HB_EVERY, FORGET_AFTER, RATE_MAX = 10.0, 120.0, 300
 
 
-class Relay(asyncio.DatagramProtocol):
-    def __init__(self):
-        self.reg = {}            # (lobby, mine, other) -> (address, last time)
-        self.rate = {}           # address -> [window start, count]
-        self.stats = dict(ping=0, reg=0, data=0, passed=0, dropped=0)
-        self.transport = None
-
-    def connection_made(self, transport):
-        self.transport = transport
-
-    def allowed(self, addr, now):
-        r = self.rate.get(addr)
-        if not r or now - r[0] >= 1.0:
-            self.rate[addr] = [now, 1]
-            return True
-        r[1] += 1
-        return r[1] <= MAX_PER_S
-
-    def datagram_received(self, data, addr):
-        now = time.monotonic()
-        if len(data) < 4 or len(data) > MAX_LEN or data[0:3] != b'SU\x01' or not self.allowed(addr, now):
-            return
-        t = data[3]
-        if t == T_PING and len(data) >= 12:
-            self.stats['ping'] += 1
-            self.transport.sendto(b'SU\x01' + bytes([T_PONG]) + data[4:12], addr)
-        elif t == T_REG and len(data) >= 16:
-            lobby, mine, other = struct.unpack('>III', data[4:16])
-            if not mine or not other or mine == other:
-                return
-            key = (lobby, mine, other)
-            old = self.reg.get(key)
-            if not old or old[0] != addr:
-                log.info('registered %s: lobby %s, %s -> %s', addr, ip(lobby), ip(mine), ip(other))
-            self.reg[key] = (addr, now)
-            self.stats['reg'] += 1
-        elif t == T_DATA and len(data) > 16:
-            self.stats['data'] += 1
-            lobby, frm, to = struct.unpack('>III', data[4:16])
-            me = self.reg.get((lobby, frm, to))
-            dst = self.reg.get((lobby, to, frm))
-            if not me or me[0] != addr or not dst or now - dst[1] > EXPIRE_S:
-                self.stats['dropped'] += 1        # (the sender is not the registered one, or the other side is not here)
-                return
-            self.reg[(lobby, frm, to)] = (addr, now)
-            self.transport.sendto(data, dst[0])
-            self.stats['passed'] += 1
-
-    def sweep(self):
-        now = time.monotonic()
-        for k in [k for k, v in self.reg.items() if now - v[1] > EXPIRE_S]:
-            del self.reg[k]
-        for a in [a for a, r in self.rate.items() if now - r[0] > 10]:
-            del self.rate[a]
+def tag_of(secret, match_id):
+    return hmac.new(secret, b"m" + struct.pack(">Q", match_id), hashlib.sha256).digest()[:8]
 
 
-def ip(v):
-    return '%d.%d.%d.%d' % (v >> 24, v >> 16 & 255, v >> 8 & 255, v & 255)
-
-
-async def main(port):
-    loop = asyncio.get_running_loop()
-    transport, relay = await loop.create_datagram_endpoint(Relay, local_addr=('0.0.0.0', port))
-    log.info('relay on UDP %d', port)
+def lan_address(lobby):
+    """the address this machine reaches the lobby from (its LAN address behind a router)"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        while True:
-            await asyncio.sleep(60)
-            relay.sweep()
-            log.info('last minute: %s; pairs registered %d', relay.stats, len(relay.reg) // 2)
-            relay.stats = dict.fromkeys(relay.stats, 0)
+        s.connect(lobby)
+        return s.getsockname()[0]
+    except OSError:
+        return "0.0.0.0"
     finally:
-        transport.close()
+        s.close()
 
 
-if __name__ == '__main__':
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--port', type=int, default=39600)
-    a = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
-    asyncio.run(main(a.port))
+class Relay:
+    def __init__(self, sock, secret, verbose=False):
+        self.sock, self.secret, self.verbose = sock, secret, verbose
+        self.matches = {}         # match id -> {"games": {lobby ip: (addr, port)}, "seen": t, "n": packets this second, "sec": int}
+        self.ok_tags = {}         # match id -> tag already checked
+        self.stats = {"forwarded": 0, "hellos": 0, "bad tag": 0, "third game": 0, "rate": 0, "short": 0}
+
+    def say(self, *what):
+        print(time.strftime("%H:%M:%S"), *what, flush=True)
+
+    def packet(self, p, at, now):
+        if len(p) < 25 or p[:2] != b"SU" or p[2] != PROTO or p[3] != RELAY:
+            self.stats["short"] += 1
+            return
+        mid, tag, src, kind = struct.unpack_from(">Q8sIB", p, 4)
+        if self.ok_tags.get(mid) != tag:
+            if not hmac.compare_digest(tag_of(self.secret, mid), tag):
+                self.stats["bad tag"] += 1
+                return
+            self.ok_tags[mid] = tag
+        m = self.matches.get(mid)
+        if m is None:
+            m = self.matches[mid] = {"games": {}, "seen": now, "n": 0, "sec": int(now)}
+            if self.verbose:
+                self.say("match %016x: first game %s from %s:%d" % (mid, socket.inet_ntoa(struct.pack(">I", src)), *at))
+        m["seen"] = now
+        if int(now) != m["sec"]:
+            m["sec"], m["n"] = int(now), 0
+        m["n"] += 1
+        if m["n"] > RATE_MAX:
+            self.stats["rate"] += 1
+            return
+        games = m["games"]
+        if src not in games and len(games) >= 2:
+            self.stats["third game"] += 1
+            return
+        games[src] = at
+        data = p[25:]
+        if kind == 0:
+            self.stats["hellos"] += 1
+            self.sock.sendto(b"SU" + bytes([PROTO, RELAY]) + struct.pack(">IB", 0, 0) + data[:16], at)
+            return
+        out = b"SU" + bytes([PROTO, RELAY]) + struct.pack(">IB", src, kind) + data
+        for ip, to in games.items():
+            if ip != src:
+                self.sock.sendto(out, to)
+                self.stats["forwarded"] += 1
+
+    def sweep(self, now):
+        for mid in [k for k, m in self.matches.items() if now - m["seen"] > FORGET_AFTER]:
+            del self.matches[mid]
+            self.ok_tags.pop(mid, None)
+
+    def heartbeat(self, lobby, public_port, lan_ip, lan_port):
+        body = struct.pack(">QHIH", int(time.time()), public_port, struct.unpack(">I", socket.inet_aton(lan_ip))[0], lan_port)
+        self.sock.sendto(b"SU" + bytes([PROTO, RELAY_HB]) + body + hmac.new(self.secret, body, hashlib.sha256).digest()[:16], lobby)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--bind", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=39500, help="UDP port (the router forwards it here; default 39500)")
+    ap.add_argument("--public-port", type=int, default=0, help="the port the router forwards (default: --port)")
+    ap.add_argument("--lobby", default="160.34.219.118:39500", help="the central lobby host:port")
+    ap.add_argument("--secret-file", required=True, help="the key shared with the lobby (its --relay-secret)")
+    ap.add_argument("--stats", type=float, default=60.0, help="seconds between statistics lines (0: none)")
+    ap.add_argument("--verbose", action="store_true")
+    o = ap.parse_args()
+    with open(o.secret_file, "rb") as f:
+        secret = f.read().strip()
+    if len(secret) < 16:
+        sys.exit("the key in %s is too short (at least 16 characters)" % o.secret_file)
+    host, _, port = o.lobby.rpartition(":")
+    lobby = (socket.gethostbyname(host), int(port))
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((o.bind, o.port))
+    relay = Relay(sock, secret, o.verbose)
+    lan_ip = lan_address(lobby)
+    relay.say("relay on UDP %s:%d, lobby %s:%d, LAN address %s" % (o.bind, o.port, lobby[0], lobby[1], lan_ip))
+    last_hb = last_sweep = last_stats = 0.0
+    while True:
+        r, _, _ = select.select([sock], [], [], 0.5)
+        now = time.monotonic()
+        if r:
+            try:
+                p, at = sock.recvfrom(2048)
+            except OSError:
+                continue
+            if at != lobby:
+                relay.packet(p, at, now)
+        if now - last_hb >= HB_EVERY:
+            last_hb = now
+            try:
+                relay.heartbeat(lobby, o.public_port or o.port, lan_ip, o.port)
+            except OSError as e:
+                relay.say("heartbeat to the lobby failed: %s" % e)
+        if now - last_sweep >= 10:
+            last_sweep = now
+            relay.sweep(now)
+        if o.stats and now - last_stats >= o.stats:
+            last_stats = now
+            relay.say("stats: %d match(es), %s" % (len(relay.matches), ", ".join("%s %d" % kv for kv in relay.stats.items())))
+
+
+if __name__ == "__main__":
+    main()
