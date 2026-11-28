@@ -528,9 +528,12 @@ int dm_arena_own_seat(int server_seat) {
         {   wchar_t w[17]; for (uint32_t k = 0; k < len; k++) { uint16_t c; memcpy(&c, h + 0xc + 2 * k, 2); w[k] = (wchar_t)c; } w[len] = 0;
             char u[64]; WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof u, NULL, NULL);
             if (nl < (int)sizeof names - 80) nl += snprintf(names + nl, sizeof names - nl, "%s%d %s", nl ? ", " : "", i, u); }
-        /* the arena shows at most 10 characters of a nickname: a longer one matches by its first 10 */
-        int cmp = n < 10 ? n : 10;
-        if (!(len == (uint32_t)n || (n > 10 && len == 10))) continue;
+        /* the arena shows a long nickname cut short: it matches by the characters shown. (2026-11-28) not always 10 of them:
+         * "thelordsoto13" stood as "thelordsoto" (11) in arena 1118, was "found 0 time(s)", the server's seat 2 (a member
+         * that had left still counted) made the owner a spectator, Mario waited alone for seat 1 and the match fell back to
+         * the game's own netcode. Any cut from 10 characters on counts now. */
+        int cmp = (int)len < n ? (int)len : n;
+        if (!(len == (uint32_t)n || (n > 10 && len >= 10 && len < (uint32_t)n))) continue;
         int same = 1; for (int k = 0; k < cmp; k++) { uint16_t c; memcpy(&c, h + 0xc + 2 * k, 2); if (c != (uint16_t)me[k]) { same = 0; break; } }
         if (!same) continue;
         hits++; found = i; if (i == server_seat) server_ok = 1;
